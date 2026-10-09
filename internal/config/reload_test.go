@@ -36,6 +36,8 @@ func TestChangesClassifiesEachMember(t *testing.T) {
 		{"queue bound", func(d *Document) { d.Limits.MaxQueuedMessages = 3 }, []string{"/limits/maxQueuedMessages"}, nil},
 		{"module member", func(d *Document) { d.Modules["auth.file"] = json.RawMessage(`{"path":"/etc/other"}`) },
 			[]string{"/modules/auth.file/path"}, []string{"/modules/auth.file/path"}},
+		{"module order", func(d *Document) { d.Hooks.Order = []string{"auth.file"} },
+			[]string{"/hooks/order"}, []string{"/hooks/order"}},
 		{"mixed", func(d *Document) { d.Log.Level = "debug"; d.Cluster.Replicas = 3 },
 			[]string{"/cluster/replicas", "/log/level"}, []string{"/cluster/replicas"}},
 	} {

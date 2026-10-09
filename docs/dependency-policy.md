@@ -19,7 +19,15 @@ the reasoning live together.
   as test-only clients. Extensions may carry their own dependencies under the
   same families (for example `franz-go`, BSD-3, for Kafka).
 - **No third-party cryptography.**
-- **In use (2026-09-03):** `go.etcd.io/raft/v3` v3.7.0 (Apache-2.0) and its runtime dependency `google.golang.org/protobuf` v1.36.11 (BSD-3) are compiled into the binary and listed in NOTICE; `paho.golang`, `paho.mqtt.golang` and their transitive modules are test-only.
+- **In use:**
+  - compiled into the binary and listed in NOTICE:
+    - `go.etcd.io/raft/v3` v3.7.0 (Apache-2.0) and its runtime dependency `google.golang.org/protobuf` v1.36.11
+      (BSD-3), since 2026-09-03;
+    - since 2026-10-09, the Kafka forwarder `sink.kafka` (`modules/sinkkafka`) brings `github.com/twmb/franz-go`
+      v1.22.1 and `github.com/twmb/franz-go/pkg/kmsg` v1.14.0 (BSD-3), `github.com/klauspost/compress` v1.20.0
+      (BSD-3, with Apache-2.0 and MIT parts) and `github.com/pierrec/lz4/v4` v4.1.30 (BSD-3). Their cryptography is
+      the standard library's, so the FIPS-track build is still `-tags fips`;
+  - test-only: `paho.golang`, `paho.mqtt.golang` and their transitive modules.
 
 ## Gates
 

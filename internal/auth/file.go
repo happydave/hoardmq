@@ -24,7 +24,7 @@ type FileAuthenticator struct {
 	mu    sync.RWMutex
 	users map[string]fileUser
 	// Cache answers a repeated verification without deriving; nil derives.
-	Cache *VerifyCache
+	Cache Verifier
 }
 
 type fileUser struct {
@@ -99,7 +99,7 @@ func (f *FileAuthenticator) Authenticate(_ context.Context, req *Request) Result
 	if !ok {
 		return Result{Decision: Pass}
 	}
-	match, err := f.Cache.Verify(u.Password, req.Password)
+	match, err := verifyWith(f.Cache, u.Password, req.Password)
 	if errors.Is(err, ErrArgon2Budget) {
 		return Result{Decision: Deny, Reason: "file: " + ErrArgon2Budget.Error()}
 	}

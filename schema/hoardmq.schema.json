@@ -24,6 +24,9 @@
       "description": "Module configuration, nested under the module identifier.",
       "type": "object",
       "propertyNames": { "pattern": "^[a-z]+\\.[a-z0-9]+$" },
+      "properties": {
+        "sink.kafka": { "$ref": "#/$defs/sinkKafka" }
+      },
       "additionalProperties": { "type": "object" }
     },
     "log": { "$ref": "#/$defs/log" },
@@ -36,6 +39,95 @@
     "admin": { "$ref": "#/$defs/admin" }
   },
   "$defs": {
+    "sinkKafka": {
+      "description": "The Kafka forwarder: every publish this node accepts on a topic a route matches is produced to the route's Kafka topic. MQTT to Kafka only.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["brokers", "routes"],
+      "properties": {
+        "brokers": {
+          "description": "Kafka bootstrap brokers, host:port.",
+          "type": "array", "items": { "type": "string", "minLength": 1 }
+        },
+        "clientId": {
+          "description": "The Kafka client identifier. Default hoardmq-<node name>, or hoardmq without one.",
+          "type": "string"
+        },
+        "tls": {
+          "description": "TLS to the brokers; the server certificate is always verified.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "caFile": { "description": "PEM CA certificates; default the system pool.", "type": "string" },
+            "certFile": { "description": "PEM client certificate; give keyFile too.", "type": "string" },
+            "keyFile": { "description": "PEM client key; give certFile too.", "type": "string" },
+            "serverName": { "description": "The name the server certificate must carry, when not the broker's host.", "type": "string" }
+          }
+        },
+        "sasl": {
+          "description": "SASL authentication to the brokers.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mechanism", "username", "passwordFile"],
+          "properties": {
+            "mechanism": { "type": "string", "enum": ["plain", "scram-sha-256", "scram-sha-512"] },
+            "username": { "type": "string", "minLength": 1 },
+            "passwordFile": { "description": "A file holding the password; one trailing newline is ignored. The password is never logged.", "type": "string", "minLength": 1 }
+          }
+        },
+        "routes": {
+          "description": "Where messages go. A message is produced once to each distinct Kafka topic among the routes it matches; for a topic named twice, the first matching route decides.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["filter", "topic"],
+            "properties": {
+              "filter": { "description": "An MQTT topic filter, not a shared one.", "type": "string", "minLength": 1 },
+              "topic": { "description": "The Kafka topic: 1 to 249 of A-Z, a-z, 0-9, '.', '_' and '-'.", "type": "string", "pattern": "^[A-Za-z0-9._-]{1,249}$" },
+              "key": {
+                "description": "The record key: the MQTT topic (default), the publisher's client identifier, the user property keyProperty names, or none.",
+                "type": "string", "enum": ["topic", "clientId", "userProperty", "none"]
+              },
+              "keyProperty": { "description": "The user property whose value is the key, with key userProperty.", "type": "string", "minLength": 1 },
+              "namespace": { "description": "The namespace whose messages the route matches. Default the node's default namespace.", "type": "string" }
+            }
+          }
+        },
+        "headers": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "metadata": { "description": "Write the mqtt.* headers (topic, QoS, source, client identifier and the MQTT 5 properties that are set). Default true.", "type": "boolean" },
+            "userProperties": { "description": "Write each MQTT 5 user property as a header, in order. Default true.", "type": "boolean" }
+          }
+        },
+        "acks": {
+          "description": "all (default; the idempotent producer) or leader.",
+          "type": "string", "enum": ["all", "leader"]
+        },
+        "compression": {
+          "description": "Default none.",
+          "type": "string", "enum": ["none", "gzip", "snappy", "lz4", "zstd"]
+        },
+        "lingerMs": { "description": "How long a batch waits for more records. Default 5.", "type": "integer", "minimum": 0, "maximum": 1000 },
+        "buffer": {
+          "description": "The in-memory buffer between accepted publishes and Kafka. A node that crashes loses what it holds.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "maxRecords": { "description": "Default 100000.", "type": "integer", "minimum": 1 },
+            "maxBytes": { "description": "Default 67108864.", "type": "integer", "minimum": 1048576 },
+            "whenFull": {
+              "description": "While the buffer is full: refuse (default) answers a client's matching QoS 1 or 2 publish with Quota Exceeded (0x97), or closes a 3.1.1 connection; drop accepts it and counts its forward dropped. QoS 0 forwards are dropped and counted under both.",
+              "type": "string", "enum": ["refuse", "drop"]
+            },
+            "waitMs": { "description": "How long an admitted QoS 1 or 2 publish waits for room under refuse before its forward is counted overflow. Default 1000.", "type": "integer", "minimum": 0, "maximum": 10000 }
+          }
+        },
+        "flushTimeoutMs": { "description": "How long the forwarder flushes at stop; what remains is counted shutdown. Default 5000.", "type": "integer", "minimum": 0, "maximum": 60000 }
+      }
+    },
     "node": {
       "type": "object",
       "additionalProperties": false,
@@ -476,10 +568,15 @@
       "enum": ["admin", "read", "clients:read", "clients:write", "retained:read", "retained:write", "cluster:read", "cluster:drain", "config:read", "config:write", "traces:read", "traces:write", "modules:read", "modules:write", "audit:read", "apikeys:read", "apikeys:write", "credentials:read", "credentials:write", "bans:read", "bans:write", "limits:read", "limits:write"]
     },
     "hooks": {
-      "description": "Timeout and fallback applied to every module hook call.",
+      "description": "How modules are called: the timeout and fallback of every hook call, and the module order.",
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "order": {
+          "description": "Module identifiers called first, in this order, in every hook family, both authentication chains (certificate authenticators still before the rest) and the lifecycle (stop reversed); every other module follows in identifier order. Read at start: a change applies at the next restart.",
+          "type": "array",
+          "items": { "type": "string", "pattern": "^[a-z]+\\.[a-z0-9]+$" }
+        },
         "timeoutMs": {
           "description": "Milliseconds a hook may run before the fallback applies; 0 calls hooks inline with no deadline.",
           "type": "integer", "minimum": 0, "maximum": 60000

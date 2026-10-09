@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/happydave/hoardmq/ext"
 	"github.com/happydave/hoardmq/internal/auth"
 	"github.com/happydave/hoardmq/internal/auth/scramtest"
 	"github.com/happydave/hoardmq/internal/broker"
@@ -74,11 +75,38 @@ func TestUsagePaths(t *testing.T) {
 
 func TestVersion(t *testing.T) {
 	code, out, _ := run(t, nil, "version")
-	if code != ExitOK || !strings.HasPrefix(out, "hoardmq ") {
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if code != ExitOK || len(lines) != 3 || !strings.HasPrefix(lines[0], "hoardmq ") {
 		t.Fatalf("exit %d out %q", code, out)
+	}
+	if lines[1] != "extension API "+ext.APIVersion {
+		t.Errorf("second line %q, want the extension API's version", lines[1])
+	}
+	if !strings.Contains(" "+lines[2]+" ", " store.wal ") || !strings.HasPrefix(lines[2], "modules: ") {
+		t.Errorf("third line %q, want the compiled-in modules", lines[2])
 	}
 	if code, _, errOut := run(t, nil, "version", "extra"); code != ExitUsage || !strings.Contains(errOut, "unexpected argument") {
 		t.Fatalf("exit %d err %q", code, errOut)
+	}
+}
+
+// TestBuildVersion: the default binary's version is its main module's; a
+// binary hoardmq-build compiled reads the broker's from its dependencies.
+func TestBuildVersion(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		info debug.BuildInfo
+		want string
+	}{
+		{"default binary", debug.BuildInfo{Main: debug.Module{Path: brokerModule, Version: "v0.2.0"}}, "v0.2.0"},
+		{"custom, a version", debug.BuildInfo{Main: debug.Module{Path: "hoardmq-custom", Version: "(devel)"},
+			Deps: []*debug.Module{{Path: "example.com/m", Version: "v1.0.0"}, {Path: brokerModule, Version: "v0.3.1"}}}, "v0.3.1"},
+		{"custom, a checkout", debug.BuildInfo{Main: debug.Module{Path: "hoardmq-custom", Version: "(devel)"},
+			Deps: []*debug.Module{{Path: brokerModule, Version: "v0.0.0-00010101000000-000000000000", Replace: &debug.Module{Path: "/src/hoardmq"}}}}, "devel (/src/hoardmq)"},
+	} {
+		if got := buildVersion(&c.info); got != c.want {
+			t.Errorf("%s: %q, want %q", c.name, got, c.want)
+		}
 	}
 }
 

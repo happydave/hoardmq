@@ -75,12 +75,35 @@ func (i *inboundStub) InterceptInbound(context.Context, hook.Info, packet.Packet
 // A store stub that is also toggleable, which the registry must refuse.
 type badStore struct{ stub }
 
-func (badStore) SetEnabled(bool)                 {}
-func (badStore) Journal() session.Journal        { return nil }
-func (badStore) Recover() (*store.State, error)  { return store.NewState(), nil }
-func (badStore) Checkpoint(store.Snapshot) error { return nil }
-func (badStore) NeedsCheckpoint() bool           { return false }
-func (badStore) Close() error                    { return nil }
+func (badStore) SetEnabled(bool)                  {}
+func (badStore) Journal() session.Journal         { return nil }
+func (badStore) Recover() (*store.State, error)   { return store.NewState(), nil }
+func (badStore) Checkpoint(store.Snapshot) error  { return nil }
+func (badStore) NeedsCheckpoint() bool            { return false }
+func (badStore) Close() error                     { return nil }
+func (badStore) SetTap(func(store.Record) func()) {}
+
+// A store stub with every method a store provider had before the tap was
+// required, and not the tap.
+type untappedStore struct{ stub }
+
+func (untappedStore) Journal() session.Journal        { return nil }
+func (untappedStore) Recover() (*store.State, error)  { return store.NewState(), nil }
+func (untappedStore) Checkpoint(store.Snapshot) error { return nil }
+func (untappedStore) NeedsCheckpoint() bool           { return false }
+func (untappedStore) Close() error                    { return nil }
+
+// TestStoreProviderNeedsTheTap: a store provider that cannot feed
+// replication is refused at provision, so no node runs on it.
+func TestStoreProviderNeedsTheTap(t *testing.T) {
+	var log []string
+	reg(t, "store.untapped", func() Module { return &untappedStore{stub{id: "store.untapped", caps: CapStore, started: &log}} })
+	reg(t, "metrics.tap", func() Module { return &stub{id: "metrics.tap", caps: 0, started: &log} })
+	r, problems := New(cfgWith("store.untapped", "metrics.tap"), ctx(), hook.Policy{})
+	if r != nil || len(problems) != 1 || problems[0].String() != "/modules/store.untapped: declares the store capability without implementing it" {
+		t.Fatalf("an untapped store provider: %v", problems)
+	}
+}
 
 var registered = map[ID]bool{}
 

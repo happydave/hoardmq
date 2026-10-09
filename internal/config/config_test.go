@@ -1,13 +1,14 @@
 package config
 
 import (
-	"github.com/happydave/hoardmq/internal/packet"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/happydave/hoardmq/internal/packet"
 )
 
 const valid = `{
@@ -367,5 +368,51 @@ func TestOverloadDefaults(t *testing.T) {
 	d, p = Parse([]byte(`{"version":1,"node":{"dataDir":"d"},"flapping":{"enabled":false},"overload":{"memoryBytes":1024}}`), nil)
 	if len(p) != 0 || d.Flapping.Enabled || d.Flapping.MaxCount != 15 || d.Overload.MemoryBytes != 1024 || d.Overload.QueuedMessages != 1000000 {
 		t.Errorf("set: %v %+v %+v", p, d.Flapping, d.Overload)
+	}
+}
+
+// TestHooksOrderSchema: hooks.order is a list of module identifiers; an entry
+// of another type or shape is a schema problem at its index.
+func TestHooksOrderSchema(t *testing.T) {
+	base := `{"version":1,"node":{"dataDir":"d"},"hooks":{"order":`
+	doc, p := Parse([]byte(base+`["auth.file","store.wal"]}}`), nil)
+	if len(p) != 0 || len(doc.Hooks.Order) != 2 || doc.Hooks.Order[1] != "store.wal" {
+		t.Fatalf("valid order: problems %v, order %q", p, doc.Hooks.Order)
+	}
+	for _, bad := range []string{`[1]`, `["Auth.File"]`, `"auth.file"`} {
+		_, p := Parse([]byte(base+bad+`}}`), nil)
+		if len(p) == 0 || !strings.HasPrefix(p[0].Pointer, "/hooks/order") {
+			t.Errorf("order %s: problems %v, want one at /hooks/order", bad, p)
+		}
+	}
+}
+
+// TestSinkKafkaSchema: the published schema describes modules.sink.kafka,
+// and leaves every other module's object free-form.
+func TestSinkKafkaSchema(t *testing.T) {
+	base := `{"version":1,"node":{"dataDir":"d"},"modules":{"sink.kafka":`
+	good := `{"brokers":["kafka-0.kafka:9092"],"clientId":"hoardmq-n1",
+		"tls":{"caFile":"/etc/kafka/ca.pem","certFile":"/etc/kafka/client.pem","keyFile":"/etc/kafka/client.key"},
+		"sasl":{"mechanism":"scram-sha-512","username":"hoardmq","passwordFile":"/run/secrets/kafka"},
+		"routes":[{"filter":"sensors/+/temperature","topic":"sensor-readings","key":"topic"},
+			{"filter":"alarms/#","topic":"alarms","key":"userProperty","keyProperty":"site"}],
+		"headers":{"metadata":true,"userProperties":true},"acks":"all","compression":"none","lingerMs":5,
+		"buffer":{"maxRecords":100000,"maxBytes":67108864,"whenFull":"refuse","waitMs":1000},"flushTimeoutMs":5000}`
+	if _, p := Parse([]byte(base+good+`}}`), nil); len(p) != 0 {
+		t.Fatalf("the documented example: %v", p)
+	}
+	for _, c := range []struct{ doc, pointer string }{
+		{`{"brokers":["k:9092"],"routes":[{"filter":"a/#"}]}`, "/modules/sink.kafka/routes/0"},
+		{`{"brokers":["k:9092"],"routes":[{"filter":"a/#","topic":"t"}],"buffer":{"whenFull":"block"}}`, "/modules/sink.kafka/buffer/whenFull"},
+		{`{"brokers":["k:9092"],"routes":[{"filter":"a/#","topic":"t"}],"retries":3}`, "/modules/sink.kafka"},
+		{`{"brokers":["k:9092"],"routes":[{"filter":"a/#","topic":"a/b"}]}`, "/modules/sink.kafka/routes/0/topic"},
+	} {
+		_, p := Parse([]byte(base+c.doc+`}}`), nil)
+		if len(p) == 0 || !strings.HasPrefix(p[0].Pointer, c.pointer) {
+			t.Errorf("%s: problems %v, want one at %s", c.doc, p, c.pointer)
+		}
+	}
+	if _, p := Parse([]byte(`{"version":1,"node":{"dataDir":"d"},"modules":{"hook.test":{"anything":[1,2]}}}`), nil); len(p) != 0 {
+		t.Errorf("another module's object: %v", p)
 	}
 }

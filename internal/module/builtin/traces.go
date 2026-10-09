@@ -7,18 +7,19 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/happydave/hoardmq/internal/module"
+	"github.com/happydave/hoardmq/ext"
+	"github.com/happydave/hoardmq/ext/trace"
 	"github.com/happydave/hoardmq/internal/otel"
 )
 
 func init() {
-	module.Register("traces.otlp", func() module.Module { return &otlpTraces{} })
+	ext.Register("traces.otlp", func() ext.Module { return &otlpTraces{} })
 }
 
 // otlpTraces is traces.otlp: spans for the publish path, exported as OTLP
 // over HTTP in the JSON encoding. Disabled, it samples nothing.
 type otlpTraces struct {
-	tracer *otel.Tracer
+	tracer *trace.Tracer
 }
 
 type otlpConfig struct {
@@ -40,10 +41,10 @@ const (
 	defaultTimeoutMs   = 5000
 )
 
-func (*otlpTraces) ID() module.ID                   { return "traces.otlp" }
-func (*otlpTraces) Capabilities() module.Capability { return module.CapTraces }
+func (*otlpTraces) ID() ext.ID                   { return "traces.otlp" }
+func (*otlpTraces) Capabilities() ext.Capability { return ext.CapTraces }
 
-func (o *otlpTraces) Provision(ctx *module.Context, raw json.RawMessage) error {
+func (o *otlpTraces) Provision(ctx *ext.Context, raw json.RawMessage) error {
 	var cfg otlpConfig
 	if err := decode(raw, &cfg); err != nil {
 		return err
@@ -96,8 +97,8 @@ func (o *otlpTraces) Stop(ctx context.Context) error {
 	return nil
 }
 
-// Tracer implements module.TraceProvider.
-func (o *otlpTraces) Tracer() *otel.Tracer { return o.tracer }
+// Tracer implements ext.TraceProvider.
+func (o *otlpTraces) Tracer() *trace.Tracer { return o.tracer }
 
-// SetEnabled implements module.Toggleable.
+// SetEnabled implements ext.Toggleable.
 func (o *otlpTraces) SetEnabled(on bool) { o.tracer.SetEnabled(on) }

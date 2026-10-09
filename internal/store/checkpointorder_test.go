@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	extstore "github.com/happydave/hoardmq/ext/store"
 	"github.com/happydave/hoardmq/internal/store/faultdisk"
 )
 
@@ -235,7 +236,19 @@ func TestHeldRecordsHoldOnlyTheirSessionUpToItsIndex(t *testing.T) {
 		}
 		return b
 	}
-	a := rec(enqueueRecord{"ns", "a", Entry{Seq: 1}})
+	enqueue := func(ns, id string) []byte {
+		r, err := extstore.EncodeEnqueue(Key{Namespace: ns, ClientID: id}, Entry{Seq: 1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r.Payload
+	}
+	a := enqueue("ns", "a")
+	del, err := extstore.EncodeRetainDelete("ns", "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	retainDelete := del.Payload
 	for _, tc := range []struct {
 		name    string
 		index   uint64
@@ -246,12 +259,12 @@ func TestHeldRecordsHoldOnlyTheirSessionUpToItsIndex(t *testing.T) {
 		{"its session, below its index", 9, recEnqueue, a, true},
 		{"its session, at its index", 10, recEnqueue, a, true},
 		{"its session, above its index", 11, recEnqueue, a, false},
-		{"another session's entry, above that one's index", 6, recEnqueue, rec(enqueueRecord{"ns", "b", Entry{Seq: 1}}), false},
-		{"a session with no entry", 3, recEnqueue, rec(enqueueRecord{"ns", "c", Entry{Seq: 1}}), false},
-		{"the same client in another namespace", 3, recEnqueue, rec(enqueueRecord{"other", "a", Entry{Seq: 1}}), false},
+		{"another session's entry, above that one's index", 6, recEnqueue, enqueue("ns", "b"), false},
+		{"a session with no entry", 3, recEnqueue, enqueue("ns", "c"), false},
+		{"the same client in another namespace", 3, recEnqueue, enqueue("other", "a"), false},
 		{"a session delete", 4, recSessionDelete, rec(sessionKey{"ns", "a"}), true},
 		{"a retained write", 4, recRetain, rec(msg("ns", "a", "v")), false},
-		{"a retained delete", 4, recRetainDelete, rec(retainKey{"ns", "a"}), false},
+		{"a retained delete", 4, recRetainDelete, retainDelete, false},
 		{"a malformed payload", 4, recEnqueue, []byte("{not json"), false},
 	} {
 		if got := h.holds(tc.index, tc.typ, tc.payload); got != tc.want {

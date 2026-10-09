@@ -35,6 +35,10 @@ type Control struct {
 	// every other filter's QoS to 0.
 	RefuseFilter string
 	LowerQoS     bool
+	// AdmitOutcome is returned by the publish admission check for every
+	// PUBLISH whose payload equals AdmitTrigger; others are admitted.
+	AdmitTrigger string
+	AdmitOutcome module.Outcome
 	// Sleep delays every hook call, to exercise the timeout.
 	Sleep time.Duration
 	// Panic makes every inbound hook call panic.
@@ -94,7 +98,8 @@ type mod struct {
 func (*mod) ID() module.ID { return ID }
 func (*mod) Capabilities() module.Capability {
 	return module.CapConnection | module.CapAuthentication | module.CapAuthorization | module.CapInbound |
-		module.CapOutbound | module.CapSubscribe | module.CapDelivery | module.CapRetained | module.CapWill
+		module.CapOutbound | module.CapSubscribe | module.CapDelivery | module.CapRetained | module.CapWill |
+		module.CapPublishAccepted | module.CapPublishAdmission
 }
 func (m *mod) Provision(_ *module.Context, raw json.RawMessage) error {
 	var cfg struct {
@@ -196,4 +201,18 @@ func (m *mod) OnRetained(_ context.Context, msg *message.Message) {
 
 func (m *mod) OnWill(_ context.Context, ns, id string, msg *message.Message) {
 	m.c.record("will " + id + " " + msg.Topic)
+}
+
+func (m *mod) OnPublishAccepted(_ context.Context, source module.PublishSource, msg *message.Message) {
+	m.c.record(fmt.Sprintf("accepted %s %s %d", source, msg.Topic, msg.QoS))
+}
+
+func (m *mod) AdmitPublish(_ context.Context, _ module.ConnectionInfo, msg *message.Message) module.Outcome {
+	m.c.record("admit " + msg.Topic)
+	m.c.mu.Lock()
+	defer m.c.mu.Unlock()
+	if m.c.AdmitTrigger != "" && string(msg.Payload) == m.c.AdmitTrigger {
+		return m.c.AdmitOutcome
+	}
+	return module.OK
 }

@@ -183,10 +183,13 @@ type Audit struct {
 	Queue    int   `json:"queue"`
 }
 
-// Hooks is the module hook policy.
+// Hooks is the module hook policy and the module order.
 type Hooks struct {
-	TimeoutMs int    `json:"timeoutMs"`
-	Fallback  string `json:"fallback"`
+	// Order names the modules called first, in this order; the rest follow
+	// in identifier order.
+	Order     []string `json:"order,omitempty"`
+	TimeoutMs int      `json:"timeoutMs"`
+	Fallback  string   `json:"fallback"`
 }
 
 // Auth holds the authentication defaults that are not a module's own.

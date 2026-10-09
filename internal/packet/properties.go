@@ -263,7 +263,7 @@ func stringProp(r *reader) (*string, *Error) {
 }
 
 // empty reports whether no property is set.
-func (p *Properties) empty() bool {
+func propertiesEmpty(p *Properties) bool {
 	return p.PayloadFormatIndicator == nil && p.MessageExpiryInterval == nil && p.ContentType == nil &&
 		p.ResponseTopic == nil && p.CorrelationData == nil && len(p.SubscriptionIdentifiers) == 0 &&
 		p.SessionExpiryInterval == nil && p.AssignedClientIdentifier == nil && p.ServerKeepAlive == nil &&

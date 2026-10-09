@@ -93,21 +93,19 @@ func newExporter(cfg ExportConfig, service, node string) *exporter {
 		stop: make(chan struct{}), done: make(chan struct{})}
 }
 
-// Start starts the exporter's goroutine; a tracer with a sink has none.
-func (t *Tracer) Start() {
-	if t != nil && t.exp != nil {
-		go t.exp.run()
-	}
-}
+// Start runs the exporter's goroutine (trace.SpanExporter).
+func (e *exporter) Start() { go e.run() }
 
 // Stop sends what is queued, waiting up to two seconds or ctx, and counts
-// anything left as dropped.
-func (t *Tracer) Stop(ctx context.Context) {
-	if t == nil || t.exp == nil {
-		return
-	}
-	t.exp.shutdown(ctx)
-}
+// anything left as dropped (trace.SpanExporter).
+func (e *exporter) Stop(ctx context.Context) { e.shutdown(ctx) }
+
+// Export queues an ended span, dropping it when the queue is full
+// (trace.SpanExporter).
+func (e *exporter) Export(d SpanData) { e.enqueue(d) }
+
+// Stats adds the exporter's counters to s (trace.SpanExporter).
+func (e *exporter) Stats(s *Stats) { e.stats(s) }
 
 func (e *exporter) enqueue(d SpanData) {
 	if e.closed.Load() {

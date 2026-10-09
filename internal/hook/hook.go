@@ -6,62 +6,31 @@ package hook
 
 import (
 	"context"
-	"time"
+
+	"github.com/happydave/hoardmq/ext"
 
 	"github.com/happydave/hoardmq/internal/message"
 	"github.com/happydave/hoardmq/internal/packet"
 )
 
-// Info describes a client connection to hooks.
-type Info struct {
-	Namespace string
-	ClientID  string
-	Username  string
-	CertCN    string
-	Version   packet.Version
-	Listener  string
-	PeerAddr  string
-}
-
-// Action names what happens to an intercepted packet.
-type Action byte
+// The connection facts, outcomes and policy are the extension API's.
+type (
+	Info    = ext.ConnectionInfo
+	Action  = ext.Action
+	Outcome = ext.Outcome
+	Policy  = ext.HookPolicy
+)
 
 // Actions.
 const (
-	Continue Action = iota
-	Modify
-	Drop
-	Disconnect
+	Continue   = ext.Continue
+	Modify     = ext.Modify
+	Drop       = ext.Drop
+	Disconnect = ext.Disconnect
 )
 
-func (a Action) String() string {
-	switch a {
-	case Modify:
-		return "modify"
-	case Drop:
-		return "drop"
-	case Disconnect:
-		return "disconnect"
-	}
-	return "continue"
-}
-
-// Outcome is an interceptor's verdict. Reason accompanies Disconnect, and
-// Drop from a subscribe interceptor (the SUBACK reason code).
-type Outcome struct {
-	Action Action
-	Reason packet.ReasonCode
-}
-
 // OK is the outcome that changes nothing.
-var OK = Outcome{Action: Continue}
-
-// Policy is the timeout and fallback applied to every hook call. A zero
-// timeout calls hooks inline with no deadline.
-type Policy struct {
-	Timeout  time.Duration
-	Fallback Action // Continue or Disconnect
-}
+var OK = ext.OK
 
 // Interceptor is what the connection layer calls. A nil Interceptor means no
 // modules; callers check for nil.
@@ -73,31 +42,17 @@ type Interceptor interface {
 	Subscribe(ctx context.Context, info Info, sub *packet.Subscription) Outcome
 }
 
-// DeliveryEvent names what happened to a message for one session.
-type DeliveryEvent byte
+// DeliveryEvent is the extension API's delivery event.
+type DeliveryEvent = ext.DeliveryEvent
 
 // Delivery events.
 const (
-	Delivered DeliveryEvent = iota
-	Acknowledged
-	Queued
-	Dropped
-	Expired
+	Delivered    = ext.Delivered
+	Acknowledged = ext.Acknowledged
+	Queued       = ext.Queued
+	Dropped      = ext.Dropped
+	Expired      = ext.Expired
 )
-
-func (e DeliveryEvent) String() string {
-	switch e {
-	case Delivered:
-		return "delivered"
-	case Acknowledged:
-		return "acknowledged"
-	case Queued:
-		return "queued"
-	case Dropped:
-		return "dropped"
-	}
-	return "expired"
-}
 
 // Observer is what the session manager calls. A nil Observer means no
 // modules.
@@ -107,7 +62,25 @@ type Observer interface {
 	// removal.
 	OnRetained(ctx context.Context, m *message.Message)
 	OnWill(ctx context.Context, namespace, clientID string, m *message.Message)
+	// OnPublishAccepted reports a publish this node accepted, once.
+	OnPublishAccepted(ctx context.Context, source PublishSource, m *message.Message)
+	// AdmitPublish asks whether a client's publish may be taken in; an
+	// outcome other than Continue or Modify refuses it.
+	AdmitPublish(ctx context.Context, info Info, m *message.Message) Outcome
+	// Admitting reports whether any module checks publish admission, so a
+	// publish builds no connection facts for a chain that is empty.
+	Admitting() bool
 }
+
+// PublishSource is the extension API's publish source.
+type PublishSource = ext.PublishSource
+
+// Publish sources.
+const (
+	SourceClient = ext.SourceClient
+	SourceWill   = ext.SourceWill
+	SourceModule = ext.SourceModule
+)
 
 // Auditor records security and administrative events; the audit log
 // implements it. A nil Auditor means auditing is off.

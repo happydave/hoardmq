@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	extstore "github.com/happydave/hoardmq/ext/store"
 	"github.com/happydave/hoardmq/internal/message"
 	"github.com/happydave/hoardmq/internal/wal"
 )
@@ -59,60 +60,13 @@ type Options struct {
 	Tap func(Record) func()
 }
 
-// Key names what a record is about: a session (namespace and client
-// identifier) or a retained topic (namespace and topic).
-type Key struct {
-	Namespace string
-	ClientID  string
-	Topic     string
-	// Epoch is the lease generation the writing node held for this session
-	// when it wrote the record. The replication tap stamps it on the frame
-	// rather than looking it up: a node journals for a session only while it
-	// owns that session's lease, so this is the epoch the record was actually
-	// written under — where a lookup at fan-out time can read a newer epoch
-	// belonging to a different owner. Zero for retained-message records,
-	// which are keyed by topic and replicated by shard.
-	Epoch uint64
-}
-
-// Scope names what a record belongs to, for callers that must say which
-// records a durability wait covers: a session by namespace and client id, or
-// a retained message by namespace and topic, and, when the caller knows it,
-// the session's epoch. A peer's refusal of a record is remembered against
-// the identity, with the epoch it was refused at: a later epoch writes the
-// session whole again, so a barrier that names the later epoch is not held
-// by the earlier refusal, while one that names no epoch (0) is held by any.
-type Scope struct {
-	Namespace string
-	ClientID  string
-	Topic     string
-	Epoch     uint64
-}
-
-// Bare is the scope without its epoch: the identity a refusal is keyed by.
-func (s Scope) Bare() Scope {
-	return Scope{Namespace: s.Namespace, ClientID: s.ClientID, Topic: s.Topic}
-}
-
-// Scope keeps whichever identity the record has, and the epoch. A session
-// record keeps its client id even when it also carries a topic; only a
-// record with no client id is scoped by topic.
-func (k Key) Scope() Scope {
-	if k.ClientID != "" {
-		return Scope{Namespace: k.Namespace, ClientID: k.ClientID, Epoch: k.Epoch}
-	}
-	return Scope{Namespace: k.Namespace, Topic: k.Topic}
-}
-
-// Zero reports whether the scope names nothing.
-func (s Scope) Zero() bool { return s.ClientID == "" && s.Topic == "" }
-
-// Record is one appended record as the tap sees it.
-type Record struct {
-	Type    byte
-	Key     Key
-	Payload []byte
-}
+// The record's key, scope and the record itself are the extension API's.
+type (
+	Key     = extstore.Key
+	Scope   = extstore.Scope
+	Record  = extstore.Record
+	Journal = extstore.Journal
+)
 
 // Store is the log-backed provider.
 type Store struct {
@@ -172,16 +126,8 @@ type Store struct {
 	fsyncNanos    atomic.Int64
 }
 
-// JournalStats is the journal's position, checkpoints and fsyncs, for the
-// metrics.
-type JournalStats struct {
-	LastIndex       uint64
-	CheckpointIndex uint64
-	CheckpointAt    time.Time
-	Fsyncs          int64
-	FsyncSec        float64
-	Sync            SyncStats
-}
+// JournalStats is the extension API's journal statistics.
+type JournalStats = extstore.JournalStats
 
 // JournalStats reads the journal's counters without the store's lock.
 func (s *Store) JournalStats() JournalStats {
@@ -495,12 +441,12 @@ func (s *Store) NeedsCheckpoint() bool {
 	return s.needCheckpt || (s.opts.SyncPolicy != Relaxed && !s.wholeLocked(s.syncFailures.Load()))
 }
 
-func (s *Store) append(typ byte, k Key, v any) error {
-	payload, err := json.Marshal(v)
+// appendRecord appends an encoded record and taps it.
+func (s *Store) appendRecord(r Record, err error) error {
 	if err != nil {
 		return err
 	}
-	after, err := s.appendAndTap(typ, k, payload)
+	after, err := s.appendAndTap(r.Type, r.Key, r.Payload)
 	if err != nil {
 		return err
 	}
@@ -602,14 +548,8 @@ func (s *Store) Recover() (*State, error) {
 	return state, nil
 }
 
-// Snapshot returns the live state a checkpoint writes. Checkpoint calls it
-// after reading the checkpoint's index, with a lock-free reader of the index
-// of the last record appended. A record journaled between the two is in the
-// state and after the index, so recovery would apply it twice: a snapshot that
-// reads each session while it cannot be journaled lists the reader's value for
-// it in State.Through, and one exact at a single index for everything sets
-// State.At.
-type Snapshot func(appended func() uint64) *State
+// Snapshot is the extension API's: the live state a checkpoint writes.
+type Snapshot = extstore.Snapshot
 
 // Checkpoint writes the state the snapshot returns at the index read before
 // it, or at its State.At, and drops the segments before that. While the
@@ -721,69 +661,66 @@ func (s *Store) LastIndex() uint64 {
 
 // SessionUpsert records a session's metadata.
 func (s *Store) SessionUpsert(meta SessionMeta) error {
-	return s.append(recSessionUpsert, Key{Namespace: meta.Namespace, ClientID: meta.ClientID, Epoch: meta.Epoch}, meta)
+	return s.appendRecord(extstore.EncodeSessionUpsert(meta))
 }
 
 // SessionDelete records a session's end.
 func (s *Store) SessionDelete(k Key) error {
-	return s.append(recSessionDelete, k, sessionKey{k.Namespace, k.ClientID})
+	return s.appendRecord(extstore.EncodeSessionDelete(k))
 }
 
 // Subscribe records a subscription add or replace.
 func (s *Store) Subscribe(k Key, sub SubscriptionRecord) error {
-	return s.append(recSubscribe, k, subscribeRecord{k.Namespace, k.ClientID, sub})
+	return s.appendRecord(extstore.EncodeSubscribe(k, sub))
 }
 
 // Unsubscribe records a subscription removal.
 func (s *Store) Unsubscribe(k Key, filter string) error {
-	return s.append(recUnsubscribe, k, unsubscribeRecord{k.Namespace, k.ClientID, filter})
+	return s.appendRecord(extstore.EncodeUnsubscribe(k, filter))
 }
 
 // InboundQoS2 records an inbound QoS 2 identifier added or removed.
 func (s *Store) InboundQoS2(k Key, packetID uint16, add bool) error {
-	if add {
-		return s.append(recInboundAdd, k, inboundRecord{Namespace: k.Namespace, ClientID: k.ClientID, PacketID: packetID})
-	}
-	return s.append(recInboundRemove, k, inboundRecord{Namespace: k.Namespace, ClientID: k.ClientID, PacketID: packetID})
+	return s.appendRecord(extstore.EncodeInboundQoS2(k, packetID, add))
 }
 
 // InboundAccepted records that the publish of an open inbound QoS 2
 // identifier was accepted.
 func (s *Store) InboundAccepted(k Key, packetID uint16) error {
-	return s.append(recInboundAdd, k, inboundRecord{Namespace: k.Namespace, ClientID: k.ClientID, PacketID: packetID, Accepted: true})
+	return s.appendRecord(extstore.EncodeInboundAccepted(k, packetID))
 }
 
 // Enqueue records a message entering a session's queue.
 func (s *Store) Enqueue(k Key, e Entry) error {
-	return s.append(recEnqueue, k, enqueueRecord{k.Namespace, k.ClientID, e})
+	return s.appendRecord(extstore.EncodeEnqueue(k, e))
 }
 
 // Sent records an entry taking a packet identifier (queued to in flight).
 func (s *Store) Sent(k Key, entrySeq uint64, packetID uint16) error {
-	return s.append(recSent, k, sentRecord{k.Namespace, k.ClientID, entrySeq, packetID})
+	return s.appendRecord(extstore.EncodeSent(k, entrySeq, packetID))
 }
 
 // InflightState records PUBREC received for an in-flight entry.
 func (s *Store) InflightState(k Key, packetID uint16, state byte) error {
-	return s.append(recInflightState, k, stateRecord{k.Namespace, k.ClientID, packetID, state})
+	return s.appendRecord(extstore.EncodeInflightState(k, packetID, state))
 }
 
 // Complete records an in-flight entry's completion.
 func (s *Store) Complete(k Key, packetID uint16) error {
-	return s.append(recComplete, k, completeRecord{k.Namespace, k.ClientID, packetID})
+	return s.appendRecord(extstore.EncodeComplete(k, packetID))
 }
 
 // Dropped records a queued entry dropped by the queue limit.
 func (s *Store) Dropped(k Key, entrySeq uint64) error {
-	return s.append(recDropped, k, droppedRecord{k.Namespace, k.ClientID, entrySeq})
+	return s.appendRecord(extstore.EncodeDropped(k, entrySeq))
 }
 
 // Retain records a retained message stored.
 func (s *Store) Retain(m *message.Message) error {
-	return s.append(recRetain, Key{Namespace: m.Namespace, Topic: m.Topic}, m)
+	return s.appendRecord(extstore.EncodeRetain(m))
 }
 
 // RetainDelete records a retained message removed.
 func (s *Store) RetainDelete(ns, topic string) error {
-	return s.append(recRetainDelete, Key{Namespace: ns, Topic: topic}, retainKey{ns, topic})
+	return s.appendRecord(extstore.EncodeRetainDelete(ns, topic))
 }

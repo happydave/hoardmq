@@ -226,3 +226,27 @@ func TestRegistryDescribe(t *testing.T) {
 		t.Fatalf("described %d of %d", len(got), len(reg.Modules()))
 	}
 }
+
+// TestOrderNamesDefaults: hooks.order may name a default module the registry
+// instantiates, and it then comes first; a default replaced by a configured
+// module of its family is not instantiated, and naming it is a problem.
+func TestOrderNamesDefaults(t *testing.T) {
+	ctx := &module.Context{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	cfg := config.Default()
+	cfg.Node.DataDir = t.TempDir()
+	cfg.Hooks.Order = []string{"store.wal"}
+	reg, problems := module.New(cfg, ctx, hook.Policy{})
+	if len(problems) > 0 {
+		t.Fatal(problems)
+	}
+	if ids := reg.Modules(); len(ids) != 2 || ids[0] != "store.wal" || ids[1] != "metrics.internal" {
+		t.Fatalf("modules %v, want store.wal first", ids)
+	}
+
+	cfg.Modules = map[string]json.RawMessage{"metrics.prometheus": json.RawMessage(`{}`)}
+	cfg.Hooks.Order = []string{"metrics.internal"}
+	_, problems = module.New(cfg, ctx, hook.Policy{})
+	if len(problems) != 1 || problems[0].Pointer != "/hooks/order/0" || problems[0].Message != "not an instantiated module" {
+		t.Fatalf("a replaced default named: %v", problems)
+	}
+}

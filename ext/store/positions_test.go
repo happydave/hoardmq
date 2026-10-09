@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/happydave/hoardmq/internal/message"
+	"github.com/happydave/hoardmq/ext/mqtt"
 )
 
 // checkPositions fails unless the index and the positions agree with a scan
@@ -53,7 +53,7 @@ func removeByScan(st *State, ns, id string) {
 
 func upsertRecord(id string, epoch uint64) Record {
 	payload, _ := json.Marshal(SessionMeta{Namespace: "default", ClientID: id, Epoch: epoch})
-	return Record{Type: recSessionUpsert, Payload: payload}
+	return Record{Type: RecordSessionUpsert, Payload: payload}
 }
 
 // heldSession is a whole session as an import or a snapshot carries it.
@@ -61,7 +61,7 @@ func heldSession(id string, epoch uint64, entries int) *SessionState {
 	ss := &SessionState{SessionMeta: SessionMeta{Namespace: "default", ClientID: id, Epoch: epoch},
 		Subscriptions: []SubscriptionRecord{{Filter: "t/" + id, QoS: 1}}, InboundQoS2: make([]uint16, 0)}
 	for i := 0; i < entries; i++ {
-		ss.Entries = append(ss.Entries, Entry{Seq: uint64(i + 1), Message: &message.Message{Namespace: "default", Topic: "t/" + id, Payload: []byte("m")}})
+		ss.Entries = append(ss.Entries, Entry{Seq: uint64(i + 1), Message: &mqtt.Message{Namespace: "default", Topic: "t/" + id, Payload: []byte("m")}})
 	}
 	return ss
 }
@@ -84,7 +84,7 @@ func TestPositionsFollowEveryPathThatChangesTheSessions(t *testing.T) {
 		if _, err := st.ApplyReport(rec.Type, rec.Payload); err != nil {
 			t.Fatal(err)
 		}
-		if rec.Type == recSessionDelete {
+		if rec.Type == RecordSessionDelete {
 			var k sessionKey
 			_ = json.Unmarshal(rec.Payload, &k)
 			removeByScan(ref, k.Namespace, k.ClientID)

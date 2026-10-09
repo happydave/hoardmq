@@ -133,3 +133,17 @@ func (c *VerifyCache) Stats() VerifyStats {
 	}
 	return VerifyStats{Derivations: c.derivations.Load(), Hits: c.hits.Load(), Entries: c.size.Load()}
 }
+
+// Verifier verifies a password against a stored credential: the node's
+// cache, or a module context's verifier (ext.PasswordVerifier).
+type Verifier interface {
+	Verify(stored string, password []byte) (bool, error)
+}
+
+// verifyWith verifies through v, deriving directly when v is nil.
+func verifyWith(v Verifier, stored string, password []byte) (bool, error) {
+	if v == nil {
+		return VerifyPassword(stored, password)
+	}
+	return v.Verify(stored, password)
+}

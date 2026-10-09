@@ -2,6 +2,7 @@ package packet
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 )
 
@@ -29,7 +30,7 @@ func allProperties() Properties {
 		TopicAlias:                      u16(3),
 		MaximumQoS:                      u8(1),
 		RetainAvailable:                 boolp(false),
-		UserProperties:                  []UserProperty{{"k", "v"}, {"k", "v2"}},
+		UserProperties:                  []UserProperty{{Name: "k", Value: "v"}, {Name: "k", Value: "v2"}},
 		MaximumPacketSize:               u32(1024),
 		WildcardSubscriptionAvailable:   boolp(false),
 		SubscriptionIdentifierAvailable: boolp(false),
@@ -80,10 +81,10 @@ func samplePackets(v Version) []Packet {
 		&Publish{QoS: 0, Topic: "a/b", Payload: []byte{}},
 		&Publish{QoS: 1, PacketID: 7, Retain: true, Topic: "a/b", Payload: []byte("hello"), Properties: pubProps},
 		&Publish{QoS: 2, Dup: true, PacketID: 65535, Topic: "x", Payload: bytes.Repeat([]byte{0xAB}, 300)},
-		&Puback{Ack{PacketID: 1}},
-		&Pubrec{Ack{PacketID: 2}},
-		&Pubrel{Ack{PacketID: 3}},
-		&Pubcomp{Ack{PacketID: 4}},
+		&Puback{Ack: Ack{PacketID: 1}},
+		&Pubrec{Ack: Ack{PacketID: 2}},
+		&Pubrel{Ack: Ack{PacketID: 3}},
+		&Pubcomp{Ack: Ack{PacketID: 4}},
 		&Subscribe{PacketID: 9, Properties: props(ctxSubscribe), Subscriptions: []Subscription{{Filter: "a/#", QoS: 2}, {Filter: "b/+", QoS: 0}}},
 		&Suback{PacketID: 9, Properties: props(ctxSuback), ReasonCodes: []ReasonCode{GrantedQoS2, GrantedQoS0, 0x80}},
 		&Unsubscribe{PacketID: 10, Properties: props(ctxUnsubscribe), Filters: []string{"a/#", "b/+"}},
@@ -93,10 +94,10 @@ func samplePackets(v Version) []Packet {
 	if v == V5 {
 		packets = append(packets,
 			&Publish{QoS: 0, Topic: "", Payload: []byte("aliased"), Properties: Properties{TopicAlias: u16(5)}},
-			&Puback{Ack{PacketID: 1, ReasonCode: NoMatchingSubscribers}},
-			&Pubrec{Ack{PacketID: 2, ReasonCode: QuotaExceeded, Properties: props(ctxPubAck)}},
-			&Pubrel{Ack{PacketID: 3, ReasonCode: PacketIdentifierNotFound, Properties: props(ctxPubAck)}},
-			&Pubcomp{Ack{PacketID: 4, Properties: props(ctxPubAck)}},
+			&Puback{Ack: Ack{PacketID: 1, ReasonCode: NoMatchingSubscribers}},
+			&Pubrec{Ack: Ack{PacketID: 2, ReasonCode: QuotaExceeded, Properties: props(ctxPubAck)}},
+			&Pubrel{Ack: Ack{PacketID: 3, ReasonCode: PacketIdentifierNotFound, Properties: props(ctxPubAck)}},
+			&Pubcomp{Ack: Ack{PacketID: 4, Properties: props(ctxPubAck)}},
 			&Subscribe{PacketID: 11, Properties: Properties{SubscriptionIdentifiers: []uint32{42}}, Subscriptions: []Subscription{{Filter: "$share/g/a", QoS: 1, RetainAsPublished: true, RetainHandling: 2}, {Filter: "c", NoLocal: true, RetainHandling: 1}}},
 			&Suback{PacketID: 11, ReasonCodes: []ReasonCode{SharedSubscriptionsNotSupported}},
 			&Unsuback{PacketID: 10, Properties: props(ctxUnsuback), ReasonCodes: []ReasonCode{Success, NoSubscriptionExisted}},
@@ -126,10 +127,10 @@ func TestRoundTripEveryReasonCode(t *testing.T) {
 		mk   func(ReasonCode) Packet
 	}{
 		{"CONNACK", connackReasons, func(r ReasonCode) Packet { return &Connack{ReasonCode: r} }},
-		{"PUBACK", pubackReasons, func(r ReasonCode) Packet { return &Puback{Ack{PacketID: 1, ReasonCode: r}} }},
-		{"PUBREC", pubackReasons, func(r ReasonCode) Packet { return &Pubrec{Ack{PacketID: 1, ReasonCode: r}} }},
-		{"PUBREL", pubrelReasons, func(r ReasonCode) Packet { return &Pubrel{Ack{PacketID: 1, ReasonCode: r}} }},
-		{"PUBCOMP", pubrelReasons, func(r ReasonCode) Packet { return &Pubcomp{Ack{PacketID: 1, ReasonCode: r}} }},
+		{"PUBACK", pubackReasons, func(r ReasonCode) Packet { return &Puback{Ack: Ack{PacketID: 1, ReasonCode: r}} }},
+		{"PUBREC", pubackReasons, func(r ReasonCode) Packet { return &Pubrec{Ack: Ack{PacketID: 1, ReasonCode: r}} }},
+		{"PUBREL", pubrelReasons, func(r ReasonCode) Packet { return &Pubrel{Ack: Ack{PacketID: 1, ReasonCode: r}} }},
+		{"PUBCOMP", pubrelReasons, func(r ReasonCode) Packet { return &Pubcomp{Ack: Ack{PacketID: 1, ReasonCode: r}} }},
 		{"SUBACK", subackReasons, func(r ReasonCode) Packet { return &Suback{PacketID: 1, ReasonCodes: []ReasonCode{r}} }},
 		{"UNSUBACK", unsubackReasons, func(r ReasonCode) Packet { return &Unsuback{PacketID: 1, ReasonCodes: []ReasonCode{r}} }},
 		{"DISCONNECT", disconnectReasons, func(r ReasonCode) Packet { return &Disconnect{ReasonCode: r} }},
@@ -143,7 +144,7 @@ func TestRoundTripEveryReasonCode(t *testing.T) {
 			}
 			n++
 			roundTrip(t, V5, s.mk(ReasonCode(code)))
-			if _, ok := reasonNames[ReasonCode(code)]; !ok {
+			if strings.HasPrefix(ReasonCode(code).String(), "reason 0x") {
 				t.Errorf("%s reason 0x%02X has no name", s.name, code)
 			}
 		}

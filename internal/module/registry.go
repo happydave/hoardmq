@@ -5,43 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
-	"sync"
 	"sync/atomic"
 
+	"github.com/happydave/hoardmq/ext"
 	"github.com/happydave/hoardmq/internal/auth"
 	"github.com/happydave/hoardmq/internal/config"
 	"github.com/happydave/hoardmq/internal/jsonschema"
 	"github.com/happydave/hoardmq/internal/otel"
 )
-
-var (
-	factoriesMu sync.RWMutex
-	factories   = map[ID]Factory{}
-)
-
-// Register makes a module available under its identifier. Built-ins call
-// it from init; a duplicate identifier panics because it is a programming
-// error, not a configuration one.
-func Register(id ID, f Factory) {
-	factoriesMu.Lock()
-	defer factoriesMu.Unlock()
-	if _, dup := factories[id]; dup {
-		panic("module: duplicate registration of " + string(id))
-	}
-	factories[id] = f
-}
-
-// Known lists the registered identifiers in order.
-func Known() []ID {
-	factoriesMu.RLock()
-	defer factoriesMu.RUnlock()
-	out := make([]ID, 0, len(factories))
-	for id := range factories {
-		out = append(out, id)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
-	return out
-}
 
 // Defaults are the modules instantiated when their family is not configured.
 var Defaults = []ID{"store.wal", "metrics.internal"}
@@ -68,10 +39,11 @@ type entry struct {
 // Problem aliases the configuration problem type so check can merge lists.
 type Problem = jsonschema.Problem
 
-// New instantiates and provisions the configured modules plus the defaults
-// for absent families, in identifier order. Every provisioning error is
-// returned as a problem at /modules/<id>; the registry is usable only when
-// the list is empty.
+// New instantiates, provisions and validates the configured modules plus the
+// defaults for absent families, and orders them by hooks.order, then by
+// identifier. Every provisioning or validation error is returned as a problem
+// at /modules/<id>, and every bad hooks.order entry at /hooks/order/<i>; the
+// registry is usable only when the list is empty.
 func New(cfg config.Document, ctx *Context, policy HookPolicy) (*Registry, []Problem) {
 	r := &Registry{ctx: ctx, policy: policy, byID: map[ID]*entry{}}
 	var problems []Problem
@@ -92,9 +64,7 @@ func New(cfg config.Document, ctx *Context, policy HookPolicy) (*Registry, []Pro
 	storeCount := 0
 	for _, id := range ids {
 		pointer := "/modules/" + string(id)
-		factoriesMu.RLock()
-		f, ok := factories[id]
-		factoriesMu.RUnlock()
+		f, ok := ext.Lookup(id)
 		if !ok {
 			problems = append(problems, Problem{Pointer: pointer, Message: "unknown module"})
 			continue
@@ -127,6 +97,12 @@ func New(cfg config.Document, ctx *Context, policy HookPolicy) (*Registry, []Pro
 			problems = append(problems, Problem{Pointer: pointer, Message: err.Error()})
 			continue
 		}
+		if v, ok := m.(Validator); ok {
+			if err := validate(v); err != nil {
+				problems = append(problems, Problem{Pointer: pointer, Message: err.Error()})
+				continue
+			}
+		}
 		e := &entry{id: id, m: m}
 		e.enabled.Store(true)
 		e.toggle, _ = m.(Toggleable)
@@ -136,11 +112,74 @@ func New(cfg config.Document, ctx *Context, policy HookPolicy) (*Registry, []Pro
 	if storeCount > 1 {
 		problems = append(problems, Problem{Pointer: "/modules", Message: "more than one store provider configured"})
 	}
+	order, orderProblems := moduleOrder(ids, cfg.Hooks.Order)
+	problems = append(problems, orderProblems...)
 	if len(problems) > 0 {
 		return nil, problems
 	}
+	r.modules = ordered(r.modules, order)
 	r.hooks = newHooks(r)
 	return r, nil
+}
+
+// validate runs a module's Validate, turning a panic into an error so that
+// hoardmq check reports it rather than crashing.
+func validate(v Validator) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("validate panicked: %v", r)
+		}
+	}()
+	return v.Validate()
+}
+
+// moduleOrder resolves hooks.order against the identifiers the registry
+// instantiates, ids, which are sorted: the listed ones first, in the list's
+// order, then the rest in identifier order. An entry naming no identifier in
+// ids, or repeating an earlier entry, is a problem at its index.
+func moduleOrder(ids []ID, listed []string) ([]ID, []Problem) {
+	known := make(map[ID]bool, len(ids))
+	for _, id := range ids {
+		known[id] = true
+	}
+	var problems []Problem
+	seen := map[ID]bool{}
+	order := make([]ID, 0, len(ids))
+	for i, name := range listed {
+		id := ID(name)
+		pointer := fmt.Sprintf("/hooks/order/%d", i)
+		switch {
+		case !known[id]:
+			problems = append(problems, Problem{Pointer: pointer, Message: "not an instantiated module"})
+		case seen[id]:
+			problems = append(problems, Problem{Pointer: pointer, Message: "repeats " + name})
+		default:
+			seen[id] = true
+			order = append(order, id)
+		}
+	}
+	for _, id := range ids {
+		if !seen[id] {
+			order = append(order, id)
+		}
+	}
+	return order, problems
+}
+
+// ordered arranges the instantiated modules in order, which names every one
+// of them.
+func ordered(modules []*entry, order []ID) []*entry {
+	byID := make(map[ID]*entry, len(modules))
+	for _, e := range modules {
+		byID[e.id] = e
+	}
+	out := make([]*entry, 0, len(modules))
+	for _, id := range order {
+		if e, ok := byID[id]; ok {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 // checkCapabilities verifies that a module implements the interface of every
@@ -166,6 +205,8 @@ func checkCapabilities(m Module) string {
 		{CapCertificate, is[auth.CertificateAuthenticator](m), "certificate"},
 		{CapMechanism, is[auth.Mechanism](m), "mechanism"},
 		{CapTraces, is[TraceProvider](m), "traces"},
+		{CapPublishAccepted, is[PublishAccepted](m), "publish-accepted"},
+		{CapPublishAdmission, is[PublishAdmission](m), "publish-admission"},
 	}
 	for _, ch := range checks {
 		declared := caps.Has(ch.c)

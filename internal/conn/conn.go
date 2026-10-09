@@ -551,6 +551,9 @@ func (c *Conn) handshake() bool {
 	return true
 }
 
+// HookInfo describes the connection to hooks the session calls.
+func (c *Conn) HookInfo() hook.Info { return c.info() }
+
 // info is the connection as hooks see it.
 func (c *Conn) info() hook.Info {
 	return hook.Info{

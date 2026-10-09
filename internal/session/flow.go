@@ -32,9 +32,15 @@ func (m *Manager) lookup(c Connection) *Session {
 // remembered until PUBREL so a duplicate is not routed twice.
 func (m *Manager) Publish(c Connection, p *packet.Publish) (code packet.ReasonCode, send bool) {
 	sp := m.opts.Tracer.StartPublish(p.Properties.UserProperties)
-	code, s, a, opened := m.publish(c, p, sp)
+	code, s, a, opened, msg := m.publish(c, p, sp)
 	if opened {
 		m.settle(s, p.PacketID, a, code)
+	}
+	// The publish is accepted: report it once, before the connection writes
+	// its acknowledgement. A QoS 2 retransmission answered by publishAgain
+	// carries no message.
+	if msg != nil && !code.IsError() && m.opts.Observer != nil {
+		m.opts.Observer.OnPublishAccepted(context.Background(), hook.SourceClient, msg)
 	}
 	send = true
 	if p.QoS == 2 && code.IsError() {
@@ -95,11 +101,12 @@ func (m *Manager) releaseRefused(s *Session, c Connection, id uint16, a *inbound
 
 // publish takes an inbound PUBLISH in. At QoS 2 it returns the attempt that
 // holds the identifier, and whether this call opened it: the caller settles an
-// attempt it opened.
-func (m *Manager) publish(c Connection, p *packet.Publish, sp otel.Span) (code packet.ReasonCode, s *Session, a *inboundAttempt, opened bool) {
+// attempt it opened. It returns the message when it was admitted and
+// dispatched.
+func (m *Manager) publish(c Connection, p *packet.Publish, sp otel.Span) (code packet.ReasonCode, s *Session, a *inboundAttempt, opened bool, msg *message.Message) {
 	s = m.lookup(c)
 	if s == nil {
-		return packet.UnspecifiedError, nil, nil, false
+		return packet.UnspecifiedError, nil, nil, false, nil
 	}
 	if sp.Recording() {
 		sp.String("messaging.client.id", s.key.id)
@@ -126,13 +133,18 @@ func (m *Manager) publish(c Connection, p *packet.Publish, sp otel.Span) (code p
 		}
 		s.mu.Unlock()
 		if !opened {
-			return m.publishAgain(c, a, state), s, a, false
+			return m.publishAgain(c, a, state), s, a, false, nil
 		}
 	}
 	s.mu.Lock()
 	pub := m.publisher(s)
 	s.mu.Unlock()
-	msg := message.FromPublish(p, pub, m.seq.Add(1), m.clock.Now())
+	msg = message.FromPublish(p, pub, m.seq.Add(1), m.clock.Now())
+	if m.opts.Observer != nil && m.opts.Observer.Admitting() {
+		if code, ok := m.admitPublish(c, s, msg); !ok {
+			return code, s, a, opened, nil
+		}
+	}
 	msg.Trace = sp.Context()
 	// A QoS 0 publish is acknowledged by nothing, so it names nothing and the
 	// fan-out costs no allocation. At QoS 1 and 2 the acknowledgement claims
@@ -151,30 +163,30 @@ func (m *Manager) publish(c Connection, p *packet.Publish, sp otel.Span) (code p
 		sp.Int("hoardmq.matched", int64(matched))
 	}
 	if p.QoS == 0 {
-		return packet.Success, s, a, opened
+		return packet.Success, s, a, opened, msg
 	}
 	// Design invariant 5: the acknowledgement follows durability.
 	if !m.syncIfDirty() {
-		return packet.ImplementationSpecificError, s, a, opened
+		return packet.ImplementationSpecificError, s, a, opened, msg
 	}
 	s.mu.Lock()
 	refused := s.forwardErr || unjournaled || !inboundJournaled
 	s.forwardErr = false
 	s.mu.Unlock()
 	if refused {
-		return packet.ImplementationSpecificError, s, a, opened
+		return packet.ImplementationSpecificError, s, a, opened, msg
 	}
 	if r := m.Replication(); r != nil {
 		// Design invariant 5, across nodes: the followers hold it too.
 		if err := r.Barrier(context.Background(), covers, msg.Forwards); err != nil {
 			m.log.Warn("replication barrier failed", "client", s.key.id, "err", err)
-			return packet.ImplementationSpecificError, s, a, opened
+			return packet.ImplementationSpecificError, s, a, opened, msg
 		}
 	}
 	if matched == 0 && c.Version() == packet.V5 {
-		return packet.NoMatchingSubscribers, s, a, opened
+		return packet.NoMatchingSubscribers, s, a, opened, msg
 	}
-	return packet.Success, s, a, opened
+	return packet.Success, s, a, opened, msg
 }
 
 // inboundAttempt is the state of an open inbound QoS 2 identifier.
@@ -835,4 +847,40 @@ func (m *Manager) expire(s *Session) {
 	m.redistribute(s, redistribute)
 	m.ended(s)
 	s.log.Debug("session expired")
+}
+
+// HookInfoer is a connection that describes itself to hooks: its listener
+// and peer address, which the session does not hold.
+type HookInfoer interface {
+	HookInfo() hook.Info
+}
+
+// admitPublish runs the publish admission chain on a client's publish before
+// it is dispatched. A refusal is counted and returned as the publish's code:
+// the outcome's reason when it is an error code, Unspecified Error otherwise;
+// a Disconnect also closes the connection.
+func (m *Manager) admitPublish(c Connection, s *Session, msg *message.Message) (packet.ReasonCode, bool) {
+	var info hook.Info
+	if hi, ok := c.(HookInfoer); ok {
+		info = hi.HookInfo()
+	} else {
+		id := c.Identity()
+		info = hook.Info{Namespace: s.key.ns, ClientID: s.key.id, Version: c.Version()}
+		if id != nil {
+			info.Username, info.CertCN = id.Username, id.CertCN
+		}
+	}
+	out := m.opts.Observer.AdmitPublish(context.Background(), info, msg)
+	if out.Action != hook.Drop && out.Action != hook.Disconnect {
+		return 0, true
+	}
+	code := out.Reason
+	if !code.IsError() {
+		code = packet.UnspecifiedError
+	}
+	m.count("hoardmq_drops_total", map[string]string{"namespace": s.key.ns, "reason": "admission"}, 1)
+	if out.Action == hook.Disconnect {
+		c.Close(code)
+	}
+	return code, false
 }

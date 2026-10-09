@@ -45,7 +45,7 @@ commands:
   whoami         the identity a credential authenticates as (admin API)
   login          log in through an OpenID Connect provider and print the ID token the admin API accepts
   hash-password  read a password from stdin and print its hash for a users file (-scram: the SCRAM form; -argon2id: Argon2id)
-  version        print the build version
+  version        print the build version, the extension API's version and the modules compiled in
 ```
 
 `serve` and `check` take `-config PATH`; when the flag is absent the path comes
@@ -144,7 +144,8 @@ one-member cluster). The `mqtt` object is
 the operator's switch for the MQTT 5.0 capabilities a server may decline;
 HoardMQ declines none unless told to. Unknown members are rejected
 everywhere except inside `modules.*`, whose contents belong to the named
-module.
+module; the schema also describes `modules.sink.kafka`, the Kafka
+forwarder's configuration.
 
 ### Reloading the configuration
 
@@ -735,19 +736,199 @@ never redistributed. Level 3 and 4 clients may use `$share/` filters.
 
 Everything that authenticates, authorizes, persists, measures or traces is a module
 on one registry, built-in or not: `auth.file`, `auth.jwt`, `auth.x509`,
-`auth.scram`, `authz.file`, `store.wal`, `metrics.internal` and `traces.otlp` register the same way a third-party module would, receive
+`auth.scram`, `auth.ldap`, `auth.db`, `authz.file`, `store.wal`, `metrics.internal`,
+`metrics.prometheus`, `traces.otlp` and the Kafka forwarder `sink.kafka` register the same way a third-party module would, receive
 their configuration from `modules.<id>`, declare the hook families they
-provide, and run provision, start, stop. `store.wal` and `metrics.internal`
+provide, and run provision, validate, start and stop. `store.wal` and `metrics.internal`
 are instantiated by default when no module of their family is configured.
 Hook families: connection lifecycle, authentication, authorization, inbound
 and outbound packet interceptors (continue, modify, drop, disconnect with a
 reason), subscribe interceptors, delivery events, retained and Will events,
-store providers, metrics providers and trace providers. `hooks.timeoutMs` bounds every hook
+publish admission and publish accepted (below), store providers, metrics
+providers and trace providers. `hooks.timeoutMs` bounds every hook
 call (0, the default, calls inline) and `hooks.fallback` says what a
 timed-out or panicking hook counts as: `continue` (default) or
-`disconnect`. `hoardmq check` provisions the configured modules read-only,
+`disconnect`. `hooks.order` lists the modules called first, in that order, in
+every hook family, both authentication chains (certificate authenticators
+still run before the rest) and the lifecycle (stop in reverse); every other
+module follows in identifier order, and a change applies at the next restart.
+`hoardmq check` provisions and validates the configured modules read-only,
 so a bad users-file path or an unknown module identifier is reported beside
-any schema problem. The module API is internal until the public seam work.
+any schema problem.
+
+**The extension API** is the package tree `github.com/happydave/hoardmq/ext`. It
+imports only the standard library:
+- `ext` holds the module contract, registration (`ext.Register` from a package's
+  `init`), the module context and services, and the hook families;
+- `ext/mqtt` holds the packets and the message envelope;
+- `ext/auth` holds authentication and authorization;
+- `ext/records` holds the replicated records store's values;
+- `ext/store` (experimental) holds the store provider's journal, record format and state. A store provider must
+  feed the replication tap (`SetTap`), and one without it is refused;
+- `ext/trace` (experimental) holds the tracer and the exporter a trace module supplies.
+
+The API has its own version, `ext.APIVersion` (0.2.0), which `hoardmq version` prints
+beside the modules compiled in. [ext/CHANGELOG.md](ext/CHANGELOG.md) states what a
+version may change. Built-in modules reach the broker only through this API, and tests
+hold them to it (`internal/module/seam_test.go`).
+
+**Building with other modules:** `hoardmq-build` compiles a binary with the built-in
+modules plus each module named, from a version or a local directory:
+
+```
+go run ./cmd/hoardmq-build --hoardmq-dir . --with example.com/mymodule=../mymodule --output hoardmq
+go run ./cmd/hoardmq-build --hoardmq-version v0.1.0 --with example.com/mymodule@v1.2.0
+```
+
+It writes a throwaway module whose `main` imports each named module, and runs
+`go build -mod=mod` in it. `cmd/hoardmq/main.go` is the same generated `main` with
+no modules (`go generate ./cmd/hoardmq`). The worked example of a module built
+outside the broker's tree is
+[cmd/hoardmq-build/testdata/hello](cmd/hoardmq-build/testdata/hello/hello.go). Its
+module file is kept as `go.mod.txt`: copy the directory and rename it to `go.mod`.
+Its test builds it with the tool, offline, and runs its lifecycle in the binary,
+including a hot disable and enable through the admin API.
+
+**Publish admission and publish accepted** are the two hooks a sink is built on
+(API 0.2.0):
+- **The admission check** (`ext.PublishAdmission`) is called once for each
+  client PUBLISH. It runs after authorization, topic alias resolution and the
+  QoS 2 retransmission check, and before any delivery.
+
+  It may refuse with a reason code, which takes the path of any refused
+  publish:
+  - an error PUBACK or PUBREC at MQTT 5;
+  - the connection closed at 3.1.1 and 3.1, and for QoS 0.
+
+  It is counted as `hoardmq_drops_total{reason="admission"}`.
+- **The accepted listener** (`ext.PublishAcceptedListener`) is told of each
+  publish the node accepts, once, on that node. It is called after the step
+  that decides acceptance and before the acknowledgement:
+  - QoS 0 after dispatch;
+  - QoS 1 after the journal sync and the replication barrier;
+  - QoS 2 after those and the packet identifier's acceptance.
+
+  It also hears Wills and module publishes. A refused publish, a copy from
+  another node, a shared-group give or a retained hand-over is never reported.
+
+An inbound interceptor runs earlier, on the raw packet, before authorization and
+alias resolution, so a sink refuses from the admission check, not from an
+interceptor.
+
+### Kafka forwarder (`sink.kafka`)
+
+Every binary carries `sink.kafka`: the default one, the container image and
+`hoardmq-build`'s. It runs only when configured. It produces each publish the
+node accepts on a topic a route matches to that route's Kafka topic, MQTT to
+Kafka only, with the franz-go client. It is built on the public extension API
+alone, and `internal/module/seam_test.go` holds it to that.
+
+```json
+"modules": { "sink.kafka": {
+  "brokers": ["kafka-0.kafka:9092"],
+  "routes": [
+    { "filter": "sensors/+/temperature", "topic": "sensor-readings", "key": "topic" },
+    { "filter": "alarms/#", "topic": "alarms", "key": "userProperty", "keyProperty": "site" }
+  ],
+  "clientId": "hoardmq-<node>",
+  "tls": { "caFile": "/etc/kafka/ca.pem", "certFile": "/etc/kafka/client.pem", "keyFile": "/etc/kafka/client.key" },
+  "sasl": { "mechanism": "scram-sha-512", "username": "hoardmq", "passwordFile": "/run/secrets/kafka" },
+  "headers": { "metadata": true, "userProperties": true },
+  "acks": "all", "compression": "none", "lingerMs": 5,
+  "buffer": { "maxRecords": 100000, "maxBytes": 67108864, "whenFull": "refuse", "waitMs": 1000 },
+  "flushTimeoutMs": 5000
+} }
+```
+
+**Configuration.** Only `brokers` and `routes` are required; the other values
+shown are the defaults.
+- `acks`: `all` (the idempotent producer) or `leader`.
+- `compression`: `none`, `gzip`, `snappy`, `lz4` or `zstd`.
+- SASL: `plain`, `scram-sha-256` or `scram-sha-512`. The password comes from a
+  file and is never logged.
+- TLS always verifies the server.
+- `hoardmq check` reports every problem at `/modules/sink.kafka`, naming the
+  field, and connects to nothing.
+
+**Mapping.** A route matches the node's default namespace unless it names a
+`namespace`, and a message is produced once to each distinct Kafka topic its
+routes name (the first matching route naming a topic decides). A Kafka topic is
+1 to 249 of `A-Z a-z 0-9 . _ -`, and a shared filter is refused.
+- **Key:** the MQTT topic (`topic`, the default), the publisher's client
+  identifier (`clientId`), the value of a named user property (`userProperty`
+  with `keyProperty`), or `none`. A missing identifier or property gives no key.
+- **Value:** the payload, empty rather than null.
+- **Timestamp:** when the node accepted the publish.
+- **Headers, in order:**
+  - first `mqtt.topic`, `mqtt.qos` and `mqtt.source` (`client`, `will` or
+    `module`);
+  - then, when set, `mqtt.clientId`, `mqtt.retain`, `mqtt.contentType`, `mqtt.payloadFormat`,
+    `mqtt.responseTopic`, `mqtt.correlationData`, and `mqtt.namespace` outside
+    the default namespace;
+  - then every MQTT 5 user property, in order, repeats kept.
+
+  `headers.metadata` and `headers.userProperties` turn each group off. The
+  username is never sent, and message expiry is not mapped.
+
+**Delivery.** At least once into Kafka while the accepting node runs. The node
+that accepted a publish forwards it, once; a copy another node forwards to its
+subscribers is not forwarded again, and a Will goes from the node that
+publishes it.
+- Every node needs the same `modules.sink.kafka`: a node without it forwards
+  nothing.
+- Messages one connection publishes on one topic reach one partition in order
+  when keyed by topic or client identifier.
+- A QoS 1 resend is a new message and can reach Kafka twice, as it can reach a
+  subscriber twice; a QoS 2 publish is forwarded once.
+- The PUBACK or PUBREC means what it always means, that the message is durable
+  on this node and its replicas. It does not wait for Kafka.
+
+**When Kafka is down or slow.** The forwarder buffers in memory, up to
+`buffer.maxRecords` records or `buffer.maxBytes` bytes. While the buffer is full:
+- **`whenFull: "refuse"`** (the default) refuses a client's matching QoS 1 or 2
+  publish with Quota Exceeded (0x97). That publish then reaches no MQTT
+  subscriber either, and a 3.1.1 publisher is disconnected, since 3.1.1 has no
+  way to refuse a publish. A publish admitted while there was room, which then
+  meets a full buffer, waits up to `buffer.waitMs` for room before it is
+  counted `overflow`.
+- **`whenFull: "drop"`** refuses nothing and counts each forward it cannot
+  buffer.
+- **QoS 0** is never refused: its forward is dropped and counted.
+
+**Counted, never silent:**
+- `hoardmq_sink_kafka_produced_total{topic}`;
+- `hoardmq_sink_kafka_dropped_total{topic,reason}`, where reason is one of:
+  - `buffer_full`: the buffer was full;
+  - `overflow`: refuse's wait ran out;
+  - `rejected`: Kafka refused the record for good, for example too large, an
+    unknown topic or not authorized;
+  - `shutdown`: abandoned at stop;
+- `hoardmq_sink_kafka_refused_total{topic}`;
+- the gauges `hoardmq_sink_kafka_buffered_records` and
+  `hoardmq_sink_kafka_buffered_bytes`.
+
+Drops are also logged at Warn, at most once a second per reason, with their
+count.
+
+**What is lost, plainly.** A node that crashes loses what its buffer held. Those
+messages were acknowledged to their publishers and delivered to MQTT
+subscribers, and no counter can count them afterwards. The buffered gauges,
+scraped before the crash, are that exposure. At a stop, a drain's included, the
+forwarder flushes for up to `flushTimeoutMs`, then abandons the rest, counted
+`shutdown` and logged. A record already sent and still awaiting Kafka's answer
+then may have been written, and is counted `shutdown` all the same. A drained
+node's buffer is not handed to another node.
+
+**A live test** runs the default binary against a real Kafka. It skips unless
+both variables are set:
+
+```
+SINKKAFKA_LIVE_BROKERS=127.0.0.1:7068 SINKKAFKA_LIVE_CONTAINER=<podman container> go test -count=1 -v -run '^TestLiveKafka$' ./modules/sinkkafka
+```
+
+It pauses, stops and starts the container to show each policy. The test's
+variables do not start with `HOARDMQ_`, which the broker reads as configuration
+overrides.
 
 ### Observability
 
@@ -2645,6 +2826,8 @@ go run ./tools/licensecheck
 go generate ./... && git diff --exit-code NOTICE
 go test -run '^$' -fuzz=FuzzDecodeV5 -fuzztime=60s ./internal/packet    # and V4, V3, FuzzConnect
 go test ./deploy/...                                                    # Helm chart self-check
+go test ./cmd/hoardmq-build                                             # builds the example module into a binary with hoardmq-build, offline, and runs it
+SINKKAFKA_LIVE_BROKERS=… SINKKAFKA_LIVE_CONTAINER=… go test -run '^TestLiveKafka$' ./modules/sinkkafka   # sink.kafka against a real Kafka (see "Kafka forwarder")
 go test -timeout 30m ./sim                                              # simulation harness: seed corpus, negative controls, 1k-client failover
 HOARDMQ_SIM_RANDOM=20 go test -timeout 60m ./sim -run TestCorpus        # nightly: random seeds, each printed
 docker build -t hoardmq:dev .                                           # the container image
@@ -2654,9 +2837,11 @@ The gates and the dependency policy behind them are in
 [docs/dependency-policy.md](docs/dependency-policy.md). The race detector
 is in no gate: `-race` runs only in a work item that tracks a race, over the
 package that showed it, and in a negative control whose subject is a race
-(same document). The broker compiles in two third-party modules, the
-adopted Raft core `go.etcd.io/raft/v3` (Apache-2.0) and its
-`google.golang.org/protobuf` (BSD-3), both listed in NOTICE; the conformance
+(same document). The broker compiles in the adopted Raft core
+`go.etcd.io/raft/v3` (Apache-2.0) and its `google.golang.org/protobuf`
+(BSD-3), and the Kafka forwarder's client `github.com/twmb/franz-go` with its
+`kmsg`, `klauspost/compress` and `pierrec/lz4` (BSD-3), all listed in NOTICE;
+the conformance
 suite imports the two Paho Go clients (EPL-2.0, test only, pinned) and what
 they bring in, none of which reaches the binary.
 

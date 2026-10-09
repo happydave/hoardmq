@@ -6,6 +6,8 @@
 package records
 
 import (
+	extrecords "github.com/happydave/hoardmq/ext/records"
+
 	"context"
 	"encoding/json"
 	"errors"
@@ -30,16 +32,12 @@ const (
 	DefaultMaxRecords = 100000
 )
 
-// Record is one stored record.
-type Record struct {
-	Value json.RawMessage `json:"v"`
-	// Version is the log index of the record's last write; Created the
-	// index of the write that created it.
-	Version uint64    `json:"ver"`
-	Created uint64    `json:"created"`
-	By      string    `json:"by,omitempty"`
-	At      time.Time `json:"at"`
-}
+// The record values are the extension API's.
+type (
+	Record = extrecords.Record
+	Entry  = extrecords.Entry
+	Result = extrecords.Result
+)
 
 // Op is one write.
 type Op struct {
@@ -62,18 +60,6 @@ const (
 	RefusedFull    = "full"
 	RefusedInvalid = "invalid"
 )
-
-// Result is a write's outcome.
-type Result struct {
-	OK     bool   `json:"ok"`
-	Reason string `json:"reason,omitempty"`
-	// Index is the log index the write was applied at; Version the record's
-	// version after it (unchanged on a refusal).
-	Index   uint64 `json:"index"`
-	Version uint64 `json:"version,omitempty"`
-	// Previous is the record a delete removed or a put replaced.
-	Previous *Record `json:"prev,omitempty"`
-}
 
 // Component is the replicated state.
 type Component struct {
@@ -214,12 +200,6 @@ func (c *Component) Get(collection, key string) (Record, bool) {
 	defer c.mu.RUnlock()
 	r, ok := c.collections[collection][key]
 	return r, ok
-}
-
-// Entry is a record with its key.
-type Entry struct {
-	Key string
-	Record
 }
 
 // List reads a collection in key order, after the cursor, at most limit;

@@ -12,11 +12,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/happydave/hoardmq/internal/module"
+	"github.com/happydave/hoardmq/ext"
 )
 
 func init() {
-	module.Register("metrics.prometheus", func() module.Module { return &prometheus{} })
+	ext.Register("metrics.prometheus", func() ext.Module { return &prometheus{} })
 }
 
 // prometheus is metrics.prometheus: the internal counters plus an HTTP
@@ -29,7 +29,7 @@ type prometheus struct {
 	ready       func() bool
 	serving     func() (bool, string)
 	drain       func()
-	drainStatus func() module.DrainStatus
+	drainStatus func() ext.DrainStatus
 	// adminOwnsDrain closes /drain here: the admin API serves it.
 	adminOwnsDrain bool
 	srv            *http.Server
@@ -41,9 +41,9 @@ type prometheusConfig struct {
 	MetricsPath string `json:"metricsPath"`
 }
 
-func (*prometheus) ID() module.ID { return "metrics.prometheus" }
+func (*prometheus) ID() ext.ID { return "metrics.prometheus" }
 
-func (p *prometheus) Provision(ctx *module.Context, raw json.RawMessage) error {
+func (p *prometheus) Provision(ctx *ext.Context, raw json.RawMessage) error {
 	var cfg prometheusConfig
 	if err := decode(raw, &cfg); err != nil {
 		return err
@@ -66,7 +66,7 @@ func (p *prometheus) Provision(ctx *module.Context, raw json.RawMessage) error {
 		p.drain = ctx.Services.Drain
 		p.drainStatus = ctx.Services.DrainStatus
 	}
-	p.series = map[string]*module.Metric{}
+	p.series = map[string]*ext.Metric{}
 	p.enabled.Store(true)
 	return nil
 }
@@ -179,7 +179,7 @@ func (p *prometheus) serveMetrics(w http.ResponseWriter, r *http.Request) {
 // Render writes metrics in the Prometheus text exposition format: one TYPE
 // line per name (counter for _total names, gauge otherwise), samples with
 // sorted, escaped labels, in name then label order.
-func Render(metrics []module.Metric) string {
+func Render(metrics []ext.Metric) string {
 	sort.Slice(metrics, func(i, j int) bool {
 		if metrics[i].Name != metrics[j].Name {
 			return metrics[i].Name < metrics[j].Name

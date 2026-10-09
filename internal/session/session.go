@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/happydave/hoardmq/ext"
 	"github.com/happydave/hoardmq/internal/auth"
 	"github.com/happydave/hoardmq/internal/conn"
 	"github.com/happydave/hoardmq/internal/hook"
@@ -240,22 +241,8 @@ func newSession(k key, log *slog.Logger) *Session {
 	}
 }
 
-// Record is the read-only view of a session for observers and stores.
-type Record struct {
-	Namespace      string
-	ClientID       string
-	Epoch          uint64
-	Version        packet.Version
-	Online         bool
-	ExpiryInterval uint32
-	ExpiresAt      time.Time
-	Subscriptions  int
-	InFlight       int
-	Queued         int
-	Drops          uint64
-	Expired        uint64
-	HasWill        bool
-}
+// Record is the extension API's description of one session.
+type Record = ext.SessionRecord
 
 // storeKey names this session for the journal, carrying the lease epoch the
 // node held for it when the record was written. The replication tap stamps

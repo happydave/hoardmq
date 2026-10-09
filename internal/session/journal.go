@@ -10,26 +10,11 @@ import (
 	"github.com/happydave/hoardmq/internal/store"
 )
 
-// Journal is the store provider seam: the manager records every change to
-// persistent state through it and calls Sync before acknowledging a QoS 1 or
-// 2 publish, a SUBSCRIBE, an UNSUBSCRIBE or a CONNECT. The store package
-// implements it over the write-ahead log.
-type Journal interface {
-	SessionUpsert(meta store.SessionMeta) error
-	SessionDelete(k store.Key) error
-	Subscribe(k store.Key, sub store.SubscriptionRecord) error
-	Unsubscribe(k store.Key, filter string) error
-	InboundQoS2(k store.Key, packetID uint16, add bool) error
-	InboundAccepted(k store.Key, packetID uint16) error
-	Enqueue(k store.Key, e store.Entry) error
-	Sent(k store.Key, entrySeq uint64, packetID uint16) error
-	InflightState(k store.Key, packetID uint16, state byte) error
-	Complete(k store.Key, packetID uint16) error
-	Dropped(k store.Key, entrySeq uint64) error
-	Retain(m *message.Message) error
-	RetainDelete(ns, topic string) error
-	Sync() error
-}
+// Journal is the store provider seam (ext/store.Journal): the manager
+// records every change to persistent state through it and calls Sync before
+// acknowledging a QoS 1 or 2 publish, a SUBSCRIBE, an UNSUBSCRIBE or a
+// CONNECT.
+type Journal = store.Journal
 
 // journalWriter wraps the journal with the persistence rule (only persistent
 // sessions are recorded) and error handling: a failed append marks the

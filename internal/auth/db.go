@@ -61,13 +61,15 @@ func CredentialForm(phc string) string {
 type DBAuthenticator struct {
 	Lookup func(username string) (value json.RawMessage, found, open bool)
 	// Cache answers a repeated verification without deriving; nil derives.
-	Cache *VerifyCache
+	Cache Verifier
 }
 
 // Authenticate implements Authenticator.
 func (a *DBAuthenticator) Authenticate(_ context.Context, req *Request) Result {
 	value, found, open := a.Lookup(req.Username)
-	return dbDecide(req, value, found, open, a.Cache.Verify)
+	return dbDecide(req, value, found, open, func(stored string, password []byte) (bool, error) {
+		return verifyWith(a.Cache, stored, password)
+	})
 }
 
 // dbDecide is the decision on a request against what the database holds for

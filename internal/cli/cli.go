@@ -13,6 +13,7 @@ import (
 	"runtime/debug"
 	"strings"
 
+	"github.com/happydave/hoardmq/ext"
 	"github.com/happydave/hoardmq/internal/auth"
 	"github.com/happydave/hoardmq/internal/broker"
 	"github.com/happydave/hoardmq/internal/config"
@@ -49,7 +50,7 @@ var verbs = []verb{
 	{name: "whoami", summary: "the identity a credential authenticates as (admin API)", run: runWhoami},
 	{name: "login", summary: "log in through an OpenID Connect provider and print the ID token the admin API accepts", run: runLogin},
 	{name: "hash-password", summary: "read a password from stdin and print its hash for a users file (-scram: the SCRAM form; -argon2id: Argon2id)", run: runHashPassword},
-	{name: "version", summary: "print the build version", run: runVersion},
+	{name: "version", summary: "print the build version, the extension API's version and the modules compiled in", run: runVersion},
 }
 
 type app struct {
@@ -255,17 +256,47 @@ func runVersion(a *app, args []string) int {
 		return ExitUsage
 	}
 	fprintln(a.stdout, "hoardmq "+Version())
+	fprintln(a.stdout, "extension API "+ext.APIVersion)
+	ids := ext.Known()
+	names := make([]string, len(ids))
+	for i, id := range ids {
+		names[i] = string(id)
+	}
+	fprintln(a.stdout, "modules: "+strings.Join(names, " "))
 	return ExitOK
 }
 
-// Version derives the version string from build information: the module
-// version when set, else "devel" with the VCS revision when embedded.
+// brokerModule is the broker's module path: the main module of the default
+// binary, a dependency of one hoardmq-build compiled.
+const brokerModule = "github.com/happydave/hoardmq"
+
+// Version derives the version string from build information: the broker
+// module's version when set, else "devel" with the VCS revision when
+// embedded.
 func Version() string {
 	info, ok := debug.ReadBuildInfo()
 	if !ok {
 		return "devel"
 	}
-	return versionFrom(info.Main.Version, info.Settings)
+	return buildVersion(info)
+}
+
+// buildVersion reads the broker's version from the main module, or from the
+// dependency list when hoardmq-build's generated module is the main one.
+func buildVersion(info *debug.BuildInfo) string {
+	if info.Main.Path == brokerModule || info.Main.Path == "" {
+		return versionFrom(info.Main.Version, info.Settings)
+	}
+	for _, d := range info.Deps {
+		if d.Path != brokerModule {
+			continue
+		}
+		if d.Replace != nil && d.Replace.Version == "" {
+			return "devel (" + d.Replace.Path + ")"
+		}
+		return d.Version
+	}
+	return "devel"
 }
 
 func versionFrom(main string, settings []debug.BuildSetting) string {

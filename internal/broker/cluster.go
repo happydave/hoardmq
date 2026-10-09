@@ -287,13 +287,7 @@ func (s *Server) openConsensus() error {
 	}
 	svc.Start()
 	repl.Start()
-	if tapper, ok := s.store.(interface {
-		SetTap(func(storepkg.Record) func())
-	}); ok {
-		tapper.SetTap(repl.Tap)
-	} else {
-		s.log.Warn("store provider has no record tap; sessions are not replicated")
-	}
+	s.store.SetTap(repl.Tap)
 	s.sessions.SetReplication(dataPlane{repl: repl, routes: s.routes, timeout: ro.AckTimeout})
 	s.consensus = rc
 	s.leases = svc

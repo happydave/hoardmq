@@ -49,7 +49,7 @@ func (e *Encoder) appendPacket(dst []byte, p Packet) ([]byte, error) {
 	case *Connack:
 		encodeConnack(&body, v, x)
 	case *Publish:
-		flags = x.flags()
+		flags = publishFlags(x)
 		err = encodePublish(&body, v, x)
 	case *Puback:
 		encodeAck(&body, v, &x.Ack)
@@ -100,7 +100,7 @@ func (e *Encoder) appendPacket(dst []byte, p Packet) ([]byte, error) {
 }
 
 // flags returns the fixed-header flag nibble for a PUBLISH.
-func (p *Publish) flags() byte {
+func publishFlags(p *Publish) byte {
 	var f byte
 	if p.Dup {
 		f |= 0x08
@@ -206,11 +206,11 @@ func encodeAck(w *writer, v Version, a *Ack) {
 	if v != V5 {
 		return
 	}
-	if a.ReasonCode == Success && a.Properties.empty() {
+	if a.ReasonCode == Success && propertiesEmpty(&a.Properties) {
 		return
 	}
 	w.byte(byte(a.ReasonCode))
-	if !a.Properties.empty() {
+	if !propertiesEmpty(&a.Properties) {
 		encodeProperties(w, ctxPubAck, &a.Properties)
 	}
 }
@@ -274,21 +274,21 @@ func encodeDisconnect(w *writer, v Version, d *Disconnect) {
 	if v != V5 {
 		return
 	}
-	if d.ReasonCode == NormalDisconnection && d.Properties.empty() {
+	if d.ReasonCode == NormalDisconnection && propertiesEmpty(&d.Properties) {
 		return
 	}
 	w.byte(byte(d.ReasonCode))
-	if !d.Properties.empty() {
+	if !propertiesEmpty(&d.Properties) {
 		encodeProperties(w, ctxDisconnect, &d.Properties)
 	}
 }
 
 func encodeAuth(w *writer, a *Auth) {
-	if a.ReasonCode == Success && a.Properties.empty() {
+	if a.ReasonCode == Success && propertiesEmpty(&a.Properties) {
 		return
 	}
 	w.byte(byte(a.ReasonCode))
-	if !a.Properties.empty() {
+	if !propertiesEmpty(&a.Properties) {
 		encodeProperties(w, ctxAuth, &a.Properties)
 	}
 }

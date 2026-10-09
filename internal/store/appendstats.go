@@ -3,17 +3,12 @@ package store
 import (
 	"sync/atomic"
 	"time"
+
+	extstore "github.com/happydave/hoardmq/ext/store"
 )
 
-// AppendStats is what the store's lock was held for by appends, readable
-// without that lock. Held covers the log write and the tap; the log write is
-// Held less Tap.
-type AppendStats struct {
-	Appends   int64   `json:"appends"`
-	HeldSec   float64 `json:"held_sec_total"`
-	TapSec    float64 `json:"tap_sec_total"`
-	HeldMaxMs float64 `json:"held_max_ms"`
-}
+// AppendStats is the extension API's append statistics.
+type AppendStats = extstore.AppendStats
 
 type appendCounters struct {
 	appends, heldNs, tapNs, heldMaxNs atomic.Int64

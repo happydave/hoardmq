@@ -251,14 +251,15 @@ func TestFileAuthenticatorCredentialChange(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.Cache = newVerifyCache(time.Hour, 10, newClock().now)
+	cache := newVerifyCache(time.Hour, 10, newClock().now)
+	f.Cache = cache
 	ctx := context.Background()
 	for i := 0; i < 2; i++ {
 		if r := f.Authenticate(ctx, pwReq("alice", "pw1")); r.Decision != Allow || r.Attributes["team"] != "blue" {
 			t.Fatalf("pw1 attempt %d: %+v", i, r)
 		}
 	}
-	wantStats(t, f.Cache, 1, 1, 1)
+	wantStats(t, cache, 1, 1, 1)
 	// The same stored password, new attributes: a hit, with the new attributes.
 	writeUsers(t, path, fileUser{Username: "alice", Password: s1, Attributes: map[string]string{"team": "red"}})
 	if err := f.Reload(); err != nil {
@@ -267,7 +268,7 @@ func TestFileAuthenticatorCredentialChange(t *testing.T) {
 	if r := f.Authenticate(ctx, pwReq("alice", "pw1")); r.Decision != Allow || r.Attributes["team"] != "red" {
 		t.Fatalf("after an attribute change: %+v, want allow with team red", r)
 	}
-	wantStats(t, f.Cache, 1, 2, 1)
+	wantStats(t, cache, 1, 2, 1)
 	writeUsers(t, path, fileUser{Username: "alice", Password: pbkdf2Form(t, "pw2")})
 	if err := f.Reload(); err != nil {
 		t.Fatal(err)
@@ -293,7 +294,8 @@ func TestDBCredentialChange(t *testing.T) {
 	var mu sync.Mutex
 	records := map[string]StoredCredential{}
 	put := func(user string, c StoredCredential) { mu.Lock(); records[user] = c; mu.Unlock() }
-	db := &DBAuthenticator{Cache: newVerifyCache(time.Hour, 10, newClock().now), Lookup: func(user string) (json.RawMessage, bool, bool) {
+	dbCache := newVerifyCache(time.Hour, 10, newClock().now)
+	db := &DBAuthenticator{Cache: dbCache, Lookup: func(user string) (json.RawMessage, bool, bool) {
 		mu.Lock()
 		defer mu.Unlock()
 		c, ok := records[user]
@@ -311,7 +313,7 @@ func TestDBCredentialChange(t *testing.T) {
 			t.Fatalf("pw1 attempt %d: %+v", i, r)
 		}
 	}
-	wantStats(t, db.Cache, 1, 1, 1)
+	wantStats(t, dbCache, 1, 1, 1)
 	put("alice", StoredCredential{Password: s1, Attributes: map[string]string{"team": "red"}})
 	if r := db.Authenticate(ctx, pwReq("alice", "pw1")); r.Decision != Allow || r.Attributes["team"] != "red" {
 		t.Fatalf("after an attribute change: %+v, want allow with team red", r)

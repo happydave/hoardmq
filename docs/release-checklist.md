@@ -42,4 +42,7 @@ ungated and everything after it must be gated.
 - [ ] A mixed-version run between the previous tag and this one: the roll
   completes, the level rises once after the last node, and no property of
   the simulation corpus fails during it.
+- [ ] The extension API's changes since the previous tag, if any, raised
+  `ext.APIVersion` under the compatibility rules in `ext/CHANGELOG.md` and have
+  their section there; `ext/api.txt` matches the code (`TestAPIGolden`).
 - [ ] Every gate in `docs/dependency-policy.md` passes on the tagged commit.

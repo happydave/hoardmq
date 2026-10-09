@@ -27,6 +27,8 @@ type Hooks struct {
 	delivery   []*entry
 	retained   []*entry
 	will       []*entry
+	accepted   []*entry
+	admission  []*entry
 
 	// Timeouts and panics are counted per module for the operator.
 	failures map[ID]int
@@ -60,6 +62,12 @@ func newHooks(r *Registry) *Hooks {
 		}
 		if _, ok := e.m.(WillListener); ok {
 			h.will = append(h.will, e)
+		}
+		if _, ok := e.m.(PublishAccepted); ok {
+			h.accepted = append(h.accepted, e)
+		}
+		if _, ok := e.m.(PublishAdmission); ok {
+			h.admission = append(h.admission, e)
 		}
 	}
 	return h
@@ -231,10 +239,42 @@ func (h *Hooks) OnWill(ctx context.Context, ns, id string, m *message.Message) {
 	}
 }
 
+// OnPublishAccepted implements hook.Observer.
+func (h *Hooks) OnPublishAccepted(ctx context.Context, source hook.PublishSource, m *message.Message) {
+	if len(h.accepted) == 0 {
+		return
+	}
+	for _, e := range h.enabled(h.accepted) {
+		l := e.m.(PublishAccepted)
+		h.call(ctx, e, func(c context.Context) hook.Outcome { l.OnPublishAccepted(c, source, m); return hook.OK })
+	}
+}
+
+// AdmitPublish implements hook.Observer: the first outcome that is Drop or
+// Disconnect refuses the publish and ends the chain.
+func (h *Hooks) AdmitPublish(ctx context.Context, info hook.Info, m *message.Message) hook.Outcome {
+	if len(h.admission) == 0 {
+		return hook.OK
+	}
+	for _, e := range h.enabled(h.admission) {
+		a := e.m.(PublishAdmission)
+		out := h.call(ctx, e, func(c context.Context) hook.Outcome { return a.AdmitPublish(c, info, m) })
+		switch out.Action {
+		case hook.Drop, hook.Disconnect:
+			return out
+		}
+	}
+	return hook.OK
+}
+
+// Admitting implements hook.Observer.
+func (h *Hooks) Admitting() bool { return len(h.admission) > 0 }
+
 // Empty reports whether no module provides interceptors or listeners, so the
 // core can skip the calls entirely.
 func (h *Hooks) Empty() bool {
-	return len(h.connection)+len(h.inbound)+len(h.outbound)+len(h.subscribe)+len(h.delivery)+len(h.retained)+len(h.will) == 0
+	return len(h.connection)+len(h.inbound)+len(h.outbound)+len(h.subscribe)+len(h.delivery)+len(h.retained)+len(h.will)+
+		len(h.accepted)+len(h.admission) == 0
 }
 
 var _ hook.Interceptor = (*Hooks)(nil)

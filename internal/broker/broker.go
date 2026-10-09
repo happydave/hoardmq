@@ -18,6 +18,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/happydave/hoardmq/ext"
+	extstore "github.com/happydave/hoardmq/ext/store"
 	"github.com/happydave/hoardmq/internal/admin"
 	"github.com/happydave/hoardmq/internal/audit"
 	"github.com/happydave/hoardmq/internal/auth"
@@ -229,16 +231,17 @@ func NewWithHooks(cfg config.Document, log *slog.Logger, seams Hooks) (*Server, 
 	return s, nil
 }
 
-// moduleContext is what modules receive at provision. Services and the
-// password cache are nil for a read-only build (hoardmq check).
+// moduleContext is what modules receive at provision. For a read-only build
+// (hoardmq check) svc and passwords are nil: modules get no services, and a
+// password verifier that caches nothing.
 func moduleContext(cfg config.Document, log *slog.Logger, svc module.Services, hooks Hooks, passwords *auth.VerifyCache) *module.Context {
 	return &module.Context{
 		Logger:    log,
 		Node:      cfg.Node.Name,
 		Namespace: "default",
 		DataDir:   cfg.Node.DataDir,
-		Store: store.Options{
-			SyncPolicy:     store.SyncPolicy(cfg.Node.WALSync),
+		Store: extstore.Options{
+			SyncPolicy:     cfg.Node.WALSync,
 			SyncInterval:   time.Duration(cfg.Node.WALSyncIntervalMs) * time.Millisecond,
 			GroupMaxDelay:  time.Duration(cfg.Node.WALGroupMaxDelayMs) * time.Millisecond,
 			GroupMaxSize:   cfg.Node.WALGroupMaxSize,
@@ -247,7 +250,7 @@ func moduleContext(cfg config.Document, log *slog.Logger, svc module.Services, h
 			IgnoreChecksum: hooks.Defects.IgnoreChecksum,
 		},
 		Services:      svc,
-		PasswordCache: passwords,
+		Passwords:     passwords,
 		Observability: module.Observability{Address: cfg.Observability.Address, MetricsPath: cfg.Observability.MetricsPath, AdminOwnsDrain: cfg.Admin.Address != ""},
 	}
 }
@@ -525,11 +528,11 @@ func (s *Server) StormStats() StormStats {
 		st.RoutingRefusals = &rt
 		st.OwnerKnowledge, _ = s.routes.OwnerKnowledge()
 	}
-	if p, ok := s.store.(interface{ AppendStats() store.AppendStats }); ok {
+	if p, ok := s.store.(ext.AppendStatsProvider); ok {
 		as := p.AppendStats()
 		st.StoreAppend = &as
 	}
-	if p, ok := s.store.(interface{ SyncStats() store.SyncStats }); ok {
+	if p, ok := s.store.(ext.SyncStatsProvider); ok {
 		timed("sync", func() {
 			ss := p.SyncStats()
 			st.Sync = &ss
@@ -978,7 +981,7 @@ func (s *Server) registerCollector() {
 		for ns, n := range retained {
 			set("hoardmq_retained_active", map[string]string{"namespace": ns}, float64(n))
 		}
-		if p, ok := s.store.(interface{ JournalStats() store.JournalStats }); ok {
+		if p, ok := s.store.(ext.JournalStatsProvider); ok {
 			js := p.JournalStats()
 			set("hoardmq_log_index", nil, float64(js.LastIndex))
 			setJournal(set, "node", js)
@@ -1154,7 +1157,7 @@ func (s *Server) AuditDir() string {
 
 // ObservabilityAddr is the bound observability listener, or nil.
 func (s *Server) ObservabilityAddr() net.Addr {
-	if p, ok := s.registry.Metrics().(interface{ Addr() net.Addr }); ok {
+	if p, ok := s.registry.Metrics().(ext.ListenerProvider); ok {
 		return p.Addr()
 	}
 	return nil

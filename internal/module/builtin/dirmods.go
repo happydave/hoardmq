@@ -11,15 +11,16 @@ import (
 	"strings"
 	"time"
 
+	"github.com/happydave/hoardmq/ext"
+	extauth "github.com/happydave/hoardmq/ext/auth"
 	"github.com/happydave/hoardmq/internal/auth"
 	"github.com/happydave/hoardmq/internal/jose"
 	"github.com/happydave/hoardmq/internal/ldap"
-	"github.com/happydave/hoardmq/internal/module"
 )
 
 func init() {
-	module.Register("auth.ldap", func() module.Module { return &ldapAuth{} })
-	module.Register("auth.db", func() module.Module { return &dbAuth{} })
+	ext.Register("auth.ldap", func() ext.Module { return &ldapAuth{} })
+	ext.Register("auth.db", func() ext.Module { return &dbAuth{} })
 }
 
 // ldapConfig is auth.ldap's configuration.
@@ -108,12 +109,12 @@ func ldapProblems(c ldapConfig) []string {
 type ldapAuth struct {
 	toggle
 	inner   *auth.LDAPAuthenticator
-	metrics module.MetricsProvider
+	metrics ext.MetricsProvider
 }
 
-func (*ldapAuth) ID() module.ID                   { return "auth.ldap" }
-func (*ldapAuth) Capabilities() module.Capability { return module.CapAuthentication }
-func (*ldapAuth) Start(context.Context) error     { return nil }
+func (*ldapAuth) ID() ext.ID                   { return "auth.ldap" }
+func (*ldapAuth) Capabilities() ext.Capability { return ext.CapAuthentication }
+func (*ldapAuth) Start(context.Context) error  { return nil }
 
 func (l *ldapAuth) Stop(context.Context) error {
 	if l.inner != nil {
@@ -123,7 +124,7 @@ func (l *ldapAuth) Stop(context.Context) error {
 }
 
 // Provision reads the files the configuration names and dials nothing.
-func (l *ldapAuth) Provision(ctx *module.Context, raw json.RawMessage) error {
+func (l *ldapAuth) Provision(ctx *ext.Context, raw json.RawMessage) error {
 	var c ldapConfig
 	if err := decode(raw, &c); err != nil {
 		return err
@@ -176,7 +177,7 @@ func (l *ldapAuth) Provision(ctx *module.Context, raw json.RawMessage) error {
 	return nil
 }
 
-func (l *ldapAuth) UseMetrics(m module.MetricsProvider) { l.metrics = m }
+func (l *ldapAuth) UseMetrics(m ext.MetricsProvider) { l.metrics = m }
 
 func (l *ldapAuth) count(name string, labels map[string]string) {
 	if l.metrics != nil {
@@ -184,7 +185,7 @@ func (l *ldapAuth) count(name string, labels map[string]string) {
 	}
 }
 
-func (l *ldapAuth) Authenticate(ctx context.Context, req *auth.Request) auth.Result {
+func (l *ldapAuth) Authenticate(ctx context.Context, req *extauth.Request) extauth.Result {
 	return l.inner.Authenticate(ctx, req)
 }
 
@@ -194,20 +195,20 @@ type dbAuth struct {
 	inner *auth.DBAuthenticator
 }
 
-func (*dbAuth) ID() module.ID                   { return "auth.db" }
-func (*dbAuth) Capabilities() module.Capability { return module.CapAuthentication }
-func (*dbAuth) Start(context.Context) error     { return nil }
-func (*dbAuth) Stop(context.Context) error      { return nil }
+func (*dbAuth) ID() ext.ID                   { return "auth.db" }
+func (*dbAuth) Capabilities() ext.Capability { return ext.CapAuthentication }
+func (*dbAuth) Start(context.Context) error  { return nil }
+func (*dbAuth) Stop(context.Context) error   { return nil }
 
 // Provision takes no configuration: the credentials are the cluster's,
 // administered through the admin API.
-func (d *dbAuth) Provision(ctx *module.Context, raw json.RawMessage) error {
+func (d *dbAuth) Provision(ctx *ext.Context, raw json.RawMessage) error {
 	var c struct{}
 	if err := decode(raw, &c); err != nil {
 		return err
 	}
 	svc := ctx.Services
-	d.inner = &auth.DBAuthenticator{Cache: ctx.PasswordCache, Lookup: func(username string) (json.RawMessage, bool, bool) {
+	d.inner = &auth.DBAuthenticator{Cache: ctx.Passwords, Lookup: func(username string) (json.RawMessage, bool, bool) {
 		if svc == nil {
 			return nil, false, false
 		}
@@ -222,7 +223,7 @@ func (d *dbAuth) Provision(ctx *module.Context, raw json.RawMessage) error {
 	return nil
 }
 
-func (d *dbAuth) Authenticate(ctx context.Context, req *auth.Request) auth.Result {
+func (d *dbAuth) Authenticate(ctx context.Context, req *extauth.Request) extauth.Result {
 	return d.inner.Authenticate(ctx, req)
 }
 

@@ -1,0 +1,915 @@
+hoardmq extension API 0.2.0
+
+package github.com/happydave/hoardmq/ext
+
+const APIVersion = "0.2.0"
+var OK = Outcome{Action: Continue}
+func Register(id ID, f Factory)
+type Action byte
+const (
+	Continue Action = iota
+	Modify
+	Drop
+	Disconnect
+)
+func (a Action) String() string
+type AppendStatsProvider interface {
+	AppendStats() store.AppendStats
+}
+type Capability uint32
+const (
+	CapConnection Capability = 1 << iota
+	CapAuthentication
+	CapAuthorization
+	CapInbound
+	CapOutbound
+	CapSubscribe
+	CapDelivery
+	CapRetained
+	CapWill
+	CapStore
+	CapMetrics
+
+	CapCertificate
+
+	CapMechanism
+
+	CapTraces
+
+	CapPublishAccepted
+
+	CapPublishAdmission
+)
+func (c Capability) Has(want Capability) bool
+type Collector interface {
+	AddCollector(func(set func(name string, labels map[string]string, value float64)))
+}
+type ConnectionHook interface {
+	Connected(ctx context.Context, info ConnectionInfo)
+	Disconnected(ctx context.Context, info ConnectionInfo, reason mqtt.ReasonCode, graceful bool)
+}
+type ConnectionInfo struct {
+	Namespace string
+	ClientID  string
+	Username  string
+	CertCN    string
+	Version   mqtt.Version
+	Listener  string
+	PeerAddr  string
+}
+type Context struct {
+	Logger    *slog.Logger
+	Node      string
+	Namespace string
+	DataDir   string
+
+	Store store.Options
+
+	Observability Observability
+
+	Services Services
+
+	Passwords PasswordVerifier
+}
+type DeliveryEvent byte
+const (
+	Delivered DeliveryEvent = iota
+	Acknowledged
+	Queued
+	Dropped
+	Expired
+)
+func (e DeliveryEvent) String() string
+type DeliveryListener interface {
+	OnDelivery(ctx context.Context, event DeliveryEvent, namespace, clientID string, m *mqtt.Message, qos byte)
+}
+type DrainStatus struct {
+	Draining         bool   `json:"draining"`
+	Phase            string `json:"phase,omitempty"`
+	ClientsRemaining int    `json:"clientsRemaining"`
+	LeasesRemaining  int    `json:"leasesRemaining"`
+
+	SessionsAwaiting    int `json:"sessionsAwaiting"`
+	SessionsConfirmed   int `json:"sessionsConfirmed"`
+	SessionsUnconfirmed int `json:"sessionsUnconfirmed"`
+
+	CopiesKept int `json:"copiesKept,omitempty"`
+
+	RetainedShardsKept int  `json:"retainedShardsKept,omitempty"`
+	Complete           bool `json:"complete"`
+}
+type Factory func() Module
+func Lookup(id ID) (Factory, bool)
+type HookPolicy struct {
+	Timeout  time.Duration
+	Fallback Action
+}
+type ID string
+func Known() []ID
+func (id ID) Family() string
+type InboundInterceptor interface {
+	InterceptInbound(ctx context.Context, info ConnectionInfo, p mqtt.Packet) Outcome
+}
+type JournalStatsProvider interface {
+	JournalStats() store.JournalStats
+}
+type ListenerProvider interface {
+	Addr() net.Addr
+}
+type Metric struct {
+	Name   string
+	Labels map[string]string
+	Value  float64
+}
+type MetricsProvider interface {
+	Add(name string, labels map[string]string, delta float64)
+	Set(name string, labels map[string]string, value float64)
+	Snapshot() []Metric
+}
+type MetricsUser interface {
+	UseMetrics(MetricsProvider)
+}
+type Module interface {
+	ID() ID
+	Capabilities() Capability
+
+	Provision(ctx *Context, raw json.RawMessage) error
+	Start(ctx context.Context) error
+	Stop(ctx context.Context) error
+}
+type Observability struct {
+	Address        string
+	MetricsPath    string
+	AdminOwnsDrain bool
+}
+type OutboundInterceptor interface {
+	InterceptOutbound(ctx context.Context, info ConnectionInfo, p mqtt.Packet) Outcome
+}
+type Outcome struct {
+	Action Action
+	Reason mqtt.ReasonCode
+}
+type PasswordVerifier interface {
+	Verify(stored string, password []byte) (bool, error)
+}
+type PublishAcceptedListener interface {
+	OnPublishAccepted(ctx context.Context, source PublishSource, m *mqtt.Message)
+}
+type PublishAdmission interface {
+	AdmitPublish(ctx context.Context, info ConnectionInfo, m *mqtt.Message) Outcome
+}
+type PublishSource byte
+const (
+	SourceClient PublishSource = iota
+
+	SourceWill
+
+	SourceModule
+)
+func (s PublishSource) String() string
+type RecordStore interface {
+	Get(collection, key string) (records.Record, bool)
+	List(collection, after string, limit int) (items []records.Entry, more bool)
+	Put(ctx context.Context, collection, key string, value json.RawMessage, ifVersion *uint64, by string, at time.Time) (records.Result, error)
+	Delete(ctx context.Context, collection, key string, ifVersion *uint64, by string, at time.Time) (records.Result, error)
+}
+type Reloader interface {
+	Reload() error
+}
+type RetainedListener interface {
+	OnRetained(ctx context.Context, m *mqtt.Message)
+}
+type Services interface {
+	Publish(m *mqtt.Message)
+
+	Disconnect(namespace, clientID string, reason mqtt.ReasonCode) bool
+
+	Sessions() []SessionRecord
+
+	Retained(namespace, filter string) []*mqtt.Message
+
+	Ready() bool
+
+	Serving() (bool, string)
+
+	Drain()
+	DrainStatus() DrainStatus
+
+	Records() RecordStore
+}
+type SessionRecord struct {
+	Namespace      string
+	ClientID       string
+	Epoch          uint64
+	Version        mqtt.Version
+	Online         bool
+	ExpiryInterval uint32
+	ExpiresAt      time.Time
+	Subscriptions  int
+	InFlight       int
+	Queued         int
+	Drops          uint64
+	Expired        uint64
+	HasWill        bool
+}
+type StoreProvider interface {
+	Journal() store.Journal
+	Recover() (*store.State, error)
+
+	Checkpoint(store.Snapshot) error
+	NeedsCheckpoint() bool
+	Close() error
+
+	SetTap(tap func(store.Record) func())
+}
+type SubscribeInterceptor interface {
+	InterceptSubscribe(ctx context.Context, info ConnectionInfo, sub *mqtt.Subscription) Outcome
+}
+type SyncStatsProvider interface {
+	SyncStats() store.SyncStats
+}
+type Toggleable interface {
+	SetEnabled(bool)
+}
+type TraceProvider interface {
+	Tracer() *trace.Tracer
+}
+type Validator interface {
+	Validate() error
+}
+type WillListener interface {
+	OnWill(ctx context.Context, namespace, clientID string, m *mqtt.Message)
+}
+
+package github.com/happydave/hoardmq/ext/auth
+
+type Action int
+const (
+	Publish Action = iota
+	Subscribe
+	Unsubscribe
+)
+func (a Action) String() string
+type Authenticator interface {
+	Authenticate(ctx context.Context, req *Request) Result
+}
+type Authorizer interface {
+	Authorize(ctx context.Context, action Action, topic string, id *Identity) Decision
+}
+type CertificateAuthenticator interface {
+	Authenticator
+	ChecksCertificates()
+}
+type Decision int
+const (
+	Pass Decision = iota
+	Allow
+	Deny
+)
+func (d Decision) String() string
+type Exchange interface {
+	Step(data []byte) Step
+}
+type Identity struct {
+	Namespace  string
+	ClientID   string
+	Username   string
+	CertCN     string
+	Attributes map[string]string
+}
+type Mechanism interface {
+	Methods() []string
+	Begin(ctx context.Context, method string, req *Request) Exchange
+}
+type Request struct {
+	Namespace   string
+	ClientID    string
+	Username    string
+	HasUsername bool
+	Password    []byte
+	HasPassword bool
+	PeerAddr    string
+
+	CertCN string
+
+	CertChain []*x509.Certificate
+	Listener  string
+}
+func (r *Request) HasCredentials() bool
+type Result struct {
+	Decision   Decision
+	Attributes map[string]string
+
+	Username string
+
+	Expires time.Time
+
+	Reason string
+}
+type Step struct {
+	Kind       StepKind
+	Data       []byte
+	Username   string
+	Attributes map[string]string
+	Checked    bool
+	Reason     string
+}
+type StepKind int
+const (
+	Continue StepKind = iota
+
+	Succeed
+
+	Fail
+)
+
+package github.com/happydave/hoardmq/ext/mqtt
+
+const SharePrefix = "$share/"
+func HasWildcard(filter string) bool
+func IsSharedFilter(filter string) bool
+func MatchTopic(filter, name string) bool
+func SplitSharedFilter(filter string) (share, inner string)
+func ValidateTopicFilter(filter string) string
+func ValidateTopicName(name string) string
+type Ack struct {
+	PacketID   uint16
+	ReasonCode ReasonCode
+	Properties Properties
+}
+type Auth struct {
+	ReasonCode ReasonCode
+	Properties Properties
+}
+func (*Auth) Type() Type
+type Connack struct {
+	SessionPresent bool
+	ReasonCode     ReasonCode
+	Properties     Properties
+}
+func (*Connack) Type() Type
+type Connect struct {
+	ProtocolName  string
+	ProtocolLevel Version
+	CleanStart    bool
+	KeepAlive     uint16
+	ClientID      string
+	Will          *Will
+	HasUsername   bool
+	Username      string
+	HasPassword   bool
+	Password      []byte
+	Properties    Properties
+}
+func (*Connect) Type() Type
+type Delivery struct {
+	QoS                     byte
+	PacketID                uint16
+	Dup                     bool
+	Retain                  bool
+	SubscriptionIdentifiers []uint32
+}
+type Disconnect struct {
+	ReasonCode ReasonCode
+	Properties Properties
+}
+func (*Disconnect) Type() Type
+type ForwardRef struct {
+	Peer string
+	Seq  uint64
+}
+type ID struct {
+	Node    string `json:"node"`
+	Seq     uint64 `json:"seq"`
+	Arrived int64  `json:"arrived"`
+}
+type Message struct {
+	Namespace string
+	Topic     string
+	Payload   []byte
+	QoS       byte
+	Retain    bool
+
+	PayloadFormat   *byte
+	ContentType     *string
+	ResponseTopic   *string
+	CorrelationData []byte
+	UserProperties  []UserProperty
+
+	Expiry time.Time
+
+	Publisher Publisher
+
+	Seq     uint64
+	Arrived time.Time
+
+	OriginCluster string
+	Hops          uint8
+
+	Forwarded bool `json:"-"`
+
+	Forwards []ForwardRef `json:"-"`
+
+	Trace SpanContext `json:"-"`
+}
+func FromPublish(p *Publish, pub Publisher, seq uint64, now time.Time) *Message
+func (m *Message) Expired(now time.Time) bool
+func (m *Message) Identity() (ID, bool)
+func (m *Message) ToPublish(d Delivery, now time.Time) *Publish
+type Packet interface {
+	Type() Type
+}
+type Pingreq struct{}
+func (*Pingreq) Type() Type
+type Pingresp struct{}
+func (*Pingresp) Type() Type
+type Properties struct {
+	PayloadFormatIndicator          *byte
+	MessageExpiryInterval           *uint32
+	ContentType                     *string
+	ResponseTopic                   *string
+	CorrelationData                 []byte
+	SubscriptionIdentifiers         []uint32
+	SessionExpiryInterval           *uint32
+	AssignedClientIdentifier        *string
+	ServerKeepAlive                 *uint16
+	AuthenticationMethod            *string
+	AuthenticationData              []byte
+	RequestProblemInformation       *bool
+	WillDelayInterval               *uint32
+	RequestResponseInformation      *bool
+	ResponseInformation             *string
+	ServerReference                 *string
+	ReasonString                    *string
+	ReceiveMaximum                  *uint16
+	TopicAliasMaximum               *uint16
+	TopicAlias                      *uint16
+	MaximumQoS                      *byte
+	RetainAvailable                 *bool
+	UserProperties                  []UserProperty
+	MaximumPacketSize               *uint32
+	WildcardSubscriptionAvailable   *bool
+	SubscriptionIdentifierAvailable *bool
+	SharedSubscriptionAvailable     *bool
+}
+type Puback struct{ Ack }
+func (*Puback) Type() Type
+type Pubcomp struct{ Ack }
+func (*Pubcomp) Type() Type
+type Publish struct {
+	Dup        bool
+	QoS        byte
+	Retain     bool
+	Topic      string
+	PacketID   uint16
+	Properties Properties
+	Payload    []byte
+}
+func (*Publish) Type() Type
+type Publisher struct {
+	Namespace string
+	ClientID  string
+	Username  string
+	Node      string
+}
+type Pubrec struct{ Ack }
+func (*Pubrec) Type() Type
+type Pubrel struct{ Ack }
+func (*Pubrel) Type() Type
+type ReasonCode byte
+const (
+	Success                             ReasonCode = 0x00
+	NormalDisconnection                 ReasonCode = 0x00
+	GrantedQoS0                         ReasonCode = 0x00
+	GrantedQoS1                         ReasonCode = 0x01
+	GrantedQoS2                         ReasonCode = 0x02
+	DisconnectWithWillMessage           ReasonCode = 0x04
+	NoMatchingSubscribers               ReasonCode = 0x10
+	NoSubscriptionExisted               ReasonCode = 0x11
+	ContinueAuthentication              ReasonCode = 0x18
+	ReAuthenticate                      ReasonCode = 0x19
+	UnspecifiedError                    ReasonCode = 0x80
+	MalformedPacket                     ReasonCode = 0x81
+	ProtocolError                       ReasonCode = 0x82
+	ImplementationSpecificError         ReasonCode = 0x83
+	UnsupportedProtocolVersion          ReasonCode = 0x84
+	ClientIdentifierNotValid            ReasonCode = 0x85
+	BadUserNameOrPassword               ReasonCode = 0x86
+	NotAuthorized                       ReasonCode = 0x87
+	ServerUnavailable                   ReasonCode = 0x88
+	ServerBusy                          ReasonCode = 0x89
+	Banned                              ReasonCode = 0x8A
+	ServerShuttingDown                  ReasonCode = 0x8B
+	BadAuthenticationMethod             ReasonCode = 0x8C
+	KeepAliveTimeout                    ReasonCode = 0x8D
+	SessionTakenOver                    ReasonCode = 0x8E
+	TopicFilterInvalid                  ReasonCode = 0x8F
+	TopicNameInvalid                    ReasonCode = 0x90
+	PacketIdentifierInUse               ReasonCode = 0x91
+	PacketIdentifierNotFound            ReasonCode = 0x92
+	ReceiveMaximumExceeded              ReasonCode = 0x93
+	TopicAliasInvalid                   ReasonCode = 0x94
+	PacketTooLarge                      ReasonCode = 0x95
+	MessageRateTooHigh                  ReasonCode = 0x96
+	QuotaExceeded                       ReasonCode = 0x97
+	AdministrativeAction                ReasonCode = 0x98
+	PayloadFormatInvalid                ReasonCode = 0x99
+	RetainNotSupported                  ReasonCode = 0x9A
+	QoSNotSupported                     ReasonCode = 0x9B
+	UseAnotherServer                    ReasonCode = 0x9C
+	ServerMoved                         ReasonCode = 0x9D
+	SharedSubscriptionsNotSupported     ReasonCode = 0x9E
+	ConnectionRateExceeded              ReasonCode = 0x9F
+	MaximumConnectTime                  ReasonCode = 0xA0
+	SubscriptionIdentifiersNotSupported ReasonCode = 0xA1
+	WildcardSubscriptionsNotSupported   ReasonCode = 0xA2
+)
+func (r ReasonCode) IsError() bool
+func (r ReasonCode) String() string
+type SpanContext struct {
+	TraceID [16]byte
+	SpanID  [8]byte
+	Flags   byte
+	State   string
+}
+func FromUserProperties(props []UserProperty) (SpanContext, bool)
+func ParseTraceparent(s string) (SpanContext, bool)
+func (c SpanContext) AppendTraceparent(b []byte) []byte
+func (c SpanContext) Sampled() bool
+func (c SpanContext) Valid() bool
+type Suback struct {
+	PacketID    uint16
+	Properties  Properties
+	ReasonCodes []ReasonCode
+}
+func (*Suback) Type() Type
+type Subscribe struct {
+	PacketID      uint16
+	Properties    Properties
+	Subscriptions []Subscription
+}
+func (*Subscribe) Type() Type
+type Subscription struct {
+	Filter            string
+	QoS               byte
+	NoLocal           bool
+	RetainAsPublished bool
+	RetainHandling    byte
+}
+type Type byte
+const (
+	CONNECT     Type = 1
+	CONNACK     Type = 2
+	PUBLISH     Type = 3
+	PUBACK      Type = 4
+	PUBREC      Type = 5
+	PUBREL      Type = 6
+	PUBCOMP     Type = 7
+	SUBSCRIBE   Type = 8
+	SUBACK      Type = 9
+	UNSUBSCRIBE Type = 10
+	UNSUBACK    Type = 11
+	PINGREQ     Type = 12
+	PINGRESP    Type = 13
+	DISCONNECT  Type = 14
+	AUTH        Type = 15
+)
+func (t Type) String() string
+type Unsuback struct {
+	PacketID    uint16
+	Properties  Properties
+	ReasonCodes []ReasonCode
+}
+func (*Unsuback) Type() Type
+type Unsubscribe struct {
+	PacketID   uint16
+	Properties Properties
+	Filters    []string
+}
+func (*Unsubscribe) Type() Type
+type UserProperty struct {
+	Name  string
+	Value string
+}
+type Version byte
+const (
+	V3 Version = 3
+	V4 Version = 4
+	V5 Version = 5
+)
+func (v Version) String() string
+type Will struct {
+	Topic      string
+	Payload    []byte
+	QoS        byte
+	Retain     bool
+	Properties Properties
+}
+
+package github.com/happydave/hoardmq/ext/records
+
+type Entry struct {
+	Key string
+	Record
+}
+type Record struct {
+	Value json.RawMessage `json:"v"`
+
+	Version uint64    `json:"ver"`
+	Created uint64    `json:"created"`
+	By      string    `json:"by,omitempty"`
+	At      time.Time `json:"at"`
+}
+type Result struct {
+	OK     bool   `json:"ok"`
+	Reason string `json:"reason,omitempty"`
+
+	Index   uint64 `json:"index"`
+	Version uint64 `json:"version,omitempty"`
+
+	Previous *Record `json:"prev,omitempty"`
+}
+
+package github.com/happydave/hoardmq/ext/store
+
+const (
+	RecordSessionUpsert byte = 1
+	RecordSessionDelete byte = 2
+	RecordSubscribe     byte = 3
+	RecordUnsubscribe   byte = 4
+	RecordInboundAdd    byte = 5
+	RecordInboundRemove byte = 6
+	RecordEnqueue       byte = 7
+	RecordSent          byte = 8
+	RecordInflightState byte = 9
+	RecordComplete      byte = 10
+	RecordDropped       byte = 11
+	RecordRetain        byte = 12
+	RecordRetainDelete  byte = 13
+)
+const (
+	StateQueued         byte = 0
+	StatePublishSent    byte = 1
+	StatePubrecReceived byte = 2
+)
+func IsRetained(typ byte) bool
+func IsRetainedDelete(typ byte) bool
+func IsSessionDelete(typ byte) bool
+func IsSessionUpsert(typ byte) bool
+func Known(typ byte) bool
+func RecordName(typ byte) string
+type AppendStats struct {
+	Appends   int64   `json:"appends"`
+	HeldSec   float64 `json:"held_sec_total"`
+	TapSec    float64 `json:"tap_sec_total"`
+	HeldMaxMs float64 `json:"held_max_ms"`
+}
+type Entry struct {
+	Seq         uint64        `json:"seq"`
+	Message     *mqtt.Message `json:"message"`
+	QoS         byte          `json:"qos"`
+	Identifiers []uint32      `json:"ids,omitempty"`
+	Retain      bool          `json:"retain,omitempty"`
+	Group       string        `json:"group,omitempty"`
+	PacketID    uint16        `json:"packetId,omitempty"`
+	State       byte          `json:"state"`
+}
+type Journal interface {
+	SessionUpsert(meta SessionMeta) error
+	SessionDelete(k Key) error
+	Subscribe(k Key, sub SubscriptionRecord) error
+	Unsubscribe(k Key, filter string) error
+	InboundQoS2(k Key, packetID uint16, add bool) error
+	InboundAccepted(k Key, packetID uint16) error
+	Enqueue(k Key, e Entry) error
+	Sent(k Key, entrySeq uint64, packetID uint16) error
+	InflightState(k Key, packetID uint16, state byte) error
+	Complete(k Key, packetID uint16) error
+	Dropped(k Key, entrySeq uint64) error
+	Retain(m *mqtt.Message) error
+	RetainDelete(ns, topic string) error
+	Sync() error
+}
+type JournalStats struct {
+	LastIndex       uint64
+	CheckpointIndex uint64
+	CheckpointAt    time.Time
+	Fsyncs          int64
+	FsyncSec        float64
+	Sync            SyncStats
+}
+type Key struct {
+	Namespace string
+	ClientID  string
+	Topic     string
+
+	Epoch uint64
+}
+func (k Key) Scope() Scope
+type Options struct {
+	SyncPolicy   string
+	SyncInterval time.Duration
+	SegmentBytes int64
+
+	GroupMaxDelay time.Duration
+	GroupMaxSize  int
+
+	Sync           func(*os.File) error
+	IgnoreChecksum bool
+}
+type Record struct {
+	Type    byte
+	Key     Key
+	Payload []byte
+}
+func DeleteRecord(ns, id string) Record
+func EncodeComplete(k Key, packetID uint16) (Record, error)
+func EncodeDropped(k Key, entrySeq uint64) (Record, error)
+func EncodeEnqueue(k Key, e Entry) (Record, error)
+func EncodeInboundAccepted(k Key, packetID uint16) (Record, error)
+func EncodeInboundQoS2(k Key, packetID uint16, add bool) (Record, error)
+func EncodeInflightState(k Key, packetID uint16, state byte) (Record, error)
+func EncodeRetain(m *mqtt.Message) (Record, error)
+func EncodeRetainDelete(ns, topic string) (Record, error)
+func EncodeSent(k Key, entrySeq uint64, packetID uint16) (Record, error)
+func EncodeSessionDelete(k Key) (Record, error)
+func EncodeSessionUpsert(meta SessionMeta) (Record, error)
+func EncodeSubscribe(k Key, sub SubscriptionRecord) (Record, error)
+func EncodeUnsubscribe(k Key, filter string) (Record, error)
+func RecordsFor(ss *SessionState) []Record
+func RetainRecord(m *mqtt.Message) Record
+type Scope struct {
+	Namespace string
+	ClientID  string
+	Topic     string
+	Epoch     uint64
+}
+func (s Scope) Bare() Scope
+func (s Scope) Zero() bool
+type SessionIndex struct {
+	Namespace string `json:"ns"`
+	ClientID  string `json:"id"`
+	Index     uint64 `json:"index"`
+}
+type SessionMeta struct {
+	Namespace      string      `json:"ns"`
+	ClientID       string      `json:"id"`
+	Epoch          uint64      `json:"epoch"`
+	Version        byte        `json:"version"`
+	Username       string      `json:"username,omitempty"`
+	ExpiryInterval uint32      `json:"expiry"`
+	ExpiresAt      time.Time   `json:"expiresAt,omitempty"`
+	Will           *WillRecord `json:"will,omitempty"`
+}
+type SessionState struct {
+	SessionMeta
+	Subscriptions []SubscriptionRecord `json:"subscriptions"`
+	InboundQoS2   []uint16             `json:"inboundQoS2"`
+
+	InboundAccepted []uint16 `json:"inboundAccepted,omitempty"`
+	Entries         []Entry  `json:"entries"`
+
+	Delivered []mqtt.ID `json:"delivered,omitempty"`
+}
+type Snapshot func(appended func() uint64) *State
+type State struct {
+	Sessions []*SessionState `json:"sessions"`
+	Retained []*mqtt.Message `json:"retained"`
+
+	Through []SessionIndex `json:"through,omitempty"`
+
+	At uint64 `json:"-"`
+	// contains filtered or unexported fields
+}
+func NewState() *State
+func (st *State) Apply(typ byte, payload []byte) error
+func (st *State) ApplyReport(typ byte, payload []byte) (Unapplied, error)
+func (st *State) Find(ns, id string) *SessionState
+func (st *State) Normalize()
+func (st *State) Remove(ns, id string)
+func (st *State) SetRetained(m *mqtt.Message)
+type SubscriptionRecord struct {
+	Filter            string `json:"filter"`
+	QoS               byte   `json:"qos"`
+	NoLocal           bool   `json:"noLocal,omitempty"`
+	RetainAsPublished bool   `json:"rap,omitempty"`
+	RetainHandling    byte   `json:"rh,omitempty"`
+	Identifier        uint32 `json:"id,omitempty"`
+}
+type SyncStats struct {
+	Syncs          int64   `json:"syncs"`
+	Ops            int64   `json:"ops_covered"`
+	Callers        int64   `json:"callers"`
+	WaitSec        float64 `json:"wait_sec_total"`
+	HeldGroups     int64   `json:"held_groups"`
+	Failures       int64   `json:"failures"`
+	Repairs        int64   `json:"repairs"`
+	RepairFailures int64   `json:"repair_failures"`
+
+	Checkpoints       int64   `json:"checkpoints"`
+	CheckpointSec     float64 `json:"checkpoint_sec_total"`
+	CheckpointHoldSec float64 `json:"checkpoint_hold_sec_total"`
+}
+type Unapplied string
+const (
+	UnappliedNoSession Unapplied = "no-session"
+	UnappliedNoEntry   Unapplied = "no-entry"
+)
+type WillRecord struct {
+	Message *mqtt.Message `json:"message"`
+	Delay   uint32        `json:"delay"`
+	Armed   bool          `json:"armed"`
+}
+
+package github.com/happydave/hoardmq/ext/trace
+
+type Attr struct {
+	Key    string
+	Type   AttrType
+	Str    string
+	Int    int64
+	Bool   bool
+	Double float64
+}
+func (a Attr) Value() string
+type AttrType uint8
+const (
+	AttrString AttrType = iota
+	AttrInt
+	AttrBool
+	AttrDouble
+)
+type Config struct {
+	Ratio float64
+
+	ServiceName string
+	Node        string
+
+	Sink func(SpanData)
+
+	Exporter SpanExporter
+}
+type Kind uint8
+const (
+	KindServer   Kind = 2
+	KindClient   Kind = 3
+	KindProducer Kind = 4
+	KindConsumer Kind = 5
+)
+type Span struct {
+	// contains filtered or unexported fields
+}
+func (s Span) Bool(key string, value bool)
+func (s Span) Context() SpanContext
+func (s Span) End()
+func (s Span) Error(msg string)
+func (s Span) Int(key string, value int64)
+func (s Span) Recording() bool
+func (s Span) String(key, value string)
+type SpanContext = mqtt.SpanContext
+type SpanData struct {
+	Name          string
+	Kind          Kind
+	TraceID       [16]byte
+	SpanID        [8]byte
+	TraceState    string
+	HasParent     bool
+	ParentSpanID  [8]byte
+	Start, End    int64
+	Attrs         []Attr
+	Status        StatusCode
+	StatusMessage string
+}
+func (d SpanData) Attr(key string) (string, bool)
+type SpanExporter interface {
+	Export(SpanData)
+
+	Start()
+	Stop(ctx context.Context)
+
+	Stats(s *Stats)
+}
+type Stats struct {
+	Started  int64            `json:"started"`
+	Exported int64            `json:"exported"`
+	Dropped  map[string]int64 `json:"dropped"`
+	Exports  map[string]int64 `json:"exports"`
+	Queued   int              `json:"queued"`
+}
+type StatusCode uint8
+const (
+	StatusUnset StatusCode = 0
+	StatusError StatusCode = 2
+)
+type Tracer struct {
+	// contains filtered or unexported fields
+}
+func New(cfg Config) *Tracer
+func (t *Tracer) Node() string
+func (t *Tracer) SetEnabled(on bool)
+func (t *Tracer) Start()
+func (t *Tracer) StartChild(parent SpanContext, name string, kind Kind) Span
+func (t *Tracer) StartPublish(props []mqtt.UserProperty) Span
+func (t *Tracer) StartRemote(traceparent string, name string, kind Kind) Span
+func (t *Tracer) Stats() Stats
+func (t *Tracer) Stop(ctx context.Context)

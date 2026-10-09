@@ -394,6 +394,9 @@ func (m *Manager) Inject(msg *message.Message) {
 	msg.Seq = m.seq.Add(1)
 	msg.Arrived = m.clock.Now()
 	m.dispatch(msg, nil, nil, false)
+	if m.opts.Observer != nil {
+		m.opts.Observer.OnPublishAccepted(context.Background(), hook.SourceModule, msg)
+	}
 }
 
 // Records lists every session's view, sorted by client identifier.
@@ -937,6 +940,9 @@ func (m *Manager) publishWill(w *Will, s *Session) {
 	}
 	m.count("hoardmq_wills_total", map[string]string{"namespace": s.key.ns}, 1)
 	m.dispatch(w.Message, s, nil, false)
+	if m.opts.Observer != nil {
+		m.opts.Observer.OnPublishAccepted(context.Background(), hook.SourceWill, w.Message)
+	}
 }
 
 // Queued is the number of messages queued across this node's sessions, read

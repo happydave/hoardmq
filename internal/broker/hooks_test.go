@@ -22,6 +22,7 @@ func withTestModule(t *testing.T, mutate func(*config.Document)) *fixture {
 		c.Trigger, c.Rewrite, c.OutboundDrop, c.RefuseFilter = "", "", "", ""
 		c.LowerQoS, c.Panic, c.Sleep = false, false, 0
 		c.InboundOutcome = module.OK
+		c.AdmitTrigger, c.AdmitOutcome = "", module.OK
 	})
 	return start(t, func(d *config.Document) {
 		d.Modules[string(testmod.ID)] = json.RawMessage(`{}`)
@@ -202,4 +203,90 @@ func TestValidateModulesReportsTogether(t *testing.T) {
 		t.Errorf("ValidateModules created %v", entries)
 	}
 	_ = filepath.Join
+}
+
+// readEnd reads until the connection ends and returns the packets read
+// before it, so a test can tell a close from an acknowledgement.
+func (c *client) readEnd() []packet.Packet {
+	c.t.Helper()
+	var got []packet.Packet
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		_ = c.c.SetReadDeadline(deadline)
+		p, err := c.dec.Read()
+		if err != nil {
+			return got
+		}
+		got = append(got, p)
+	}
+	c.t.Fatalf("the connection stayed open; read %v", got)
+	return nil
+}
+
+func TestPublishAdmissionAndAcceptanceEndToEnd(t *testing.T) {
+	f := withTestModule(t, nil)
+	sub, _ := f.connect("tcp", packet.V5, &packet.Connect{ClientID: "sub", CleanStart: true}, false)
+	sub.send(&packet.Subscribe{PacketID: 1, Subscriptions: []packet.Subscription{{Filter: "t", QoS: 1}}})
+	sub.read()
+	pub, _ := f.connect("tcp", packet.V5, &packet.Connect{ClientID: "pub", CleanStart: true}, false)
+
+	pub.send(&packet.Publish{Topic: "t", QoS: 1, PacketID: 1, Payload: []byte("ok")})
+	if a := pub.read().(*packet.Puback); a.ReasonCode != packet.Success {
+		t.Fatalf("puback %+v", a)
+	}
+	sub.readPublish()
+	calls := testmod.Shared.Recorded()
+	admit, accepted := -1, -1
+	for i, c := range calls {
+		if c == "admit t" && admit < 0 {
+			admit = i
+		}
+		if c == "accepted client t 1" {
+			accepted = i
+		}
+	}
+	if admit < 0 || accepted < admit {
+		t.Fatalf("want admit then accepted; got:\n%s", strings.Join(calls, "\n"))
+	}
+
+	// A refused admission: PUBACK with the module's reason, nothing delivered,
+	// nothing reported accepted.
+	testmod.Shared.Reset()
+	testmod.Shared.Set(func(c *testmod.Control) {
+		c.AdmitTrigger, c.AdmitOutcome = "refuse", module.Outcome{Action: module.Drop, Reason: packet.QuotaExceeded}
+	})
+	pub.send(&packet.Publish{Topic: "t", QoS: 1, PacketID: 2, Payload: []byte("refuse")})
+	if a := pub.read().(*packet.Puback); a.PacketID != 2 || a.ReasonCode != packet.QuotaExceeded {
+		t.Fatalf("refused puback %+v", a)
+	}
+	sub.expectNoPacket()
+	if has(testmod.Shared.Recorded(), "accepted") {
+		t.Fatalf("a refused publish was reported accepted:\n%s", strings.Join(testmod.Shared.Recorded(), "\n"))
+	}
+}
+
+func TestPublishAdmissionRefusalClosesWhereNoAckCanSayNo(t *testing.T) {
+	f := withTestModule(t, nil)
+	testmod.Shared.Set(func(c *testmod.Control) {
+		c.AdmitTrigger, c.AdmitOutcome = "refuse", module.Outcome{Action: module.Drop, Reason: packet.QuotaExceeded}
+	})
+	// MQTT 3.1.1 at QoS 1: no reason code on a PUBACK, so the connection is
+	// closed and no PUBACK is written.
+	v4, _ := f.connect("tcp", packet.V4, &packet.Connect{ClientID: "v4", CleanStart: true}, false)
+	v4.send(&packet.Publish{Topic: "t", QoS: 1, PacketID: 1, Payload: []byte("refuse")})
+	for _, p := range v4.readEnd() {
+		if _, ok := p.(*packet.Puback); ok {
+			t.Fatal("a refused level-4 publish was acknowledged")
+		}
+	}
+	// QoS 0 at MQTT 5: nothing to acknowledge, so the connection is closed.
+	v5, _ := f.connect("tcp", packet.V5, &packet.Connect{ClientID: "v5", CleanStart: true}, false)
+	v5.send(&packet.Publish{Topic: "t", Payload: []byte("refuse")})
+	got := v5.readEnd()
+	if len(got) != 1 {
+		t.Fatalf("want one DISCONNECT before the close, read %v", got)
+	}
+	if d, ok := got[0].(*packet.Disconnect); !ok || d.ReasonCode != packet.QuotaExceeded {
+		t.Fatalf("want DISCONNECT 0x97, read %+v", got[0])
+	}
 }

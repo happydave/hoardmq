@@ -6,6 +6,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	extstore "github.com/happydave/hoardmq/ext/store"
 )
 
 // groupSyncer implements group commit for the commit policy. One fsync is
@@ -57,22 +59,8 @@ func newSyncGroup() *syncGroup {
 	return &syncGroup{full: make(chan struct{}), lead: make(chan struct{}, 1), done: make(chan struct{})}
 }
 
-// SyncStats is the group-commit picture, for the harness and the metrics.
-type SyncStats struct {
-	Syncs          int64   `json:"syncs"`
-	Ops            int64   `json:"ops_covered"`
-	Callers        int64   `json:"callers"`
-	WaitSec        float64 `json:"wait_sec_total"`
-	HeldGroups     int64   `json:"held_groups"`
-	Failures       int64   `json:"failures"`
-	Repairs        int64   `json:"repairs"`
-	RepairFailures int64   `json:"repair_failures"`
-	// Checkpoints written from a snapshot, the time they took, and the part
-	// of it under the store lock, which an append waits for.
-	Checkpoints       int64   `json:"checkpoints"`
-	CheckpointSec     float64 `json:"checkpoint_sec_total"`
-	CheckpointHoldSec float64 `json:"checkpoint_hold_sec_total"`
-}
+// SyncStats is the extension API's group-commit statistics.
+type SyncStats = extstore.SyncStats
 
 // coveredIndex is the WAL index the last completed fsync covered.
 func (g *groupSyncer) coveredIndex() uint64 {

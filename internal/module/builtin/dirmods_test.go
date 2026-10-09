@@ -227,7 +227,7 @@ func TestPasswordModulesShareTheNodeCache(t *testing.T) {
 		t.Fatal(err)
 	}
 	cache := auth.NewVerifyCache(time.Minute, 10)
-	ctx := &module.Context{Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), Services: fakeServices{store: &records.Store{Component: comp}}, PasswordCache: cache}
+	ctx := &module.Context{Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), Services: fakeServices{store: &records.Store{Component: comp}}, Passwords: cache}
 	file, db := &fileAuth{}, &dbAuth{}
 	if err := file.Provision(ctx, json.RawMessage(`{"path":"`+users+`"}`)); err != nil {
 		t.Fatal(err)

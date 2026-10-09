@@ -1,7 +1,8 @@
-// Package builtin holds the modules the default binary ships: the file
-// authenticator and authorizer, the log-backed store and the in-memory
-// metrics provider. Each registers itself with the module registry at init
-// and reaches the broker only through the registry, like any other module.
+// Package builtin holds the modules every HoardMQ binary carries: the
+// authenticators and the file authorizer, the log-backed store, the metrics
+// providers and the OTLP trace exporter. Each registers itself with the
+// extension API at init and reaches the broker only through that API, as an
+// external module does; the seam tests in the module package hold it there.
 package builtin
 
 import (
@@ -16,17 +17,18 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/happydave/hoardmq/ext"
+	extauth "github.com/happydave/hoardmq/ext/auth"
+	extstore "github.com/happydave/hoardmq/ext/store"
 	"github.com/happydave/hoardmq/internal/auth"
-	"github.com/happydave/hoardmq/internal/module"
-	"github.com/happydave/hoardmq/internal/session"
 	"github.com/happydave/hoardmq/internal/store"
 )
 
 func init() {
-	module.Register("auth.file", func() module.Module { return &fileAuth{} })
-	module.Register("authz.file", func() module.Module { return &fileAuthz{} })
-	module.Register("store.wal", func() module.Module { return &walStore{} })
-	module.Register("metrics.internal", func() module.Module { return &metrics{} })
+	ext.Register("auth.file", func() ext.Module { return &fileAuth{} })
+	ext.Register("authz.file", func() ext.Module { return &fileAuthz{} })
+	ext.Register("store.wal", func() ext.Module { return &walStore{} })
+	ext.Register("metrics.internal", func() ext.Module { return &metrics{} })
 }
 
 type pathConfig struct {
@@ -50,12 +52,12 @@ type fileAuth struct {
 	inner *auth.FileAuthenticator
 }
 
-func (*fileAuth) ID() module.ID                   { return "auth.file" }
-func (*fileAuth) Capabilities() module.Capability { return module.CapAuthentication }
-func (*fileAuth) Start(context.Context) error     { return nil }
-func (*fileAuth) Stop(context.Context) error      { return nil }
-func (f *fileAuth) Reload() error                 { return f.inner.Reload() }
-func (f *fileAuth) Provision(ctx *module.Context, raw json.RawMessage) error {
+func (*fileAuth) ID() ext.ID                   { return "auth.file" }
+func (*fileAuth) Capabilities() ext.Capability { return ext.CapAuthentication }
+func (*fileAuth) Start(context.Context) error  { return nil }
+func (*fileAuth) Stop(context.Context) error   { return nil }
+func (f *fileAuth) Reload() error              { return f.inner.Reload() }
+func (f *fileAuth) Provision(ctx *ext.Context, raw json.RawMessage) error {
 	var cfg pathConfig
 	if err := decode(raw, &cfg); err != nil {
 		return err
@@ -67,14 +69,14 @@ func (f *fileAuth) Provision(ctx *module.Context, raw json.RawMessage) error {
 	if err != nil {
 		return err
 	}
-	a.Cache = ctx.PasswordCache
+	a.Cache = ctx.Passwords
 	f.inner = a
 	f.enabled.Store(true)
 	ctx.Logger.Info("users file loaded", "path", cfg.Path)
 	return nil
 }
 
-func (f *fileAuth) Authenticate(ctx context.Context, req *auth.Request) auth.Result {
+func (f *fileAuth) Authenticate(ctx context.Context, req *extauth.Request) extauth.Result {
 	return f.inner.Authenticate(ctx, req)
 }
 
@@ -84,12 +86,12 @@ type fileAuthz struct {
 	inner *auth.FileAuthorizer
 }
 
-func (*fileAuthz) ID() module.ID                   { return "authz.file" }
-func (*fileAuthz) Capabilities() module.Capability { return module.CapAuthorization }
-func (*fileAuthz) Start(context.Context) error     { return nil }
-func (*fileAuthz) Stop(context.Context) error      { return nil }
-func (f *fileAuthz) Reload() error                 { return f.inner.Reload() }
-func (f *fileAuthz) Provision(ctx *module.Context, raw json.RawMessage) error {
+func (*fileAuthz) ID() ext.ID                   { return "authz.file" }
+func (*fileAuthz) Capabilities() ext.Capability { return ext.CapAuthorization }
+func (*fileAuthz) Start(context.Context) error  { return nil }
+func (*fileAuthz) Stop(context.Context) error   { return nil }
+func (f *fileAuthz) Reload() error              { return f.inner.Reload() }
+func (f *fileAuthz) Provision(ctx *ext.Context, raw json.RawMessage) error {
 	var cfg pathConfig
 	if err := decode(raw, &cfg); err != nil {
 		return err
@@ -107,7 +109,7 @@ func (f *fileAuthz) Provision(ctx *module.Context, raw json.RawMessage) error {
 	return nil
 }
 
-func (f *fileAuthz) Authorize(ctx context.Context, action auth.Action, topic string, id *auth.Identity) auth.Decision {
+func (f *fileAuthz) Authorize(ctx context.Context, action extauth.Action, topic string, id *extauth.Identity) extauth.Decision {
 	return f.inner.Authorize(ctx, action, topic, id)
 }
 
@@ -122,18 +124,18 @@ type walStore struct {
 
 // SyncStats exposes the journal's group-commit counters (WI 1292 round 4)
 // for the broker's lock-free StormStats; nil-safe before Open.
-func (w *walStore) SyncStats() store.SyncStats {
+func (w *walStore) SyncStats() extstore.SyncStats {
 	if w.inner == nil {
-		return store.SyncStats{}
+		return extstore.SyncStats{}
 	}
 	return w.inner.SyncStats()
 }
 
 // AppendStats exposes what the store's lock was held for by appends;
 // nil-safe before Open.
-func (w *walStore) AppendStats() store.AppendStats {
+func (w *walStore) AppendStats() extstore.AppendStats {
 	if w.inner == nil {
-		return store.AppendStats{}
+		return extstore.AppendStats{}
 	}
 	return w.inner.AppendStats()
 }
@@ -142,9 +144,9 @@ type walConfig struct {
 	Dir string `json:"dir"`
 }
 
-func (*walStore) ID() module.ID                   { return "store.wal" }
-func (*walStore) Capabilities() module.Capability { return module.CapStore }
-func (w *walStore) Provision(ctx *module.Context, raw json.RawMessage) error {
+func (*walStore) ID() ext.ID                   { return "store.wal" }
+func (*walStore) Capabilities() ext.Capability { return ext.CapStore }
+func (w *walStore) Provision(ctx *ext.Context, raw json.RawMessage) error {
 	var cfg walConfig
 	if err := decode(raw, &cfg); err != nil {
 		return err
@@ -153,8 +155,16 @@ func (w *walStore) Provision(ctx *module.Context, raw json.RawMessage) error {
 	if w.dir == "" {
 		w.dir = filepath.Join(ctx.DataDir, "logs")
 	}
-	w.opts = ctx.Store
-	w.opts.Logger = ctx.Logger
+	w.opts = store.Options{
+		SyncPolicy:     store.SyncPolicy(ctx.Store.SyncPolicy),
+		SyncInterval:   ctx.Store.SyncInterval,
+		SegmentBytes:   ctx.Store.SegmentBytes,
+		GroupMaxDelay:  ctx.Store.GroupMaxDelay,
+		GroupMaxSize:   ctx.Store.GroupMaxSize,
+		Sync:           ctx.Store.Sync,
+		IgnoreChecksum: ctx.Store.IgnoreChecksum,
+		Logger:         ctx.Logger,
+	}
 	if w.dir == "" {
 		return errors.New("no data directory")
 	}
@@ -180,29 +190,29 @@ func (w *walStore) Stop(context.Context) error {
 	return w.inner.Close()
 }
 
-func (w *walStore) Journal() session.Journal {
+func (w *walStore) Journal() extstore.Journal {
 	if w.inner == nil {
 		return nil
 	}
 	return w.inner
 }
-func (w *walStore) Recover() (*store.State, error) { return w.inner.Recover() }
+func (w *walStore) Recover() (*extstore.State, error) { return w.inner.Recover() }
 
 // SetTap installs the replication layer's record tap on the open store.
-func (w *walStore) SetTap(tap func(store.Record) func()) {
+func (w *walStore) SetTap(tap func(extstore.Record) func()) {
 	if w.inner != nil {
 		w.inner.SetTap(tap)
 	}
 }
-func (w *walStore) Checkpoint(snap store.Snapshot) error { return w.inner.Checkpoint(snap) }
-func (w *walStore) NeedsCheckpoint() bool                { return w.inner.NeedsCheckpoint() }
-func (w *walStore) Close() error                         { return w.Stop(context.Background()) }
+func (w *walStore) Checkpoint(snap extstore.Snapshot) error { return w.inner.Checkpoint(snap) }
+func (w *walStore) NeedsCheckpoint() bool                   { return w.inner.NeedsCheckpoint() }
+func (w *walStore) Close() error                            { return w.Stop(context.Background()) }
 
 // JournalStats exposes the journal's position, checkpoints and fsyncs, read
 // without the store's lock; nil-safe before Open.
-func (w *walStore) JournalStats() store.JournalStats {
+func (w *walStore) JournalStats() extstore.JournalStats {
 	if w.inner == nil {
-		return store.JournalStats{}
+		return extstore.JournalStats{}
 	}
 	return w.inner.JournalStats()
 }
@@ -219,25 +229,25 @@ func (w *walStore) LastIndex() uint64 {
 type metrics struct {
 	toggle
 	mu         sync.Mutex
-	series     map[string]*module.Metric
+	series     map[string]*ext.Metric
 	collectors []func(set func(string, map[string]string, float64))
 }
 
-// AddCollector implements module.Collector.
+// AddCollector implements ext.Collector.
 func (m *metrics) AddCollector(f func(set func(string, map[string]string, float64))) {
 	m.mu.Lock()
 	m.collectors = append(m.collectors, f)
 	m.mu.Unlock()
 }
 
-func (*metrics) ID() module.ID                   { return "metrics.internal" }
-func (*metrics) Capabilities() module.Capability { return module.CapMetrics }
-func (m *metrics) Provision(_ *module.Context, raw json.RawMessage) error {
+func (*metrics) ID() ext.ID                   { return "metrics.internal" }
+func (*metrics) Capabilities() ext.Capability { return ext.CapMetrics }
+func (m *metrics) Provision(_ *ext.Context, raw json.RawMessage) error {
 	var cfg struct{}
 	if err := decode(raw, &cfg); err != nil {
 		return err
 	}
-	m.series = map[string]*module.Metric{}
+	m.series = map[string]*ext.Metric{}
 	m.enabled.Store(true)
 	return nil
 }
@@ -265,7 +275,7 @@ func key(name string, labels map[string]string) string {
 	return b.String()
 }
 
-func (m *metrics) get(name string, labels map[string]string) *module.Metric {
+func (m *metrics) get(name string, labels map[string]string) *ext.Metric {
 	k := key(name, labels)
 	s, ok := m.series[k]
 	if !ok {
@@ -273,7 +283,7 @@ func (m *metrics) get(name string, labels map[string]string) *module.Metric {
 		for lk, lv := range labels {
 			cp[lk] = lv
 		}
-		s = &module.Metric{Name: name, Labels: cp}
+		s = &ext.Metric{Name: name, Labels: cp}
 		m.series[k] = s
 	}
 	return s
@@ -291,7 +301,7 @@ func (m *metrics) Set(name string, labels map[string]string, value float64) {
 	m.mu.Unlock()
 }
 
-func (m *metrics) Snapshot() []module.Metric {
+func (m *metrics) Snapshot() []ext.Metric {
 	m.mu.Lock()
 	collectors := m.collectors
 	m.mu.Unlock()
@@ -300,7 +310,7 @@ func (m *metrics) Snapshot() []module.Metric {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	out := make([]module.Metric, 0, len(m.series))
+	out := make([]ext.Metric, 0, len(m.series))
 	for _, s := range m.series {
 		out = append(out, *s)
 	}

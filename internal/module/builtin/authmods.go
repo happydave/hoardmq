@@ -11,15 +11,16 @@ import (
 	"strings"
 	"time"
 
+	"github.com/happydave/hoardmq/ext"
+	extauth "github.com/happydave/hoardmq/ext/auth"
 	"github.com/happydave/hoardmq/internal/auth"
 	"github.com/happydave/hoardmq/internal/jose"
-	"github.com/happydave/hoardmq/internal/module"
 )
 
 func init() {
-	module.Register("auth.jwt", func() module.Module { return &jwtAuth{} })
-	module.Register("auth.x509", func() module.Module { return &x509Auth{} })
-	module.Register("auth.scram", func() module.Module { return &scramAuth{} })
+	ext.Register("auth.jwt", func() ext.Module { return &jwtAuth{} })
+	ext.Register("auth.x509", func() ext.Module { return &x509Auth{} })
+	ext.Register("auth.scram", func() ext.Module { return &scramAuth{} })
 }
 
 // jwtConfig is auth.jwt's configuration.
@@ -126,14 +127,14 @@ func jwtProblems(c jwtConfig) []string {
 type jwtAuth struct {
 	toggle
 	inner   *auth.JWTAuthenticator
-	metrics module.MetricsProvider
+	metrics ext.MetricsProvider
 }
 
-func (*jwtAuth) ID() module.ID                   { return "auth.jwt" }
-func (*jwtAuth) Capabilities() module.Capability { return module.CapAuthentication }
-func (*jwtAuth) Stop(context.Context) error      { return nil }
+func (*jwtAuth) ID() ext.ID                   { return "auth.jwt" }
+func (*jwtAuth) Capabilities() ext.Capability { return ext.CapAuthentication }
+func (*jwtAuth) Stop(context.Context) error   { return nil }
 
-func (j *jwtAuth) Provision(ctx *module.Context, raw json.RawMessage) error {
+func (j *jwtAuth) Provision(ctx *ext.Context, raw json.RawMessage) error {
 	var c jwtConfig
 	if err := decode(raw, &c); err != nil {
 		return err
@@ -193,7 +194,7 @@ func (j *jwtAuth) Start(context.Context) error {
 	return nil
 }
 
-func (j *jwtAuth) UseMetrics(m module.MetricsProvider) { j.metrics = m }
+func (j *jwtAuth) UseMetrics(m ext.MetricsProvider) { j.metrics = m }
 
 func (j *jwtAuth) count(name string, labels map[string]string) {
 	if j.metrics != nil {
@@ -201,7 +202,7 @@ func (j *jwtAuth) count(name string, labels map[string]string) {
 	}
 }
 
-func (j *jwtAuth) Authenticate(ctx context.Context, req *auth.Request) auth.Result {
+func (j *jwtAuth) Authenticate(ctx context.Context, req *extauth.Request) extauth.Result {
 	return j.inner.Authenticate(ctx, req)
 }
 
@@ -252,18 +253,18 @@ func x509Problems(c x509Config) []string {
 type x509Auth struct {
 	toggle
 	inner   *auth.Revocation
-	metrics module.MetricsProvider
+	metrics ext.MetricsProvider
 }
 
-func (*x509Auth) ID() module.ID { return "auth.x509" }
-func (*x509Auth) Capabilities() module.Capability {
-	return module.CapAuthentication | module.CapCertificate
+func (*x509Auth) ID() ext.ID { return "auth.x509" }
+func (*x509Auth) Capabilities() ext.Capability {
+	return ext.CapAuthentication | ext.CapCertificate
 }
 func (*x509Auth) Start(context.Context) error { return nil }
 func (*x509Auth) Stop(context.Context) error  { return nil }
 func (*x509Auth) ChecksCertificates()         {}
 
-func (x *x509Auth) Provision(ctx *module.Context, raw json.RawMessage) error {
+func (x *x509Auth) Provision(ctx *ext.Context, raw json.RawMessage) error {
 	var c x509Config
 	if err := decode(raw, &c); err != nil {
 		return err
@@ -284,9 +285,9 @@ func (x *x509Auth) Provision(ctx *module.Context, raw json.RawMessage) error {
 	return nil
 }
 
-func (x *x509Auth) UseMetrics(m module.MetricsProvider) { x.metrics = m }
+func (x *x509Auth) UseMetrics(m ext.MetricsProvider) { x.metrics = m }
 
-func (x *x509Auth) Authenticate(ctx context.Context, req *auth.Request) auth.Result {
+func (x *x509Auth) Authenticate(ctx context.Context, req *extauth.Request) extauth.Result {
 	return x.inner.Authenticate(ctx, req)
 }
 
@@ -297,13 +298,13 @@ type scramAuth struct {
 	srv   *auth.SCRAMServer
 }
 
-func (*scramAuth) ID() module.ID                   { return "auth.scram" }
-func (*scramAuth) Capabilities() module.Capability { return module.CapMechanism }
-func (*scramAuth) Start(context.Context) error     { return nil }
-func (*scramAuth) Stop(context.Context) error      { return nil }
-func (s *scramAuth) Reload() error                 { return s.users.Reload() }
+func (*scramAuth) ID() ext.ID                   { return "auth.scram" }
+func (*scramAuth) Capabilities() ext.Capability { return ext.CapMechanism }
+func (*scramAuth) Start(context.Context) error  { return nil }
+func (*scramAuth) Stop(context.Context) error   { return nil }
+func (s *scramAuth) Reload() error              { return s.users.Reload() }
 
-func (s *scramAuth) Provision(ctx *module.Context, raw json.RawMessage) error {
+func (s *scramAuth) Provision(ctx *ext.Context, raw json.RawMessage) error {
 	var c pathConfig
 	if err := decode(raw, &c); err != nil {
 		return err
@@ -322,6 +323,6 @@ func (s *scramAuth) Provision(ctx *module.Context, raw json.RawMessage) error {
 }
 
 func (s *scramAuth) Methods() []string { return s.srv.Methods() }
-func (s *scramAuth) Begin(ctx context.Context, method string, req *auth.Request) auth.Exchange {
+func (s *scramAuth) Begin(ctx context.Context, method string, req *extauth.Request) extauth.Exchange {
 	return s.srv.Begin(ctx, method, req)
 }

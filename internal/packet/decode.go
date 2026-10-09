@@ -366,13 +366,13 @@ func decodeAck(v Version, t Type, r *reader) (Packet, *Error) {
 	}
 	switch t {
 	case PUBACK:
-		return &Puback{a}, nil
+		return &Puback{Ack: a}, nil
 	case PUBREC:
-		return &Pubrec{a}, nil
+		return &Pubrec{Ack: a}, nil
 	case PUBREL:
-		return &Pubrel{a}, nil
+		return &Pubrel{Ack: a}, nil
 	}
-	return &Pubcomp{a}, nil
+	return &Pubcomp{Ack: a}, nil
 }
 
 func decodeSubscribe(v Version, r *reader) (*Subscribe, *Error) {
