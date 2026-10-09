@@ -1,0 +1,14 @@
+{{- if .Values.podDisruptionBudget.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "hoardmq.fullname" . }}
+  labels:
+    {{- include "hoardmq.labels" . | nindent 4 }}
+spec:
+  # One node at a time: the cluster runs at N-1 during any disruption.
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      {{- include "hoardmq.selectorLabels" . | nindent 6 }}
+{{- end }}

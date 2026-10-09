@@ -1,0 +1,132 @@
+# Default values for the HoardMQ chart. Every value below is referenced by a
+# template; the chart's self-check test keeps the two in step.
+
+image:
+  repository: hoardmq
+  tag: dev
+  pullPolicy: IfNotPresent
+
+# Number of broker pods. Size for N-1: a rolling restart runs the cluster
+# one node short, and cluster.replicas (copies of each session) must be at
+# most replicaCount - 1 for a node loss to leave a copy standing.
+replicaCount: 3
+
+cluster:
+  # Cluster identifier all nodes must share.
+  id: hoardmq
+  # Copies of every session and retained message (owner plus followers).
+  replicas: 2
+  # Virtual shards; fixed for the life of the cluster.
+  shards: 64
+  # Cluster transport port on the headless Service.
+  port: 7000
+  drain:
+    # The least number of clients redirected per second during a drain. A
+    # drain with more clients redirects faster, so that it has redirected
+    # them all by timeoutSeconds less the broker's takeover timeout (5 s by
+    # default): its length does not grow with its clients.
+    ratePerSecond: 100
+    # How long a drain waits for redirected clients' takeovers before handing
+    # the remaining leases to a live node.
+    timeoutSeconds: 30
+    # How long a drain then waits for every session it handed off to be
+    # confirmed held by its receiver; sessions still unconfirmed are counted
+    # and logged, and the pod stops.
+    confirmTimeoutSeconds: 30
+    # The termination grace period is both timeouts plus this margin.
+    graceMarginSeconds: 15
+    # After its drain completes, how long a broker waits for the SIGTERM the
+    # kubelet sends once the preStop hook has returned; the hook reads the
+    # completion and exits first, so it is not killed with the broker. Keep
+    # it above the hook's poll (one second) and its request timeout (five).
+    holdExitSeconds: 15
+  readiness:
+    # The topology (members and the alive set) must be unchanged this long
+    # before a pod reports ready.
+    stableSeconds: 5
+
+# Mutual TLS between nodes.
+tls:
+  # generated: the chart creates a CA and a node certificate (SANs for every
+  # ordinal) in a Secret and reuses it across upgrades.
+  # certManager: an Issuer and Certificate are created for cert-manager.
+  mode: generated
+  # Days of validity for generated certificates.
+  generatedValidityDays: 3650
+  certManager:
+    # Existing ClusterIssuer or Issuer to sign the node certificate; empty
+    # creates a self-signed Issuer in the release namespace.
+    issuerRef:
+      name: ""
+      kind: ClusterIssuer
+
+# The MQTT listener clients reach through the client Service.
+listeners:
+  mqtt:
+    port: 1883
+  # Optional TLS listener for clients; set enabled and a Secret holding
+  # tls.crt and tls.key.
+  mqtts:
+    enabled: false
+    port: 8883
+    secretName: ""
+
+service:
+  type: ClusterIP
+  # Set for LoadBalancer or NodePort services when clients are outside the
+  # cluster; empty derives the advertised address from the pod's headless
+  # Service name.
+  advertiseHost: ""
+
+observability:
+  # The metrics, health and drain listener; bound on all interfaces inside
+  # the pod so the kubelet's probes reach it. Its /drain is closed when the
+  # admin API is enabled.
+  port: 9090
+
+# The admin REST API. Off by default. Enabled, it listens on the pod's
+# loopback (reach it with kubectl port-forward), the chart generates a drain
+# token for the preStop and an operator token in the Secret
+# <release>-admin, kept across upgrades, and the preStop drains through the
+# API with the drain token.
+admin:
+  enabled: false
+  port: 9091
+
+persistence:
+  size: 10Gi
+  storageClassName: ""
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 256Mi
+  limits:
+    memory: 1Gi
+
+podDisruptionBudget:
+  enabled: true
+
+# Prefer spreading pods over nodes.
+podAntiAffinity: preferred
+
+# Anonymous connections are off by default; provide users and an ACL through
+# extraConfig (see the chart README) or another auth module.
+auth:
+  anonymous: false
+
+# Log level for the broker.
+logLevel: info
+
+# Extra members merged into the configuration document as JSON, for
+# example modules and limits.
+extraConfig: {}
+
+# Extra volumes and mounts on the broker container, for mounting a users
+# file or an ACL file referenced from extraConfig without baking an image.
+extraVolumes: []
+extraVolumeMounts: []
+
+nodeSelector: {}
+tolerations: []
+podAnnotations: {}

@@ -1,0 +1,11 @@
+apiVersion: v2
+name: hoardmq
+description: HoardMQ, a clustered MQTT broker, as a plain StatefulSet — no operator.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/happydave/hoardmq
+keywords:
+  - mqtt
+  - broker
+  - messaging

@@ -1,0 +1,228 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "hoardmq.fullname" . }}
+  labels:
+    {{- include "hoardmq.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "hoardmq.headless" . }}
+  replicas: {{ .Values.replicaCount }}
+  # Pods start together; the broker's own join-not-bootstrap ordering forms
+  # the cluster (the lowest ordinal bootstraps when nobody answers).
+  podManagementPolicy: Parallel
+  updateStrategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      {{- include "hoardmq.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "hoardmq.selectorLabels" . | nindent 8 }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      # Kubernetes injects <SERVICE>_PORT, <SERVICE>_SERVICE_HOST and friends
+      # for every Service in the namespace; with a release named hoardmq those
+      # land in the broker's HOARDMQ_ environment-override namespace, which
+      # rejects names it does not know. The broker reads its configuration from
+      # the mounted document, so the links are not needed.
+      enableServiceLinks: false
+      # The drain (preStop) redirects clients, hands leases off and waits for
+      # them to be confirmed held; SIGTERM follows once it completes or the
+      # grace period ends.
+      terminationGracePeriodSeconds: {{ include "hoardmq.terminationGrace" . }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        fsGroup: 65532
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if eq .Values.podAntiAffinity "preferred" }}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    {{- include "hoardmq.selectorLabels" . | nindent 20 }}
+      {{- else if eq .Values.podAntiAffinity "required" }}
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels:
+                  {{- include "hoardmq.selectorLabels" . | nindent 18 }}
+      {{- end }}
+      containers:
+        - name: hoardmq
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["serve"]
+          env:
+            - name: HOARDMQ_CONFIG
+              value: /etc/hoardmq/config.json
+            # The node name is the pod name: <fullname>-<ordinal>, which DNS
+            # discovery maps to the StatefulSet's ordinals.
+            - name: HOARDMQ_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            # Each node presents its own certificate: peers refuse a hello
+            # whose name is not the certificate's common name.
+            {{- if eq .Values.tls.mode "generated" }}
+            - name: HOARDMQ_CLUSTER_AUTH_TLS_CERT_FILE
+              value: /etc/hoardmq/tls/$(HOARDMQ_NODE_NAME).crt
+            - name: HOARDMQ_CLUSTER_AUTH_TLS_KEY_FILE
+              value: /etc/hoardmq/tls/$(HOARDMQ_NODE_NAME).key
+            {{- else }}
+            - name: HOARDMQ_CLUSTER_AUTH_TLS_CERT_FILE
+              value: /etc/hoardmq/tls/$(HOARDMQ_NODE_NAME)/tls.crt
+            - name: HOARDMQ_CLUSTER_AUTH_TLS_KEY_FILE
+              value: /etc/hoardmq/tls/$(HOARDMQ_NODE_NAME)/tls.key
+            - name: HOARDMQ_CLUSTER_AUTH_TLS_CA_FILE
+              value: /etc/hoardmq/tls/$(HOARDMQ_NODE_NAME)/ca.crt
+            {{- end }}
+            # Clients redirected during a drain are sent here.
+            - name: HOARDMQ_CLUSTER_ADVERTISE
+              {{- if .Values.service.advertiseHost }}
+              value: "{{ .Values.service.advertiseHost }}:{{ .Values.listeners.mqtt.port }}"
+              {{- else }}
+              value: "$(HOARDMQ_NODE_NAME).{{ include "hoardmq.headless" . }}.$(POD_NAMESPACE).svc:{{ .Values.listeners.mqtt.port }}"
+              {{- end }}
+          ports:
+            - name: mqtt
+              containerPort: {{ .Values.listeners.mqtt.port }}
+            {{- if .Values.listeners.mqtts.enabled }}
+            - name: mqtts
+              containerPort: {{ .Values.listeners.mqtts.port }}
+            {{- end }}
+            - name: cluster
+              containerPort: {{ .Values.cluster.port }}
+            - name: observability
+              containerPort: {{ .Values.observability.port }}
+          # Liveness is the process; readiness is joined, caught up, unfenced,
+          # not draining and a topology stable for the configured interval.
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: observability
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: observability
+            periodSeconds: 2
+            failureThreshold: 1
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: observability
+            periodSeconds: 2
+            failureThreshold: 60
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - /usr/local/bin/hoardmq
+                  - drain
+                  {{- if .Values.admin.enabled }}
+                  - -admin
+                  - 127.0.0.1:{{ .Values.admin.port }}
+                  - -token-file
+                  - /etc/hoardmq/admin/drain.token
+                  {{- else }}
+                  - -address
+                  - 127.0.0.1:{{ .Values.observability.port }}
+                  {{- end }}
+                  - -wait
+                  - -timeout
+                  - {{ include "hoardmq.terminationGrace" . }}s
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/hoardmq
+              readOnly: true
+            {{- if eq .Values.tls.mode "generated" }}
+            - name: cluster-tls
+              mountPath: /etc/hoardmq/tls
+              readOnly: true
+            {{- else }}
+            {{- range $i := until (int .Values.replicaCount) }}
+            - name: cluster-tls-{{ $i }}
+              mountPath: /etc/hoardmq/tls/{{ include "hoardmq.fullname" $ }}-{{ $i }}
+              readOnly: true
+            {{- end }}
+            {{- end }}
+            {{- if .Values.listeners.mqtts.enabled }}
+            - name: client-tls
+              mountPath: /etc/hoardmq/client-tls
+              readOnly: true
+            {{- end }}
+            {{- if .Values.admin.enabled }}
+            - name: admin-tokens
+              mountPath: /etc/hoardmq/admin
+              readOnly: true
+            {{- end }}
+            - name: data
+              mountPath: /var/lib/hoardmq
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "hoardmq.fullname" . }}
+        {{- if eq .Values.tls.mode "generated" }}
+        - name: cluster-tls
+          secret:
+            secretName: {{ include "hoardmq.tlsSecret" . }}
+        {{- else }}
+        {{- range $i := until (int .Values.replicaCount) }}
+        - name: cluster-tls-{{ $i }}
+          secret:
+            secretName: {{ include "hoardmq.tlsSecret" $ }}-{{ $i }}
+        {{- end }}
+        {{- end }}
+        {{- if .Values.listeners.mqtts.enabled }}
+        - name: client-tls
+          secret:
+            secretName: {{ .Values.listeners.mqtts.secretName }}
+        {{- end }}
+        {{- if .Values.admin.enabled }}
+        - name: admin-tokens
+          secret:
+            secretName: {{ include "hoardmq.adminSecret" . }}
+            defaultMode: 0440
+        {{- end }}
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- with .Values.persistence.storageClassName }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.size }}

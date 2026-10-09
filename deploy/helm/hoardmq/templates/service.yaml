@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "hoardmq.fullname" . }}
+  labels:
+    {{- include "hoardmq.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    {{- include "hoardmq.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: mqtt
+      port: {{ .Values.listeners.mqtt.port }}
+      targetPort: mqtt
+    {{- if .Values.listeners.mqtts.enabled }}
+    - name: mqtts
+      port: {{ .Values.listeners.mqtts.port }}
+      targetPort: mqtts
+    {{- end }}

@@ -1,0 +1,25 @@
+HoardMQ {{ .Chart.AppVersion }} is deploying as StatefulSet {{ include "hoardmq.fullname" . }}
+with {{ .Values.replicaCount }} pods, {{ .Values.cluster.replicas }} copies of every session,
+mutual TLS between nodes ({{ .Values.tls.mode }}).
+
+Clients connect to {{ include "hoardmq.fullname" . }}:{{ .Values.listeners.mqtt.port }}.
+
+Watch the cluster form:
+  kubectl -n {{ .Release.Namespace }} rollout status statefulset/{{ include "hoardmq.fullname" . }}
+  kubectl -n {{ .Release.Namespace }} get pods -l app.kubernetes.io/instance={{ .Release.Name }}
+
+Readiness needs joined, caught up and a topology stable for
+{{ .Values.cluster.readiness.stableSeconds }}s; the first pods turn ready a few seconds after
+the last one joins. A pod drains before it stops: clients are redirected at
+{{ .Values.cluster.drain.ratePerSecond }}/s or faster, all of them within the first
+{{ .Values.cluster.drain.timeoutSeconds }}s less the takeover timeout, its leases handed to a live node within
+{{ .Values.cluster.drain.timeoutSeconds }}s, and its sessions confirmed held there within a further
+{{ .Values.cluster.drain.confirmTimeoutSeconds }}s.
+{{- if .Values.admin.enabled }}
+
+The admin API listens on each pod's loopback, port {{ .Values.admin.port }}; the preStop
+drains through it. Reach one pod's with a port-forward and the operator token:
+  kubectl -n {{ .Release.Namespace }} port-forward pod/{{ include "hoardmq.fullname" . }}-0 {{ .Values.admin.port }}:{{ .Values.admin.port }}
+  export HOARDMQ_ADMIN_TOKEN=$(kubectl -n {{ .Release.Namespace }} get secret {{ include "hoardmq.adminSecret" . }} -o jsonpath='{.data.operator\.token}' | base64 -d)
+  hoardmq cluster status -admin 127.0.0.1:{{ .Values.admin.port }}
+{{- end }}

@@ -1,0 +1,74 @@
+{
+  "MQTT-1.5.7-1": {
+    "status": "n/a-client",
+    "reason": "binds the sender of a string pair; the server side is observed through the UTF-8 rules on received packets (MQTT-1.5.4-1, -2)"
+  },
+  "MQTT-3.1.2-20": {
+    "status": "n/a-client",
+    "reason": "client must send PINGREQ; the server side is the keep-alive close (MQTT-3.1.2-22)"
+  },
+  "MQTT-3.1.2-30": {
+    "status": "n/a-client",
+    "reason": "client must not send packets before CONNACK during enhanced authentication"
+  },
+  "MQTT-3.2.2-11": {
+    "status": "n/a-client",
+    "reason": "client must not exceed Maximum QoS; the server side is MQTT-3.2.2-9 and the 0x9B refusal"
+  },
+  "MQTT-3.2.2-14": {
+    "status": "n/a-client",
+    "reason": "client must not set RETAIN when Retain Available is 0; the server side is the 0x9A refusal"
+  },
+  "MQTT-3.2.2-18": {
+    "status": "n/a-client",
+    "reason": "client must not use aliases when the server sends no Topic Alias Maximum"
+  },
+  "MQTT-4.3.1-1": {
+    "status": "n/a-client",
+    "reason": "binds the sender of a QoS 0 PUBLISH; the server as sender is observed by MQTT-3.3.1-2"
+  },
+  "MQTT-4.5.0-2": {
+    "status": "n/a-client",
+    "reason": "client must acknowledge publishes"
+  },
+  "MQTT-4.6.0-1": {
+    "status": "n/a-client",
+    "reason": "client resend order"
+  },
+  "MQTT-4.6.0-2": {
+    "status": "n/a-client",
+    "reason": "client PUBACK order"
+  },
+  "MQTT-4.6.0-3": {
+    "status": "n/a-client",
+    "reason": "client PUBREC order"
+  },
+  "MQTT-4.6.0-4": {
+    "status": "n/a-client",
+    "reason": "client PUBREL order"
+  },
+  "MQTT-4.12.0-3": {
+    "status": "n/a-client",
+    "reason": "client AUTH continuation"
+  },
+  "MQTT-4.12.1-1": {
+    "status": "n/a-client",
+    "reason": "client re-authentication request"
+  },
+  "MQTT-6.0.0-3": {
+    "status": "n/a-client",
+    "reason": "client must offer the mqtt subprotocol; the server side is refusing an upgrade without it (MQTT-6.0.0-4)"
+  },
+  "MQTT-2.3.1-2": {
+    "status": "n/a-client",
+    "reason": "3.1.1: client packet identifier allocation"
+  },
+  "MQTT-2.3.1-3": {
+    "status": "n/a-client",
+    "reason": "3.1.1: client packet identifier reuse"
+  },
+  "MQTT-3.14.4-2": {
+    "status": "n/a-client",
+    "reason": "3.1.1: client sends nothing after DISCONNECT (in 5.0 this identifier binds the sender, which the server is too, and is covered)"
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "commit": "9d7bb80bb8b9d9cfc0b52f8cb4c1916401281103",
+  "suites": {
+    "client_test.py": {
+      "ran": 10,
+      "passed": 10,
+      "failures": null
+    },
+    "client_test5.py": {
+      "ran": 27,
+      "passed": 26,
+      "failures": [
+        "test_subscribe_failure"
+      ]
+    }
+  }
+}

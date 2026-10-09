@@ -1,0 +1,1109 @@
+{
+  "MQTT-1.5.3-1": {
+    "tests": [
+      "TestRawStatements/3.1.1_invalid_UTF-8"
+    ],
+    "pass": true
+  },
+  "MQTT-1.5.3-2": {
+    "tests": [
+      "TestRawStatements/3.1.1_U+0000"
+    ],
+    "pass": true
+  },
+  "MQTT-1.5.4-1": {
+    "tests": [
+      "TestRawStatements/invalid_UTF-8_topic"
+    ],
+    "pass": true
+  },
+  "MQTT-1.5.4-2": {
+    "tests": [
+      "TestRawStatements/U+0000_in_topic"
+    ],
+    "pass": true
+  },
+  "MQTT-1.5.5-1": {
+    "tests": [
+      "TestRawStatements/Remaining_Length_five_bytes"
+    ],
+    "pass": true
+  },
+  "MQTT-2.1.3-1": {
+    "tests": [
+      "TestRawStatements/PINGREQ_flags"
+    ],
+    "pass": true
+  },
+  "MQTT-2.2.1-2": {
+    "tests": [
+      "TestRawStatements/QoS_0_with_packet_identifier_is_a_topic_byte"
+    ],
+    "pass": true
+  },
+  "MQTT-2.2.1-3": {
+    "tests": [
+      "TestRawStatements/SUBSCRIBE_packet_identifier_0"
+    ],
+    "pass": true
+  },
+  "MQTT-2.2.2-1": {
+    "tests": [
+      "TestRawStatements/3.1.1_invalid_flags",
+      "TestRawStatements/unknown_property"
+    ],
+    "pass": true
+  },
+  "MQTT-2.2.2-2": {
+    "tests": [
+      "TestRawStatements/3.1.1_invalid_flags"
+    ],
+    "pass": true
+  },
+  "MQTT-2.3.1-1": {
+    "tests": [
+      "TestRawStatements/3.1.1_QoS_1_packet_identifier_0"
+    ],
+    "pass": true
+  },
+  "MQTT-2.3.1-4": {
+    "tests": [
+      "TestRedeliveryOnReconnect311"
+    ],
+    "pass": true
+  },
+  "MQTT-2.3.1-7": {
+    "tests": [
+      "TestBasic311"
+    ],
+    "pass": true
+  },
+  "MQTT-3.1.0-1": {
+    "tests": [
+      "TestRawConnectRules/first_packet_not_CONNECT"
+    ],
+    "pass": true
+  },
+  "MQTT-3.1.0-2": {
+    "tests": [
+      "TestBasic",
+      "TestBasic311"
+    ],
+    "pass": true
+  },
+  "MQTT-3.1.2-1": {
+    "tests": [
+      "TestBasic"
+    ],
+    "pass": true
+  },
+  "MQTT-3.1.2-10": {
+    "tests": [
+      "TestWillDelay",
+      "TestWillMessage",
+      "TestWillMessage311"
+    ],
+    "pass": true
+  },
+  "MQTT-3.1.2-11": {
+    "tests": [
+      "TestRawConnectRules/will_flags_without_will"
+    ],
+    "pass": true
+  },
+  "MQTT-3.1.2-12": {
+    "tests": [
+      "TestRawConnectRules/will_QoS_3",
+      "TestWillMessage311"
+    ],
+    "pass": true
+  },
+  "MQTT-3.1.2-13": {
+    "tests": [
+      "TestRawConnectRules/will_flags_without_will"
+    ],
+    "pass": true
+  },
+  "MQTT-3.1.2-14": {
+    "tests": [
+      "TestRawConnectRules/will_QoS_3"
+    ],
+    "pass": true
+  },
+  "MQTT-3.1.2-15": {
+    "tests": [
+      "TestRawConnectRules/will_flags_without_will"
+    ],
+    "pass": true
+  },
+  "MQTT-3.1.2-16": {
+    "tests": [
+      "TestWillMessage311"
+    ],
+    "pass": true
+  },
+  "MQTT-3.1.2-17": {
+    "tests": [
+      "TestRawConnectRules/username_flag_without_username"
+    ],
+    "pass": true
+  },
+  "MQTT-3.1.2-19": {
+    "tests": [
+      "TestRawConnectRules/username_flag_without_username"
+    ],
+    "pass": true
+  },
+  "MQTT-3.1.2-2": {
+    "tests": [
+      "TestRawConnectRules/unsupported_protocol_version_5.0-shaped",
+      "TestUnsupportedProtocolLevel311"
+    ],
+    "pass": true
+  },
+  "MQTT-3.1.2-21": {
+    "tests": [
+      "TestServerKeepAlive"
+    ],
+    "pass": true
+  },
+  "MQTT-3.1.2-22": {
+    "tests": [
+      "TestKeepalive",
+      "TestRawConnectRules/password_without_username_at_3.1.1",
+      "TestWillMessage"
+    ],
+    "pass": true
+  },
+  "MQTT-3.1.2-23": {
+    "tests": [
+      "TestOfflineMessageQueueing",
+      "TestPublicationExpiry",
+      "TestSessionExpiry"
+    ],
+    "pass": true
+  },
+  "MQTT-3.1.2-24": {
+    "tests": [
+      "TestMaximumPacketSize",
+      "TestWillMessage311"
+    ],
+    "pass": true
+  },
+  "MQTT-3.1.2-25": {
+    "tests": [
+      "TestMaximumPacketSize"
+    ],
+    "pass": true
+  },
+  "MQTT-3.1.2-26": {
+    "tests": [
+      "TestServerTopicAlias"
+    ],
+    "pass": true
+  },
+  "MQTT-3.1.2-27": {
+    "tests": [
+      "TestServerTopicAlias"
+    ],
+    "pass": true
+  },
+  "MQTT-3.1.2-3": {
+    "tests": [
+      "TestRawConnectRules/reserved_flag_closes_without_CONNACK"
+    ],
+    "pass": true
+  },
+  "MQTT-3.1.2-4": {
+    "tests": [
+      "TestOfflineQueueingAndSessionPresent311",
+      "TestSessionExpiry"
+    ],
+    "pass": true
+  },
+  "MQTT-3.1.2-5": {
+    "tests": [
+      "TestOfflineMessageQueueing",
+      "TestOfflineQueueingAndSessionPresent311",
+      "TestRedeliveryOnReconnect",
+      "TestSessionExpiry"
+    ],
+    "pass": true
+  },
+  "MQTT-3.1.2-6": {
+    "tests": [
+      "TestOfflineQueueingAndSessionPresent311",
+      "TestSessionExpiry"
+    ],
+    "pass": true
+  },
+  "MQTT-3.1.2-7": {
+    "tests": [
+      "TestRetainedMessage311"
+    ],
+    "pass": true
+  },
+  "MQTT-3.1.2-8": {
+    "tests": [
+      "TestKeepalive",
+      "TestWillDelay",
+      "TestWillMessage",
+      "TestWillMessage311"
+    ],
+    "pass": true
+  },
+  "MQTT-3.1.2-9": {
+    "tests": [
+      "TestWillDelay",
+      "TestWillMessage",
+      "TestWillMessage311"
+    ],
+    "pass": true
+  },
+  "MQTT-3.1.3-1": {
+    "tests": [
+      "TestRawConnectRules/username_flag_without_username"
+    ],
+    "pass": true
+  },
+  "MQTT-3.1.3-11": {
+    "tests": [
+      "TestWillMessage"
+    ],
+    "pass": true
+  },
+  "MQTT-3.1.3-2": {
+    "tests": [
+      "TestRawConnectRules/client_identifier_with_the_base_character_set"
+    ],
+    "pass": true
+  },
+  "MQTT-3.1.3-5": {
+    "tests": [
+      "TestRawConnectRules/client_identifier_with_the_base_character_set",
+      "TestRawConnectRules/level_3_client_identifier_rules",
+      "TestZeroLengthClientID"
+    ],
+    "pass": true
+  },
+  "MQTT-3.1.3-6": {
+    "tests": [
+      "TestAssignedClientID",
+      "TestZeroLengthClientID",
+      "TestZeroLengthClientID311"
+    ],
+    "pass": true
+  },
+  "MQTT-3.1.3-7": {
+    "tests": [
+      "TestAssignedClientID",
+      "TestZeroLengthClientID"
+    ],
+    "pass": true
+  },
+  "MQTT-3.1.3-8": {
+    "tests": [
+      "TestZeroLengthClientID311"
+    ],
+    "pass": true
+  },
+  "MQTT-3.1.3-9": {
+    "tests": [
+      "TestRawConnectRules/level_3_client_identifier_rules",
+      "TestWillDelay",
+      "TestZeroLengthClientID311"
+    ],
+    "pass": true
+  },
+  "MQTT-3.1.4-1": {
+    "tests": [
+      "TestBasic",
+      "TestRawConnectRules/reserved_flag_closes_without_CONNACK",
+      "TestUnsupportedProtocolLevel311"
+    ],
+    "pass": true
+  },
+  "MQTT-3.1.4-4": {
+    "tests": [
+      "TestBasic311"
+    ],
+    "pass": true
+  },
+  "MQTT-3.1.4-5": {
+    "tests": [
+      "TestBasic"
+    ],
+    "pass": true
+  },
+  "MQTT-3.10.1-1": {
+    "tests": [
+      "TestRawStatements/3.1.1_UNSUBSCRIBE_flags",
+      "TestRawStatements/UNSUBSCRIBE_flags"
+    ],
+    "pass": true
+  },
+  "MQTT-3.10.3-2": {
+    "tests": [
+      "TestRawStatements/3.1.1_UNSUBSCRIBE_without_filters",
+      "TestRawStatements/UNSUBSCRIBE_without_filters"
+    ],
+    "pass": true
+  },
+  "MQTT-3.10.4-1": {
+    "tests": [
+      "TestUnsubscribe",
+      "TestUnsubscribe311"
+    ],
+    "pass": true
+  },
+  "MQTT-3.10.4-2": {
+    "tests": [
+      "TestUnsubscribe",
+      "TestUnsubscribe311"
+    ],
+    "pass": true
+  },
+  "MQTT-3.10.4-4": {
+    "tests": [
+      "TestUnsubscribe",
+      "TestUnsubscribe311"
+    ],
+    "pass": true
+  },
+  "MQTT-3.10.4-5": {
+    "tests": [
+      "TestUnsubscribe311"
+    ],
+    "pass": true
+  },
+  "MQTT-3.10.4-6": {
+    "tests": [
+      "TestUnsubscribe311"
+    ],
+    "pass": true
+  },
+  "MQTT-3.11.3-1": {
+    "tests": [
+      "TestUnsubscribe"
+    ],
+    "pass": true
+  },
+  "MQTT-3.11.3-2": {
+    "tests": [
+      "TestUnsubscribe"
+    ],
+    "pass": true
+  },
+  "MQTT-3.12.4-1": {
+    "tests": [
+      "TestBasic",
+      "TestBasic311"
+    ],
+    "pass": true
+  },
+  "MQTT-3.14.1-1": {
+    "tests": [
+      "TestRawStatements/3.1.1_reserved_DISCONNECT_bits",
+      "TestRawStatements/PINGREQ_flags"
+    ],
+    "pass": true
+  },
+  "MQTT-3.14.2-2": {
+    "tests": [
+      "TestSessionExpiry"
+    ],
+    "pass": true
+  },
+  "MQTT-3.14.4-1": {
+    "tests": [
+      "TestBasic"
+    ],
+    "pass": true
+  },
+  "MQTT-3.14.4-3": {
+    "tests": [
+      "TestSessionExpiry",
+      "TestWillMessage311"
+    ],
+    "pass": true
+  },
+  "MQTT-3.15.1-1": {
+    "tests": [
+      "TestRawStatements/AUTH_flags"
+    ],
+    "pass": true
+  },
+  "MQTT-3.15.2-1": {
+    "tests": [
+      "TestEnhancedAuthSCRAM/exchange_completes"
+    ],
+    "pass": true
+  },
+  "MQTT-3.2.0-1": {
+    "tests": [
+      "TestBasic",
+      "TestBasic311"
+    ],
+    "pass": true
+  },
+  "MQTT-3.2.2-1": {
+    "tests": [
+      "TestOfflineQueueingAndSessionPresent311",
+      "TestSessionExpiry"
+    ],
+    "pass": true
+  },
+  "MQTT-3.2.2-10": {
+    "tests": [
+      "TestCapabilityDeclines"
+    ],
+    "pass": true
+  },
+  "MQTT-3.2.2-12": {
+    "tests": [
+      "TestCapabilityDeclines"
+    ],
+    "pass": true
+  },
+  "MQTT-3.2.2-13": {
+    "tests": [
+      "TestCapabilityDeclines"
+    ],
+    "pass": true
+  },
+  "MQTT-3.2.2-15": {
+    "tests": [
+      "TestMaximumPacketSize"
+    ],
+    "pass": true
+  },
+  "MQTT-3.2.2-16": {
+    "tests": [
+      "TestAssignedClientID"
+    ],
+    "pass": true
+  },
+  "MQTT-3.2.2-17": {
+    "tests": [
+      "TestClientTopicAlias",
+      "TestRawStatements/Topic_Alias_above_maximum"
+    ],
+    "pass": true
+  },
+  "MQTT-3.2.2-2": {
+    "tests": [
+      "TestOfflineMessageQueueing",
+      "TestOfflineQueueingAndSessionPresent311",
+      "TestSessionExpiry"
+    ],
+    "pass": true
+  },
+  "MQTT-3.2.2-21": {
+    "tests": [
+      "TestServerKeepAlive"
+    ],
+    "pass": true
+  },
+  "MQTT-3.2.2-22": {
+    "tests": [
+      "TestServerKeepAlive"
+    ],
+    "pass": true
+  },
+  "MQTT-3.2.2-3": {
+    "tests": [
+      "TestOfflineQueueingAndSessionPresent311",
+      "TestSessionExpiry"
+    ],
+    "pass": true
+  },
+  "MQTT-3.2.2-4": {
+    "tests": [
+      "TestUnsupportedProtocolLevel311"
+    ],
+    "pass": true
+  },
+  "MQTT-3.2.2-5": {
+    "tests": [
+      "TestUnsupportedProtocolLevel311"
+    ],
+    "pass": true
+  },
+  "MQTT-3.2.2-6": {
+    "tests": [
+      "TestRawConnectRules/unsupported_protocol_version_5.0-shaped"
+    ],
+    "pass": true
+  },
+  "MQTT-3.2.2-7": {
+    "tests": [
+      "TestRawConnectRules/unsupported_protocol_version_5.0-shaped"
+    ],
+    "pass": true
+  },
+  "MQTT-3.2.2-8": {
+    "tests": [
+      "TestBasic"
+    ],
+    "pass": true
+  },
+  "MQTT-3.2.2-9": {
+    "tests": [
+      "TestCapabilityDeclines"
+    ],
+    "pass": true
+  },
+  "MQTT-3.3.1-1": {
+    "tests": [
+      "TestRedeliveryOnReconnect",
+      "TestRedeliveryOnReconnect311"
+    ],
+    "pass": true
+  },
+  "MQTT-3.3.1-10": {
+    "tests": [
+      "TestRetainedMessage311",
+      "TestSubscribeOptions"
+    ],
+    "pass": true
+  },
+  "MQTT-3.3.1-11": {
+    "tests": [
+      "TestRetainedMessage311",
+      "TestSubscribeOptions"
+    ],
+    "pass": true
+  },
+  "MQTT-3.3.1-12": {
+    "tests": [
+      "TestRetainedMessage311",
+      "TestSubscribeOptions"
+    ],
+    "pass": true
+  },
+  "MQTT-3.3.1-13": {
+    "tests": [
+      "TestSubscribeOptions"
+    ],
+    "pass": true
+  },
+  "MQTT-3.3.1-2": {
+    "tests": [
+      "TestRawStatements/PUBLISH_DUP_on_QoS_0"
+    ],
+    "pass": true
+  },
+  "MQTT-3.3.1-3": {
+    "tests": [
+      "TestOfflineMessageQueueing",
+      "TestRedeliveryOnReconnect311"
+    ],
+    "pass": true
+  },
+  "MQTT-3.3.1-4": {
+    "tests": [
+      "TestRawStatements/3.1.1_PUBLISH_QoS_3",
+      "TestRawStatements/PUBLISH_QoS_3"
+    ],
+    "pass": true
+  },
+  "MQTT-3.3.1-5": {
+    "tests": [
+      "TestRetainedMessage",
+      "TestRetainedMessage311"
+    ],
+    "pass": true
+  },
+  "MQTT-3.3.1-6": {
+    "tests": [
+      "TestRetainedMessage",
+      "TestRetainedMessage311"
+    ],
+    "pass": true
+  },
+  "MQTT-3.3.1-7": {
+    "tests": [
+      "TestRetainedMessage311"
+    ],
+    "pass": true
+  },
+  "MQTT-3.3.1-8": {
+    "tests": [
+      "TestRetainedMessage",
+      "TestRetainedMessage311"
+    ],
+    "pass": true
+  },
+  "MQTT-3.3.1-9": {
+    "tests": [
+      "TestRetainedMessage",
+      "TestRetainedMessage311",
+      "TestSubscribeOptions"
+    ],
+    "pass": true
+  },
+  "MQTT-3.3.2-1": {
+    "tests": [
+      "TestRawStatements/3.1.1_invalid_UTF-8",
+      "TestRawStatements/invalid_UTF-8_topic"
+    ],
+    "pass": true
+  },
+  "MQTT-3.3.2-10": {
+    "tests": [
+      "TestClientTopicAlias"
+    ],
+    "pass": true
+  },
+  "MQTT-3.3.2-11": {
+    "tests": [
+      "TestClientTopicAlias"
+    ],
+    "pass": true
+  },
+  "MQTT-3.3.2-12": {
+    "tests": [
+      "TestClientTopicAlias",
+      "TestRawStatements/Topic_Alias_above_maximum",
+      "TestServerTopicAlias"
+    ],
+    "pass": true
+  },
+  "MQTT-3.3.2-13": {
+    "tests": [
+      "TestRequestResponse"
+    ],
+    "pass": true
+  },
+  "MQTT-3.3.2-15": {
+    "tests": [
+      "TestRequestResponse"
+    ],
+    "pass": true
+  },
+  "MQTT-3.3.2-16": {
+    "tests": [
+      "TestRequestResponse"
+    ],
+    "pass": true
+  },
+  "MQTT-3.3.2-17": {
+    "tests": [
+      "TestRetainedMessage",
+      "TestUserProperties"
+    ],
+    "pass": true
+  },
+  "MQTT-3.3.2-18": {
+    "tests": [
+      "TestRetainedMessage",
+      "TestUserProperties"
+    ],
+    "pass": true
+  },
+  "MQTT-3.3.2-19": {
+    "tests": [
+      "TestMaximumPacketSize"
+    ],
+    "pass": true
+  },
+  "MQTT-3.3.2-2": {
+    "tests": [
+      "TestRawStatements/3.1.1_wildcard_in_topic_name",
+      "TestRawStatements/wildcard_in_topic_name"
+    ],
+    "pass": true
+  },
+  "MQTT-3.3.2-20": {
+    "tests": [
+      "TestPayloadFormat"
+    ],
+    "pass": true
+  },
+  "MQTT-3.3.2-3": {
+    "tests": [
+      "TestOverlappingSubscriptions311"
+    ],
+    "pass": true
+  },
+  "MQTT-3.3.2-4": {
+    "tests": [
+      "TestPayloadFormat",
+      "TestRawStatements/Payload_Format_2"
+    ],
+    "pass": true
+  },
+  "MQTT-3.3.2-5": {
+    "tests": [
+      "TestPublicationExpiry"
+    ],
+    "pass": true
+  },
+  "MQTT-3.3.2-6": {
+    "tests": [
+      "TestPublicationExpiry"
+    ],
+    "pass": true
+  },
+  "MQTT-3.3.2-8": {
+    "tests": [
+      "TestClientTopicAlias",
+      "TestRawStatements/Topic_Alias_0",
+      "TestServerTopicAlias"
+    ],
+    "pass": true
+  },
+  "MQTT-3.3.2-9": {
+    "tests": [
+      "TestClientTopicAlias"
+    ],
+    "pass": true
+  },
+  "MQTT-3.3.4-1": {
+    "tests": [
+      "TestBasic",
+      "TestBasic311"
+    ],
+    "pass": true
+  },
+  "MQTT-3.3.4-2": {
+    "tests": [
+      "TestOverlappingSubscriptions"
+    ],
+    "pass": true
+  },
+  "MQTT-3.3.4-3": {
+    "tests": [
+      "TestSubscriptionIdentifiers"
+    ],
+    "pass": true
+  },
+  "MQTT-3.3.4-4": {
+    "tests": [
+      "TestSubscriptionIdentifiers"
+    ],
+    "pass": true
+  },
+  "MQTT-3.3.4-5": {
+    "tests": [
+      "TestSubscriptionIdentifiers"
+    ],
+    "pass": true
+  },
+  "MQTT-3.3.4-6": {
+    "tests": [
+      "TestRawStatements/Subscription_Identifier_in_PUBLISH"
+    ],
+    "pass": true
+  },
+  "MQTT-3.3.4-7": {
+    "tests": [
+      "TestFlowControl2"
+    ],
+    "pass": true
+  },
+  "MQTT-3.3.4-8": {
+    "tests": [
+      "TestFlowControl2"
+    ],
+    "pass": true
+  },
+  "MQTT-3.3.4-9": {
+    "tests": [
+      "TestFlowControl1"
+    ],
+    "pass": true
+  },
+  "MQTT-3.3.5-1": {
+    "tests": [
+      "TestOverlappingSubscriptions311"
+    ],
+    "pass": true
+  },
+  "MQTT-3.3.5-2": {
+    "tests": [
+      "TestSubscribeFailure311"
+    ],
+    "pass": true
+  },
+  "MQTT-3.6.1-1": {
+    "tests": [
+      "TestRawStatements/3.1.1_PUBREL_flags",
+      "TestRawStatements/PUBREL_flags"
+    ],
+    "pass": true
+  },
+  "MQTT-3.6.2-1": {
+    "tests": [
+      "TestRawStatements/PUBREL_bad_reason"
+    ],
+    "pass": true
+  },
+  "MQTT-3.8.1-1": {
+    "tests": [
+      "TestRawStatements/3.1.1_SUBSCRIBE_flags",
+      "TestRawStatements/SUBSCRIBE_flags"
+    ],
+    "pass": true
+  },
+  "MQTT-3.8.3-2": {
+    "tests": [
+      "TestRawStatements/SUBSCRIBE_without_filters"
+    ],
+    "pass": true
+  },
+  "MQTT-3.8.3-3": {
+    "tests": [
+      "TestRawStatements/3.1.1_SUBSCRIBE_without_filters",
+      "TestSubscribeOptions"
+    ],
+    "pass": true
+  },
+  "MQTT-3.8.3-4": {
+    "tests": [
+      "TestRawStatements/3.1.1_SUBSCRIBE_reserved_bits",
+      "TestRawStatements/No_Local_on_shared"
+    ],
+    "pass": true
+  },
+  "MQTT-3.8.3-5": {
+    "tests": [
+      "TestRawStatements/SUBSCRIBE_reserved_bits"
+    ],
+    "pass": true
+  },
+  "MQTT-3.8.4-1": {
+    "tests": [
+      "TestBasic311"
+    ],
+    "pass": true
+  },
+  "MQTT-3.8.4-2": {
+    "tests": [
+      "TestBasic311"
+    ],
+    "pass": true
+  },
+  "MQTT-3.8.4-3": {
+    "tests": [
+      "TestOverlappingSubscriptions",
+      "TestOverlappingSubscriptions311",
+      "TestSubscribeFailure"
+    ],
+    "pass": true
+  },
+  "MQTT-3.8.4-4": {
+    "tests": [
+      "TestRetainedMessage",
+      "TestSubscribeOptions"
+    ],
+    "pass": true
+  },
+  "MQTT-3.8.4-5": {
+    "tests": [
+      "TestBasic311",
+      "TestSubscribeFailure311"
+    ],
+    "pass": true
+  },
+  "MQTT-3.8.4-6": {
+    "tests": [
+      "TestOverlappingSubscriptions",
+      "TestOverlappingSubscriptions311",
+      "TestSubscriptionIdentifiers"
+    ],
+    "pass": true
+  },
+  "MQTT-3.8.4-7": {
+    "tests": [
+      "TestSubscribeFailure"
+    ],
+    "pass": true
+  },
+  "MQTT-3.8.4-8": {
+    "tests": [
+      "TestCapabilityDeclines"
+    ],
+    "pass": true
+  },
+  "MQTT-3.9.3-1": {
+    "tests": [
+      "TestSubscribeFailure311"
+    ],
+    "pass": true
+  },
+  "MQTT-3.9.3-2": {
+    "tests": [
+      "TestSubscribeFailure",
+      "TestSubscribeFailure311"
+    ],
+    "pass": true
+  },
+  "MQTT-4.1.0-1": {
+    "tests": [
+      "TestOfflineQueueingAndSessionPresent311",
+      "TestRawConnectRules/session_state_discarded_when_expiry_passed"
+    ],
+    "pass": true
+  },
+  "MQTT-4.1.0-2": {
+    "tests": [
+      "TestRawConnectRules/session_state_discarded_when_expiry_passed"
+    ],
+    "pass": true
+  },
+  "MQTT-4.12.0-1": {
+    "tests": [
+      "TestEnhancedAuthSCRAM/unsupported_method"
+    ],
+    "pass": true
+  },
+  "MQTT-4.12.0-2": {
+    "tests": [
+      "TestEnhancedAuthSCRAM/exchange_completes"
+    ],
+    "pass": true
+  },
+  "MQTT-4.12.0-4": {
+    "tests": [
+      "TestEnhancedAuthSCRAM/wrong_proof"
+    ],
+    "pass": true
+  },
+  "MQTT-4.12.0-5": {
+    "tests": [
+      "TestEnhancedAuthSCRAM/exchange_completes"
+    ],
+    "pass": true
+  },
+  "MQTT-4.12.0-6": {
+    "tests": [
+      "TestRawStatements/AUTH_outside_an_exchange"
+    ],
+    "pass": true
+  },
+  "MQTT-4.12.0-7": {
+    "tests": [
+      "TestRawStatements/AUTH_outside_an_exchange"
+    ],
+    "pass": true
+  },
+  "MQTT-4.12.1-2": {
+    "tests": [
+      "TestEnhancedAuthSCRAM/failed_re-authentication"
+    ],
+    "pass": true
+  },
+  "MQTT-4.13.1-1": {
+    "tests": [
+      "TestRawStatements/PINGREQ_flags"
+    ],
+    "pass": true
+  },
+  "MQTT-4.13.2-1": {
+    "tests": [
+      "TestRawConnectRules/unsupported_protocol_version_5.0-shaped"
+    ],
+    "pass": true
+  },
+  "MQTT-4.3.2-1": {
+    "tests": [
+      "TestRedeliveryOnReconnect311"
+    ],
+    "pass": true
+  },
+  "MQTT-4.3.2-2": {
+    "tests": [
+      "TestRedeliveryOnReconnect"
+    ],
+    "pass": true
+  },
+  "MQTT-4.3.3-1": {
+    "tests": [
+      "TestRedeliveryOnReconnect311"
+    ],
+    "pass": true
+  },
+  "MQTT-4.3.3-3": {
+    "tests": [
+      "TestRedeliveryOnReconnect"
+    ],
+    "pass": true
+  },
+  "MQTT-4.4.0-1": {
+    "tests": [
+      "TestOfflineMessageQueueing",
+      "TestRedeliveryOnReconnect",
+      "TestRedeliveryOnReconnect311"
+    ],
+    "pass": true
+  },
+  "MQTT-4.7.0-1": {
+    "tests": [
+      "TestRawStatements/wildcard_in_topic_name"
+    ],
+    "pass": true
+  },
+  "MQTT-4.7.1-1": {
+    "tests": [
+      "TestRawStatements/3.1.1_wildcard_in_topic_name"
+    ],
+    "pass": true
+  },
+  "MQTT-4.7.2-1": {
+    "tests": [
+      "TestDollarTopics",
+      "TestDollarTopics311"
+    ],
+    "pass": true
+  },
+  "MQTT-4.7.3-1": {
+    "tests": [
+      "TestRawStatements/empty_topic_without_alias"
+    ],
+    "pass": true
+  },
+  "MQTT-4.7.3-2": {
+    "tests": [
+      "TestRawStatements/U+0000_in_topic"
+    ],
+    "pass": true
+  },
+  "MQTT-4.8.2-1": {
+    "tests": [
+      "TestRawStatements/No_Local_on_shared",
+      "TestSharedSubscriptions"
+    ],
+    "pass": true
+  },
+  "MQTT-4.8.2-3": {
+    "tests": [
+      "TestSharedSubscriptions"
+    ],
+    "pass": true
+  },
+  "MQTT-4.8.2-4": {
+    "tests": [
+      "TestSharedSubscriptions"
+    ],
+    "pass": true
+  },
+  "MQTT-4.8.2-6": {
+    "tests": [
+      "TestSharedSubscriptions"
+    ],
+    "pass": true
+  },
+  "MQTT-4.9.0-1": {
+    "tests": [
+      "TestFlowControl1"
+    ],
+    "pass": true
+  },
+  "MQTT-4.9.0-2": {
+    "tests": [
+      "TestFlowControl1"
+    ],
+    "pass": true
+  }
+}

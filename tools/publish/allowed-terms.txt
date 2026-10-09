@@ -1,0 +1,8 @@
+# Words the publish check allows although the site term list names them
+# (owner, 2026-10-09). A match is allowed only when the whole word around it
+# is one of these. Adding a word is the owner's decision.
+ai
+ai2
+gtr
+dave
+notdave

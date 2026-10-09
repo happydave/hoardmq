@@ -1,0 +1,19 @@
+{
+  "upstream": "https://github.com/eclipse-paho/paho.mqtt.testing",
+  "commit": "9d7bb80bb8b9d9cfc0b52f8cb4c1916401281103",
+  "suites": {
+    "client_test5.py": {
+      "ran": 27,
+      "expectedFailures": {
+        "test_subscribe_failure": "the Python test client asserts that a SUBACK reason is 0, 1, 2 or 0x80 (a 3.1.1 rule); the node answers a refused subscription with 0x87 Not authorized, which MQTT 5.0 section 3.9.3 lists"
+      }
+    },
+    "client_test.py": {
+      "ran": 10,
+      "expectedFailures": {}
+    }
+  },
+  "notRun": {
+    "mqtt-cli": "HiveMQ mqtt-cli's `test` command was not run in this checkpoint: it needs the mqtt-cli distribution downloaded and installed, a tool install left to the owner (see the work item's code log); the two Paho suites exercise the same client-visible surface"
+  }
+}

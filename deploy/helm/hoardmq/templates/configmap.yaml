@@ -1,0 +1,48 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "hoardmq.fullname" . }}
+  labels:
+    {{- include "hoardmq.labels" . | nindent 4 }}
+data:
+  # The node name, the advertised address and the node's own certificate
+  # arrive through environment overrides from the pod's own name (see the
+  # StatefulSet): one document serves every ordinal, but each node presents
+  # its own certificate.
+  config.json: |-
+    {{- $base := dict
+      "version" 1
+      "node" (dict "dataDir" "/var/lib/hoardmq")
+      "listeners" (list (dict "name" "mqtt" "type" "tcp" "address" (printf ":%d" (int .Values.listeners.mqtt.port))))
+      "cluster" (dict
+        "id" .Values.cluster.id
+        "replicas" (int .Values.cluster.replicas)
+        "shards" (int .Values.cluster.shards)
+        "listen" (printf ":%d" (int .Values.cluster.port))
+        "auth" (dict "mode" "mtls" "tls" (dict "caFile" "/etc/hoardmq/tls/ca.crt"))
+        "discovery" (dict "mode" "dns" "dns" (dict "service" (include "hoardmq.headless" .) "name" (include "hoardmq.fullname" .) "replicas" (int .Values.replicaCount) "port" (int .Values.cluster.port)))
+        "drain" (dict "ratePerSecond" (int .Values.cluster.drain.ratePerSecond) "timeoutMs" (mul 1000 (int .Values.cluster.drain.timeoutSeconds)) "confirmTimeoutMs" (mul 1000 (int .Values.cluster.drain.confirmTimeoutSeconds)) "holdExitMs" (mul 1000 (int .Values.cluster.drain.holdExitSeconds)))
+        "readiness" (dict "stableMs" (mul 1000 (int .Values.cluster.readiness.stableSeconds))))
+      "auth" (dict "anonymous" .Values.auth.anonymous)
+      "log" (dict "level" .Values.logLevel "format" "json")
+      "observability" (dict "address" (printf "0.0.0.0:%d" (int .Values.observability.port)) "allowRemote" true)
+      "modules" (dict "metrics.prometheus" (dict))
+    -}}
+    {{- if .Values.listeners.mqtts.enabled }}
+    {{- $_ := set $base "listeners" (append (get $base "listeners") (dict "name" "mqtts" "type" "tls" "address" (printf ":%d" (int .Values.listeners.mqtts.port)) "tls" (dict "certFile" "/etc/hoardmq/client-tls/tls.crt" "keyFile" "/etc/hoardmq/client-tls/tls.key"))) }}
+    {{- end }}
+    {{- if and (not .Values.admin.enabled) (hasKey .Values.extraConfig "admin") }}
+    {{- fail "extraConfig.admin configures the admin API, which closes the observability listener's /drain the preStop posts to: set admin.enabled so the preStop drains through the API" }}
+    {{- end }}
+    {{- if .Values.admin.enabled }}
+    {{- /* Loopback only: kubectl port-forward reaches it, the network does
+           not, so no TLS is needed. The preStop's token may drain and read
+           the drain's status, nothing else. */}}
+    {{- $_ := set $base "admin" (dict
+      "address" (printf "127.0.0.1:%d" (int .Values.admin.port))
+      "tokens" (list
+        (dict "name" "prestop-drain" "tokenFile" "/etc/hoardmq/admin/drain.token" "scopes" (list "cluster:drain" "cluster:read"))
+        (dict "name" "operator" "tokenFile" "/etc/hoardmq/admin/operator.token" "scopes" (list "admin")))) }}
+    {{- end }}
+    {{- $merged := mergeOverwrite $base (deepCopy .Values.extraConfig) }}
+    {{- $merged | toPrettyJson | nindent 4 }}

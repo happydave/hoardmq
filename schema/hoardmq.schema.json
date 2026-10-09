@@ -1,0 +1,552 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hoardmq.dev/schema/v1/hoardmq.schema.json",
+  "title": "HoardMQ configuration",
+  "description": "Canonical configuration document for the HoardMQ broker, format version 1.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "node"],
+  "properties": {
+    "version": {
+      "description": "Document format version.",
+      "type": "integer",
+      "const": 1
+    },
+    "node": { "$ref": "#/$defs/node" },
+    "listeners": {
+      "description": "Client-facing listeners. May be empty.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/listener" }
+    },
+    "cluster": { "$ref": "#/$defs/cluster" },
+    "limits": { "$ref": "#/$defs/limits" },
+    "modules": {
+      "description": "Module configuration, nested under the module identifier.",
+      "type": "object",
+      "propertyNames": { "pattern": "^[a-z]+\\.[a-z0-9]+$" },
+      "additionalProperties": { "type": "object" }
+    },
+    "log": { "$ref": "#/$defs/log" },
+    "mqtt": { "$ref": "#/$defs/mqtt" },
+    "auth": { "$ref": "#/$defs/auth" },
+    "hooks": { "$ref": "#/$defs/hooks" },
+    "overload": { "$ref": "#/$defs/overload" },
+    "flapping": { "$ref": "#/$defs/flapping" },
+    "observability": { "$ref": "#/$defs/observability" },
+    "admin": { "$ref": "#/$defs/admin" }
+  },
+  "$defs": {
+    "node": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["dataDir"],
+      "properties": {
+        "name": {
+          "description": "Node name within the cluster. Empty means undecided; a later component chooses.",
+          "type": "string"
+        },
+        "dataDir": {
+          "description": "Directory holding this node's logs and checkpoints.",
+          "type": "string",
+          "minLength": 1
+        },
+        "walSync": {
+          "description": "When log records are fsynced: before every QoS 1 and 2 acknowledgement (commit, the default) or on an interval (relaxed).",
+          "type": "string", "enum": ["commit", "relaxed"]
+        },
+        "walSyncIntervalMs": {
+          "description": "Sync interval in milliseconds under the relaxed policy.",
+          "type": "integer", "minimum": 1, "maximum": 10000
+        },
+        "walGroupMaxDelayMs": {
+          "description": "Under the commit policy, how long a sync may hold to let concurrent callers share one fsync (group commit). 0, the default, never holds: only callers arriving while an fsync is in flight are grouped, which under load is all of them.",
+          "type": "integer", "minimum": 0, "maximum": 100
+        },
+        "walGroupMaxSize": {
+          "description": "Fires a held group early once this many callers have joined; only matters when walGroupMaxDelayMs is non-zero. Default 256.",
+          "type": "integer", "minimum": 1
+        },
+        "sessionShards": {
+          "description": "How many slices the session map is split into, rounded up to a power of two. One lock for the whole map made every connect, disconnect and inbound packet queue behind every other. Default 64.",
+          "type": "integer", "minimum": 1, "maximum": 4096
+        },
+        "storeAdmission": {
+          "description": "How many connects and disconnects may be inside the store's write path at once. Before the session map was sharded its single lock bounded this at one as a side effect; removing that bound entirely was measured catastrophic at 100,000 clients. 0 is unbounded. Default 64.",
+          "type": "integer", "minimum": 0, "maximum": 65536
+        },
+        "walSegmentBytes": {
+          "description": "Size at which a log segment rolls.",
+          "type": "integer", "minimum": 1048576
+        }
+      }
+    },
+    "listener": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "type", "address"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "type": { "type": "string", "enum": ["tcp", "tls", "ws", "wss"] },
+        "address": {
+          "description": "host:port to bind; the host may be empty.",
+          "type": "string",
+          "minLength": 2
+        },
+        "path": {
+          "description": "HTTP path for ws and wss listeners. Default /mqtt.",
+          "type": "string",
+          "pattern": "^/"
+        },
+        "maxConnections": {
+          "description": "Connections accepted at once on this listener; 0 means unlimited.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "maxHandshakes": {
+          "description": "Connections accepted but not yet answered with a CONNACK; at the bound the listener pauses accepting and the kernel backlog absorbs the rest (pause-accept). 0 means the default, 512.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "connectRate": {
+          "description": "CONNECTs a second this listener admits; one over it is refused before any credential is examined (0x9F at MQTT 5.0, closed at 3.1.1 and 3.1). 0, the default, is unlimited.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "connectBurst": {
+          "description": "How many CONNECTs the listener admits at once before connectRate paces them. 0, the default, is twice connectRate. Needs connectRate.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "tls": { "$ref": "#/$defs/tls" }
+      }
+    },
+    "tls": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["certFile", "keyFile"],
+      "properties": {
+        "certFile": { "type": "string", "minLength": 1 },
+        "keyFile": { "type": "string", "minLength": 1 },
+        "clientCAFile": { "type": "string" },
+        "minVersion": { "type": "string", "enum": ["1.2", "1.3"] }
+      }
+    },
+    "cluster": {
+      "description": "Settings that must agree across nodes, and this node's place in the cluster transport.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": { "description": "Cluster identifier; peers must agree.", "type": "string", "minLength": 1 },
+        "listen": { "description": "Address of the peer listener. Required when peers are configured.", "type": "string" },
+        "replicas": { "type": "integer", "minimum": 1, "maximum": 5 },
+        "shards": { "type": "integer", "minimum": 1, "maximum": 4096 },
+        "peers": {
+          "description": "The other nodes of the cluster.",
+          "type": "array",
+          "items": { "$ref": "#/$defs/peer" }
+        },
+        "auth": { "$ref": "#/$defs/clusterAuth" },
+        "heartbeatMs": { "description": "Interval between peer heartbeats.", "type": "integer", "minimum": 100 },
+        "heartbeatMisses": { "description": "Consecutive missed intervals before a peer is down.", "type": "integer", "minimum": 1, "maximum": 100 },
+        "maxFrameBytes": { "description": "Largest frame accepted on the transport.", "type": "integer", "minimum": 65536 },
+        "raft": { "$ref": "#/$defs/raft" },
+        "discovery": { "$ref": "#/$defs/discovery" },
+        "leases": { "$ref": "#/$defs/leases" },
+        "routing": { "$ref": "#/$defs/routing" },
+        "replication": { "$ref": "#/$defs/replication" },
+        "drain": { "$ref": "#/$defs/drain" },
+        "readiness": { "$ref": "#/$defs/readiness" },
+        "advertise": { "description": "Client-facing address other nodes may hand out in a Server Reference.", "type": "string" }
+      }
+    },
+    "drain": {
+      "description": "Graceful leave: clients are redirected at a bounded rate, the node's leases are handed to a live node, and the drain waits for its sessions to be confirmed held there.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "ratePerSecond": { "description": "The least number of clients a drain disconnects per second; it goes faster where that is what disconnects them all by timeoutMs less leases.takeoverTimeoutMs (or less half timeoutMs, if that is smaller).", "type": "integer", "minimum": 1 },
+        "timeoutMs": { "description": "How long a drain waits for redirected clients to be taken over before handing the remaining leases off.", "type": "integer", "minimum": 1000 },
+        "confirmTimeoutMs": { "description": "How long a drain waits, after handing its leases off, for every session it held to be confirmed held by its receiver; sessions still unconfirmed then are counted and logged.", "type": "integer", "minimum": 1000 },
+        "onSignal": { "description": "Drain on SIGTERM before exiting, for setups without a preStop hook (bare containers, systemd). SIGINT and a second SIGTERM still shut down immediately.", "type": "boolean" },
+        "holdExitMs": { "description": "After a drain that no signal started completes, how long the process stays up waiting for SIGINT or SIGTERM before it exits; the signal ends the wait at once. For a Kubernetes preStop hook that waits on the drain: the hook reads the completion and exits before the process does. 0 exits as the drain completes.", "type": "integer", "minimum": 0 }
+      }
+    },
+    "readiness": {
+      "description": "Readiness signal tuning.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "stableMs": { "description": "How long the topology (members, shard map, alive set) must be unchanged before the node reports ready; 0 disables the condition.", "type": "integer", "minimum": 0 }
+      }
+    },
+    "replication": {
+      "description": "Data-plane replication tuning.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "ackTimeoutMs": { "description": "How long a QoS 1 or 2 acknowledgement waits for the followers to hold the message, and how long a takeover or adoption waits for a replica of a session.", "type": "integer", "minimum": 100 }
+      }
+    },
+    "routing": {
+      "description": "Routing plane tuning.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "syncMs": { "description": "Interval of the full route-table exchange with every peer.", "type": "integer", "minimum": 1000 }
+      }
+    },
+    "leases": {
+      "description": "Client-identifier lease tuning.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "ttlMs": { "description": "How long a lease stays valid without its owner renewing.", "type": "integer", "minimum": 1000 },
+        "takeoverTimeoutMs": { "description": "How long a lease decision or a state pull may take.", "type": "integer", "minimum": 100 }
+      }
+    },
+    "raft": {
+      "description": "Consensus core tuning.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "tickMs": { "type": "integer", "minimum": 10 },
+        "electionTicks": { "type": "integer", "minimum": 2 },
+        "heartbeatTicks": { "type": "integer", "minimum": 1 },
+        "snapshotEntries": { "type": "integer", "minimum": 10 },
+        "snapshotTrailing": { "type": "integer", "minimum": 1 },
+        "promoteLag": { "type": "integer", "minimum": 1 },
+        "joinTimeoutMs": { "type": "integer", "minimum": 100 },
+        "bootstrap": { "description": "Whether this node may bootstrap a new group when no peer answers; absent means the lowest-named node may.", "type": "boolean" }
+      }
+    },
+    "discovery": {
+      "description": "Where the peer set comes from.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": { "type": "string", "enum": ["static", "dns"] },
+        "dns": { "$ref": "#/$defs/dnsDiscovery" }
+      }
+    },
+    "dnsDiscovery": {
+      "description": "A StatefulSet's headless Service: peers are <name>-<i>.<service>:<port> for every ordinal below replicas.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["service", "name", "replicas", "port"],
+      "properties": {
+        "service": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1 },
+        "replicas": { "type": "integer", "minimum": 1 },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+      }
+    },
+    "peer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "address"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "address": { "type": "string", "minLength": 1 }
+      }
+    },
+    "clusterAuth": {
+      "description": "How peers authenticate each other. mtls uses certificates from the cluster CA; secret proves a shared secret with an HMAC and does not encrypt.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": { "type": "string", "enum": ["mtls", "secret"] },
+        "tls": { "$ref": "#/$defs/clusterTLS" },
+        "secretFile": { "type": "string", "minLength": 1 }
+      }
+    },
+    "clusterTLS": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["certFile", "keyFile", "caFile"],
+      "properties": {
+        "certFile": { "type": "string", "minLength": 1 },
+        "keyFile": { "type": "string", "minLength": 1 },
+        "caFile": { "type": "string", "minLength": 1 }
+      }
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxPacketSize": { "type": "integer", "minimum": 16, "maximum": 268435455 },
+        "receiveMaximum": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "maxQueuedMessages": { "type": "integer", "minimum": 0 },
+        "maxKeepAlive": {
+          "description": "Upper bound on a client's keep alive in seconds; 0 accepts the client's value.",
+          "type": "integer", "minimum": 0, "maximum": 65535
+        },
+        "connectTimeout": {
+          "description": "Seconds allowed from accept to CONNECT.",
+          "type": "integer", "minimum": 1, "maximum": 300
+        },
+        "queueDrop": {
+          "description": "Which message a full session queue drops: the oldest queued or the newest arriving.",
+          "type": "string", "enum": ["oldest", "newest"]
+        },
+        "connectRate": {
+          "description": "CONNECTs a second this node admits across every listener; one over it is refused before any credential is examined. 0, the default, is unlimited.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "connectBurst": {
+          "description": "How many CONNECTs the node admits at once before connectRate paces them. 0, the default, is twice connectRate. Needs connectRate.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "maxSessionExpiry": {
+          "description": "Cap on the Session Expiry Interval in seconds; 0 means no cap.",
+          "type": "integer", "minimum": 0, "maximum": 4294967295
+        },
+        "clientMessageRate": {
+          "description": "PUBLISH packets a second each client may send; one over it is read later, not refused (the broker stops reading the socket until the rate allows). 0, the default, is unlimited.",
+          "type": "integer", "minimum": 0
+        },
+        "clientMessageBurst": {
+          "description": "How many PUBLISH packets a client may send at once before clientMessageRate paces it. 0 is twice the rate. Needs clientMessageRate.",
+          "type": "integer", "minimum": 0
+        },
+        "clientByteRate": {
+          "description": "PUBLISH topic and payload bytes a second each client may send, paced as clientMessageRate is. 0, the default, is unlimited.",
+          "type": "integer", "minimum": 0
+        },
+        "clientByteBurst": {
+          "description": "How many bytes a client may send at once before clientByteRate paces it. 0 is twice the rate. Needs clientByteRate.",
+          "type": "integer", "minimum": 0
+        }
+      }
+    },
+    "overload": {
+      "description": "The limits the node's stress level is measured against: each indicator's fraction of its limit sets a level (under 0.6 is 0, under 0.8 is 1, under 0.95 is 2, else 3) and the highest is the node's. 0 leaves an indicator out.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "queuedMessages": {
+          "description": "Messages queued across this node's sessions. Default 1000000.",
+          "type": "integer", "minimum": 0
+        },
+        "replicationLag": {
+          "description": "Replication frames sent to peers and not yet acknowledged, summed over the peers. Default 400000.",
+          "type": "integer", "minimum": 0
+        },
+        "memoryBytes": {
+          "description": "The live heap's limit. 0, the default, uses the process's GOMEMLIMIT when one is set and otherwise leaves memory out.",
+          "type": "integer", "minimum": 0
+        }
+      }
+    },
+    "flapping": {
+      "description": "A client whose established connections end abnormally on its side (the network drops, the keep-alive expires, the client breaks the protocol) maxCount times within windowSeconds on one node is banned by client identifier for banSeconds. A client DISCONNECT, and any end or refusal the broker chose, is never counted.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "description": "Default true.", "type": "boolean" },
+        "windowSeconds": { "description": "Default 60.", "type": "integer", "minimum": 1, "maximum": 3600 },
+        "maxCount": { "description": "Default 15.", "type": "integer", "minimum": 2, "maximum": 10000 },
+        "banSeconds": { "description": "Default 300.", "type": "integer", "minimum": 1, "maximum": 604800 }
+      }
+    },
+    "observability": {
+      "description": "The metrics, liveness and readiness listener, the audit log and trace recordings.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "address": {
+          "description": "host:port for /metrics, /healthz and /readyz; empty (the default) serves nothing. A non-loopback host requires allowRemote.",
+          "type": "string"
+        },
+        "allowRemote": { "type": "boolean" },
+        "metricsPath": { "type": "string", "pattern": "^/" },
+        "traceEvents": { "type": "integer", "minimum": 10, "maximum": 100000 },
+        "audit": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "maxBytes": { "type": "integer", "minimum": 1048576 },
+            "maxFiles": { "type": "integer", "minimum": 1, "maximum": 1000 },
+            "queue": {
+              "description": "Events held for the audit writer; a refused connect is dropped and counted when the queue is full, every other event waits for space.",
+              "type": "integer", "minimum": 64, "maximum": 1048576
+            }
+          }
+        }
+      }
+    },
+    "admin": {
+      "description": "The admin REST API: its own listener, off unless address is set. Every request is authenticated by a bearer token or a client certificate and authorized by the scopes of the identity it maps to.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "address": {
+          "description": "host:port of the admin listener; empty (the default) binds nothing. A non-loopback host requires tls.",
+          "type": "string"
+        },
+        "tls": { "$ref": "#/$defs/tls" },
+        "roles": {
+          "description": "Named scope sets that tokens, certificates and identity-provider groups are granted by name.",
+          "type": "array",
+          "items": { "$ref": "#/$defs/adminRole" }
+        },
+        "tokens": {
+          "description": "Bearer-token identities. The token is the trimmed content of tokenFile, at least 16 bytes; the document names the file, never the token.",
+          "type": "array",
+          "items": { "$ref": "#/$defs/adminToken" }
+        },
+        "certificates": {
+          "description": "Client-certificate identities, by the common name of a certificate tls.clientCAFile verifies.",
+          "type": "array",
+          "items": { "$ref": "#/$defs/adminCertificate" }
+        },
+        "oidc": { "$ref": "#/$defs/adminOIDC" },
+        "maxBodyBytes": {
+          "description": "Largest request body accepted; larger bodies are refused with 413. Default 1048576.",
+          "type": "integer", "minimum": 1024, "maximum": 67108864
+        }
+      }
+    },
+    "adminRole": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "scopes"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "scopes": { "type": "array", "items": { "$ref": "#/$defs/adminScope" } }
+      }
+    },
+    "adminRoleNames": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "adminToken": {
+      "description": "Holds the union of its scopes and its roles' scopes; at least one scope or role.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "tokenFile"],
+      "properties": {
+        "name": { "description": "The identity's name; audit records name it as token:<name>.", "type": "string", "minLength": 1 },
+        "tokenFile": { "type": "string", "minLength": 1 },
+        "scopes": { "type": "array", "items": { "$ref": "#/$defs/adminScope" } },
+        "roles": { "$ref": "#/$defs/adminRoleNames" }
+      }
+    },
+    "adminCertificate": {
+      "description": "Holds the union of its scopes and its roles' scopes; at least one scope or role.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["commonName"],
+      "properties": {
+        "commonName": { "type": "string", "minLength": 1 },
+        "scopes": { "type": "array", "items": { "$ref": "#/$defs/adminScope" } },
+        "roles": { "$ref": "#/$defs/adminRoleNames" }
+      }
+    },
+    "adminOIDC": {
+      "description": "Accepts ID tokens an OpenID Connect provider issued (hoardmq login obtains one) as bearer credentials, verified against the issuer's published keys; the identity's groups map to roles, and an identity no mapping grants a role is refused.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["issuer", "clientIds", "roleMappings"],
+      "properties": {
+        "issuer": { "description": "The provider's issuer URL, exactly as its ID tokens carry it: https, or http on a loopback host.", "type": "string", "minLength": 1 },
+        "clientIds": { "description": "Client identifiers whose ID tokens are accepted: a token's aud must name one.", "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "usernameClaim": { "description": "The claim naming the identity; audit records name it as oidc:<value>. Default sub.", "type": "string", "minLength": 1 },
+        "groupsClaim": { "description": "The claim listing the identity's groups. Default groups.", "type": "string", "minLength": 1 },
+        "roleMappings": { "type": "array", "items": { "$ref": "#/$defs/adminRoleMapping" } },
+        "caFile": { "description": "PEM certificates to verify the provider's TLS instead of the system roots.", "type": "string", "minLength": 1 },
+        "clockSkewSeconds": { "description": "Allowed disagreement between this node's clock and the provider's on exp, iat and nbf. Default 60.", "type": "integer", "minimum": 0, "maximum": 300 },
+        "maxTokenLifetimeSeconds": { "description": "The longest exp - iat accepted, whatever the provider issues. Default 86400.", "type": "integer", "minimum": 60, "maximum": 604800 }
+      }
+    },
+    "adminRoleMapping": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["group", "roles"],
+      "properties": {
+        "group": { "type": "string", "minLength": 1 },
+        "roles": { "$ref": "#/$defs/adminRoleNames" }
+      }
+    },
+    "adminScope": {
+      "description": "read is every :read scope; admin is every scope.",
+      "type": "string",
+      "enum": ["admin", "read", "clients:read", "clients:write", "retained:read", "retained:write", "cluster:read", "cluster:drain", "config:read", "config:write", "traces:read", "traces:write", "modules:read", "modules:write", "audit:read", "apikeys:read", "apikeys:write", "credentials:read", "credentials:write", "bans:read", "bans:write", "limits:read", "limits:write"]
+    },
+    "hooks": {
+      "description": "Timeout and fallback applied to every module hook call.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "timeoutMs": {
+          "description": "Milliseconds a hook may run before the fallback applies; 0 calls hooks inline with no deadline.",
+          "type": "integer", "minimum": 0, "maximum": 60000
+        },
+        "fallback": {
+          "description": "What a timed-out or panicking hook counts as.",
+          "type": "string", "enum": ["continue", "disconnect"]
+        }
+      }
+    },
+    "auth": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "anonymous": {
+          "description": "Accept connections that present no credentials when no authenticator decides. Default false.",
+          "type": "boolean"
+        },
+        "decisionTtlSeconds": {
+          "description": "How long an authenticator's allow is held before it is made again without the client; a session whose credential no longer passes is ended. A token's own expiry, when sooner, is used instead. Default 3600.",
+          "type": "integer", "minimum": 1, "maximum": 86400
+        },
+        "argon2MemoryBytes": {
+          "description": "The memory this node's Argon2id password verifications may hold at once; a verification waits for its share, and a hash that needs more than all of it is refused. Default 268435456 (four at the default cost of 64 MiB).",
+          "type": "integer", "minimum": 1048576
+        },
+        "cache": {
+          "description": "The node's cache of password verifications, so a reconnecting client is not made to derive its key again. An entry is a keyed MAC of the stored credential and the password with an expiry, never the password or a derived key; only a match is kept.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "ttlSeconds": {
+              "description": "How long a verification is kept. 0 turns the cache off. Default 60.",
+              "type": "integer", "minimum": 0, "maximum": 3600
+            },
+            "maxEntries": {
+              "description": "Verifications kept at most; when full, a new one is not kept. Default 100000.",
+              "type": "integer", "minimum": 1, "maximum": 10000000
+            }
+          }
+        }
+      }
+    },
+    "log": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "level": { "type": "string", "enum": ["debug", "info", "warn", "error"] },
+        "format": { "type": "string", "enum": ["text", "json"] }
+      }
+    },
+    "mqtt": {
+      "description": "MQTT 5.0 capabilities advertised in CONNACK. Every capability is on by default; switching one off is the operator's decision, not the product's.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maximumQoS": { "type": "integer", "minimum": 0, "maximum": 2 },
+        "retainAvailable": { "type": "boolean" },
+        "wildcardSubscriptionAvailable": { "type": "boolean" },
+        "subscriptionIdentifiersAvailable": { "type": "boolean" },
+        "sharedSubscriptionAvailable": { "type": "boolean" },
+        "topicAliasMaximum": { "type": "integer", "minimum": 0, "maximum": 65535 },
+        "sharedSubscriptionStrategy": {
+          "description": "How a shared subscription group picks the member that receives each message.",
+          "type": "string", "enum": ["round-robin", "random", "sticky", "hash", "local-first"]
+        }
+      }
+    }
+  }
+}

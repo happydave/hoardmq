@@ -1,0 +1,12 @@
+# Built binary (module name at repo root)
+/hoardmq
+
+# Go build and test artifacts
+*.test
+*.out
+
+# Scratch space for manual runs; never committed
+/tmp/
+
+# Untracked scratch under the harness (seed artifacts kept for a work item); never committed
+/sim/tmp/
