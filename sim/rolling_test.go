@@ -384,6 +384,10 @@ func rollStepRun(t *testing.T, c *Cluster, n *Node, drainLimitS, cutS int, sec f
 	for k, v := range risen(nil, after[n.Name], rollEmptyMetric) {
 		step.Empty[k] += v
 	}
+	step.HookWaits = stepRise(beforeAll, after, drainedAfter, n.Name, rollHookWaitMetric)
+	for k, v := range risen(nil, after[n.Name], rollHookWaitMetric) {
+		step.HookWaits[k] += v
+	}
 	confirmAfter := rollConfirms(c)
 	// A restarted node's counters start again, so the drained node is read
 	// as it stopped.

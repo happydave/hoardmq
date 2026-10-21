@@ -401,6 +401,45 @@ func (m *Manager) Snapshot() *store.State {
 	return st
 }
 
+// Persistent lists the persistent sessions this node serves, by namespace and
+// client identifier, from one listing taken under every shard lock. A whole
+// write reads each one's state later, through WholeState.
+func (m *Manager) Persistent() []store.Scope {
+	sessions := m.listSessions(nil)
+	out := make([]store.Scope, 0, len(sessions))
+	for _, s := range sessions {
+		s.mu.Lock()
+		if s.persistent {
+			out = append(out, store.Scope{Namespace: s.key.ns, ClientID: s.key.id})
+		}
+		s.mu.Unlock()
+	}
+	return out
+}
+
+// WholeState calls fn with the current state of a session this node serves,
+// under the session's mutex, and reports whether it is served. Every record of
+// a session is written and queued to the replicas under that mutex, so a whole
+// write fn queues is ordered against them. The shard lock confirms the session
+// is still served first, so one discarded, sealed or replaced since is not
+// written whole after its delete. fn must not block or take the manager's
+// locks.
+func (m *Manager) WholeState(ns, id string, fn func(*store.SessionState)) bool {
+	k := key{ns, id}
+	sh := m.shardFor(k)
+	sh.mu.Lock()
+	s := sh.sessions[k]
+	if s == nil {
+		sh.mu.Unlock()
+		return false
+	}
+	s.mu.Lock()
+	sh.mu.Unlock()
+	defer s.mu.Unlock()
+	fn(s.snapshot())
+	return true
+}
+
 // listSessions copies the session pointers under every shard lock and, when
 // sealed is not nil, calls it for each sealed copy while those locks are held.
 func (m *Manager) listSessions(sealed func(key, *sealedCopy)) []*Session {

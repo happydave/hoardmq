@@ -141,6 +141,31 @@ type fakeSessions struct {
 	// unjournaled makes InjectRetained report its record not durable, as a
 	// session layer whose journal append or sync failed does.
 	unjournaled atomic.Bool
+	// lock stands for the sessions' own mutexes: WholeState holds it while its
+	// function runs, and a test's write of a session's record takes it, as the
+	// manager writes every record of a session under that session's mutex.
+	lock sync.Mutex
+}
+
+func (s *fakeSessions) Persistent() []store.Scope {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]store.Scope, 0, len(s.sessions))
+	for _, ss := range s.sessions {
+		out = append(out, store.Scope{Namespace: ss.Namespace, ClientID: ss.ClientID})
+	}
+	return out
+}
+
+func (s *fakeSessions) WholeState(ns, id string, fn func(*store.SessionState)) bool {
+	s.lock.Lock()
+	defer s.lock.Unlock()
+	ss, ok := s.Export(ns, id)
+	if !ok {
+		return false
+	}
+	fn(ss)
+	return true
 }
 
 func (s *fakeSessions) Snapshot() *store.State {

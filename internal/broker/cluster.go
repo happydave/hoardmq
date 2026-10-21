@@ -151,6 +151,8 @@ func (s *Server) openConsensus() error {
 		TakeoverDelay:        s.hooks.TakeoverDelay,
 		ImportGate:           s.hooks.ImportGate,
 		AcquireGate:          s.hooks.AcquireGate,
+		AdoptGate:            s.hooks.AdoptGate,
+		ForwardedGate:        s.hooks.LeaseForwardGate,
 		ImportPastLaterGrant: s.hooks.Defects.ImportPastLaterGrant,
 		BuildLevel:           s.hooks.BuildLevel,
 		AdmitDuringAdoption:  s.hooks.Defects.AdmitDuringAdoption,
@@ -202,6 +204,9 @@ func (s *Server) openConsensus() error {
 	}
 	if s.cluster != nil {
 		ro.Transport = s.cluster
+	}
+	if g := s.hooks.WholeWriteGate; g != nil {
+		ro.WholeWriteGate = func() { g(o.Node) }
 	}
 	// The lease table exists once the service does; build the service first
 	// with a fallback that reaches the replicator through the closure.

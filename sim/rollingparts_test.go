@@ -178,6 +178,7 @@ func TestRollParts(t *testing.T) {
 			{Name: "hoardmq_replicas_unwritten_checks_total", Labels: map[string]string{"outcome": "held"}, Value: 4 + d},
 			{Name: "hoardmq_drain_seconds_total", Value: 5 + d},
 			{Name: "hoardmq_sessions_rebuilt_empty_total", Labels: map[string]string{"reason": "adoption"}, Value: 7 + d},
+			{Name: "hoardmq_lease_hook_waits_total", Labels: map[string]string{"outcome": "served"}, Value: 8 + d},
 			{Name: "hoardmq_publishes_total", Value: 6 + d},
 		}
 	}
@@ -194,6 +195,9 @@ func TestRollParts(t *testing.T) {
 	}
 	if empty := stepRise(before, after, drained, "n2", rollEmptyMetric); len(empty) != 1 || empty[`hoardmq_sessions_rebuilt_empty_total{reason="adoption"}`] != 3 {
 		t.Errorf("served empty %v, want the empty sessions only, 3", empty)
+	}
+	if waits := stepRise(before, after, drained, "n2", rollHookWaitMetric); len(waits) != 1 || waits[`hoardmq_lease_hook_waits_total{outcome="served"}`] != 3 {
+		t.Errorf("hook waits %v, want the hook waits only, 3", waits)
 	}
 	if len(copies) != 3 || copies[`hoardmq_replicas_dropped_total{reason="not-a-target-confirmed"}`] != 3 ||
 		copies[`hoardmq_replicas_kept_total{reason="moved-target"}`] != 3 || copies[`hoardmq_replicas_unwritten_checks_total{outcome="held"}`] != 3 {

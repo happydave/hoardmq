@@ -284,7 +284,8 @@ func (r *Replicator) writeReconciled(version uint64) {
 // them.
 func (r *Replicator) rebalance(old, cur shardmap.Map) {
 	me := r.o.Node
-	st := r.o.Sessions.Snapshot()
+	listed := r.o.Sessions.Persistent()
+	retained := r.o.Local.AllRetained()
 	type movedFrom struct {
 		ns, id string
 		lost   []string
@@ -295,19 +296,20 @@ func (r *Replicator) rebalance(old, cur shardmap.Map) {
 	}
 	if r.o.Transport != nil {
 		bulk := newBulk("rebalance")
-		for _, ss := range st.Sessions {
-			shard := r.o.Map.ShardOf(ss.Namespace, ss.ClientID)
+		for _, k := range listed {
+			shard := r.o.Map.ShardOf(k.Namespace, k.ClientID)
 			var before []string
 			if old.Version > 0 {
 				before = old.Targets(shard, me)
 			}
 			now := cur.Targets(shard, me)
+			var gained []string
 			for _, t := range now {
 				if !contains(before, t) {
-					bulk.note(r.outboundFor(t))
-					r.sendSnapshot(t, ss)
+					gained = append(gained, t)
 				}
 			}
+			r.wholeWrite(k, gained, bulk)
 			var lost []string
 			for _, t := range before {
 				if !contains(now, t) {
@@ -315,7 +317,7 @@ func (r *Replicator) rebalance(old, cur shardmap.Map) {
 				}
 			}
 			if len(lost) > 0 {
-				movedOut = append(movedOut, movedFrom{ss.Namespace, ss.ClientID, lost})
+				movedOut = append(movedOut, movedFrom{k.Namespace, k.ClientID, lost})
 			}
 		}
 		bulk.done()
@@ -335,9 +337,9 @@ func (r *Replicator) rebalance(old, cur shardmap.Map) {
 	// covers retained copies below.
 	rep := r.follower.snapshot(holdSnapshotRebalance)
 	mayDrop := r.mayDrop(old, cur)
-	served := make(map[store.Scope]bool, len(st.Sessions))
-	for _, ss := range st.Sessions {
-		served[store.Scope{Namespace: ss.Namespace, ClientID: ss.ClientID}] = true
+	served := make(map[store.Scope]bool, len(listed))
+	for _, k := range listed {
+		served[k] = true
 	}
 	// A shard whose holders the map did not move cannot have changed who is
 	// replicated to, so its copies are not looked at again: on a rebalance
@@ -436,7 +438,7 @@ func (r *Replicator) rebalance(old, cur shardmap.Map) {
 		r.log.Warn("shard map behind what this node last acted on; replicas kept", "from", old.Version, "to", cur.Version, "persisted", r.persisted, "floorKnown", r.persistedKnown, "sessions", kept)
 	}
 	for shard := 0; shard < r.o.Map.Count(); shard++ {
-		r.rebalanceRetained(old, cur, shard, st.Retained, rep.Retained, mayDrop)
+		r.rebalanceRetained(old, cur, shard, retained, rep.Retained, mayDrop)
 	}
 	r.beginRetainedMoves(old, cur)
 	if err := r.follower.sync(); err != nil {

@@ -144,6 +144,19 @@ type Options struct {
 	// false) and just after a grant from another owner (granted true), so a
 	// test can hold a takeover there. Nil outside tests.
 	AcquireGate func(ns, id string, granted bool)
+	// LookupGate is called by an acquire once it is admitted and before it
+	// looks the lease up, so a test can hold a CONNECT there. Nil outside
+	// tests.
+	LookupGate func(ns, id string)
+	// ForwardedGate is called by the leader before it proposes a batch
+	// another node forwarded, so a test can hold the batch there. Nil outside
+	// tests.
+	ForwardedGate func(peer string, ops []Op)
+	// AdoptGate is called by this node's change hook when a lease moves to
+	// it offline (a reassignment or a drain's hand-off), before the hook
+	// records the adoption, so a test can hold the hook there. Nil outside
+	// tests.
+	AdoptGate func(ns, id string)
 	// SealTimeout is how long a seal nothing confirms waits before its check,
 	// and between checks (default twice TTL).
 	SealTimeout time.Duration
@@ -460,6 +473,11 @@ type Service struct {
 	// adoptLate counts CONNECTs that found their adoption only after their
 	// acquire applied: the reassignment overtook them while it was proposed.
 	adoptLate atomic.Int64
+	// CONNECTs that waited for this node's change hooks to reach the command
+	// they read, and were served once they had, or refused when the wait
+	// outlasted the handshake.
+	hookWaitsServed  atomic.Int64
+	hookWaitsRefused atomic.Int64
 	// What an adoption costs the handshake that settles it: time fetching the
 	// state, and time waiting on a fetch already running.
 	adoptInlineNs atomic.Int64
@@ -1369,9 +1387,18 @@ func (s *Service) AcquireFrom(ctx context.Context, ns, id string, will *store.Wi
 		}
 	}
 	op := Op{Kind: OpAcquire, Namespace: ns, ClientID: id, Node: s.o.Node, Will: will, ExpiryInterval: expiryInterval, Now: s.o.Clock()}
+	if g := s.o.LookupGate; g != nil {
+		g(ns, id)
+	}
 	l, existed := s.table.Lookup(ns, id)
+	// The command that put the lease where the lookup found it is at or below
+	// this index; its hooks, which record an adoption, may not have run yet.
+	looked := s.table.AppliedIndex()
 	if existed {
 		if l.Owner == s.o.Node {
+			if err := s.awaitHooked(ctx, looked); err != nil {
+				return AcquireResult{}, err
+			}
 			st, ev, err := s.awaitAdoption(ctx, key{ns, id}, cleanStart)
 			var mark firstAcquire
 			if err == nil {
@@ -1465,7 +1492,15 @@ func (s *Service) AcquireFrom(ctx context.Context, ns, id string, will *store.Wi
 		// The lease was already this node's when the acquire applied. It may
 		// have become so while the acquire was proposed: a reassignment that
 		// applied first adopted it, and queued an adoption this CONNECT has
-		// not consulted, since it found another owner when it looked.
+		// not consulted, since it found another owner when it looked. The
+		// leader's answer can arrive before this node has applied that
+		// reassignment, so the adoption is looked for only once this node's
+		// hooks have reached the acquire's own command.
+		if existed {
+			if err := s.awaitHooked(ctx, res.Index); err != nil {
+				return AcquireResult{}, err
+			}
+		}
 		before := s.adopting.lateFor(key{ns, id})
 		st, ev, err := s.awaitAdoption(ctx, key{ns, id}, cleanStart)
 		if err == nil {
@@ -2136,6 +2171,9 @@ func (s *Service) serveForward(peer string, m forwardMsg, class transport.Class)
 		now := s.o.Clock()
 		for i := range m.Ops {
 			m.Ops[i].Now = now
+		}
+		if g := s.o.ForwardedGate; g != nil {
+			g(peer, m.Ops)
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), s.o.TakeoverTimeout)
 		v, err := s.o.Core.Propose(ctx, Kind, Encode(m.Ops))
@@ -2907,6 +2945,9 @@ func (s *Service) changed(before, after *Lease) {
 			s.lost.enqueue(k, nil)
 		}
 	case isMine && !after.Online && (before == nil || before.Owner != me):
+		if g := s.o.AdoptGate; g != nil {
+			g(k.ns, k.id)
+		}
 		s.startTimers(*after)
 		s.adoptions.Add(1)
 		now := s.o.Clock().UnixMilli()
@@ -3267,6 +3308,37 @@ func retryDelay(base time.Duration, attempts int) time.Duration {
 // then finds nothing to do.
 func (s *Service) retryAdoption(k key, job adoptJob, attempts int) {
 	time.AfterFunc(retryDelay(s.o.AdoptRetryDelay, attempts), func() { s.adopts.enqueue(k, job) })
+}
+
+// hooksReached reports whether this node has run its change hooks through the
+// command at index.
+func hooksReached(hooked, index uint64) bool { return hooked >= index }
+
+// awaitHooked waits until this node has run its change hooks through the
+// command at index, so an adoption that command or an earlier one recorded is
+// visible to awaitAdoption. A CONNECT whose handshake ends first is refused
+// Server Busy, to retry.
+func (s *Service) awaitHooked(ctx context.Context, index uint64) error {
+	if hooksReached(s.table.HookedIndex(), index) {
+		return nil
+	}
+	poll := time.NewTicker(time.Millisecond)
+	defer poll.Stop()
+	for !hooksReached(s.table.HookedIndex(), index) {
+		select {
+		case <-poll.C:
+		case <-ctx.Done():
+			s.hookWaitsRefused.Add(1)
+			s.count("hoardmq_lease_hook_waits_total", map[string]string{"outcome": "refused"}, 1)
+			s.count("hoardmq_lease_ops_total", map[string]string{"op": "acquire", "outcome": "hooks-behind"}, 1)
+			return &Refusal{Reason: packet.ServerBusy}
+		case <-s.ctx.Done():
+			return &Refusal{Reason: packet.ServerUnavailable}
+		}
+	}
+	s.hookWaitsServed.Add(1)
+	s.count("hoardmq_lease_hook_waits_total", map[string]string{"outcome": "served"}, 1)
+	return nil
 }
 
 // awaitAdoption settles a connecting client's adoption before the client is

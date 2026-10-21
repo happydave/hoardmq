@@ -385,36 +385,91 @@ func (s *Service) confirmDue() {
 		j.due = now.Add(confirmPoll)
 		s.requeueConfirm(j)
 	}
-	if len(ready) == 0 {
-		return
-	}
-	scopes := make([]store.Scope, 0, len(ready))
-	for _, j := range ready {
-		scopes = append(scopes, store.Scope{Namespace: j.k.ns, ClientID: j.k.id})
-	}
-	err := s.durable(scopes)
-	if err == nil {
+	for len(ready) > 0 {
+		scopes := make([]store.Scope, 0, len(ready))
 		for _, j := range ready {
-			s.sendConfirmation(j)
+			scopes = append(scopes, store.Scope{Namespace: j.k.ns, ClientID: j.k.id})
 		}
+		err := s.durable(scopes)
+		if err == nil {
+			for _, j := range ready {
+				s.sendConfirmation(j)
+			}
+			return
+		}
+		// A refused key fails the shared wait at once. Its jobs are judged
+		// again and the rest share the next wait; any other failure fails
+		// every key alike, so all of them wait.
+		named := refusedIn(err)
+		var rest, refused []confirmJob
+		for _, j := range ready {
+			if named[key{j.k.ns, j.k.id}] {
+				refused = append(refused, j)
+			} else {
+				rest = append(rest, j)
+			}
+		}
+		if len(refused) == 0 {
+			for _, j := range ready {
+				s.retryConfirm(j, err)
+			}
+			return
+		}
+		for _, j := range refused {
+			held, ok := s.o.Sessions.HeldAt(j.k.ns, j.k.id)
+			l, known := s.table.Lookup(j.k.ns, j.k.id)
+			if !confirmOwed(held, ok, j.token, known, l.Owner, s.o.Node, l.Epoch) {
+				s.confirmsUnheld.Add(1)
+				s.log.Debug("confirmation given up: the session left this node", "client", j.k.id, "token", j.token, "held", ok, "heldAt", held, "owner", l.Owner, "epoch", l.Epoch)
+				continue
+			}
+			s.retryConfirm(j, err)
+		}
+		ready = rest
+	}
+}
+
+// retryConfirm requeues a job whose durability wait failed, or gives it up
+// as undurable once it has waited a ttl.
+func (s *Service) retryConfirm(j confirmJob, err error) {
+	if time.Since(j.queued) >= s.o.TTL {
+		s.confirmsUndurable.Add(1)
+		s.log.Debug("confirmation given up: not durable", "client", j.k.id, "token", j.token, "giver", j.giver, "moved", j.moved, "err", err)
 		return
 	}
-	// A refused key fails a shared wait at once, so each is asked alone; a
-	// wait that ran out of time would run out again for each, so all wait.
-	timedOut := errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)
-	for _, j := range ready {
-		if !timedOut && s.durable([]store.Scope{{Namespace: j.k.ns, ClientID: j.k.id}}) == nil {
-			s.sendConfirmation(j)
-			continue
-		}
-		if time.Since(j.queued) >= s.o.TTL {
-			s.confirmsUndurable.Add(1)
-			s.log.Debug("confirmation given up: not durable", "client", j.k.id, "token", j.token, "giver", j.giver, "moved", j.moved, "timedOut", timedOut)
-			continue
-		}
-		j.due = time.Now().Add(s.o.FallbackTimeout)
-		s.requeueConfirm(j)
+	j.due = time.Now().Add(s.o.FallbackTimeout)
+	s.requeueConfirm(j)
+}
+
+// refusedKeys is a failed durability wait that names the keys a replica
+// refused.
+type refusedKeys interface{ RefusedScopes() []store.Scope }
+
+// refusedIn is the set of keys a failed wait names as refused; empty when the
+// failure is not about particular keys.
+func refusedIn(err error) map[key]bool {
+	var rk refusedKeys
+	if !errors.As(err, &rk) {
+		return nil
 	}
+	out := map[key]bool{}
+	for _, sc := range rk.RefusedScopes() {
+		out[key{sc.Namespace, sc.ClientID}] = true
+	}
+	return out
+}
+
+// confirmOwed decides whether a confirmation whose key a replica refused is
+// still this node's to send. It is pure. held and heldAt are whether and at
+// which token the session is held here, token is the job's, and the lease is
+// as this node's table has it now. A table that does not know the client, or
+// names an epoch at or below the job's token, may only be lagging the grant.
+func confirmOwed(heldAt uint64, held bool, token uint64, leaseKnown bool, leaseOwner, self string, leaseEpoch uint64) bool {
+	if !held || heldAt < token {
+		return false
+	}
+	movedOn := leaseKnown && leaseOwner != self && leaseEpoch > token
+	return !movedOn
 }
 
 func (s *Service) requeueConfirm(j confirmJob) {

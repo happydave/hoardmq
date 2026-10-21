@@ -591,6 +591,25 @@ func (p *outbound) refusedAmong(keys []store.Scope) (store.Scope, bool) {
 	return store.Scope{}, false
 }
 
+// refusedAllAmong reports every one of these keys the peer has refused and
+// not since been sent whole, bare and once each, in the order named. Callers
+// hold p.mu.
+func (p *outbound) refusedAllAmong(keys []store.Scope) []store.Scope {
+	if len(p.refused) == 0 {
+		return nil
+	}
+	var out []store.Scope
+	seen := map[store.Scope]bool{}
+	for _, k := range keys {
+		b := k.Bare()
+		if _, ok := p.refused[b]; ok && !seen[b] {
+			seen[b] = true
+			out = append(out, b)
+		}
+	}
+	return out
+}
+
 // clearedTargetLocked raises a barrier's target to the whole write that
 // cleared the refusal of any key it names, so it passes on the peer's copy
 // after that write rather than on the acknowledgement of the refused frame's
@@ -611,16 +630,19 @@ func (p *outbound) clearedTargetLocked(keys []store.Scope, target uint64) uint64
 // peer has refused a record for one of the keys.
 func (p *outbound) refusal(keys []store.Scope) error {
 	p.mu.Lock()
-	s, blocked := p.refusedAmong(keys)
+	refused := p.refusedAllAmong(keys)
 	p.mu.Unlock()
-	if blocked {
-		return p.notHeld(s)
+	if len(refused) > 0 {
+		return p.notHeld(refused)
 	}
 	return nil
 }
 
-func (p *outbound) notHeld(s store.Scope) error {
-	return &barrierError{p.name, "not-held", fmt.Errorf("%w: %s (%s refused a record for %s/%s%s)", ErrReplicaUnavailable, p.name, p.name, s.Namespace, s.ClientID, s.Topic)}
+// notHeld fails a wait on the keys the peer refused, naming the first in its
+// message and carrying them all.
+func (p *outbound) notHeld(refused []store.Scope) error {
+	s := refused[0]
+	return &barrierError{p.name, "not-held", fmt.Errorf("%w: %s (%s refused a record for %s/%s%s)", ErrReplicaUnavailable, p.name, p.name, s.Namespace, s.ClientID, s.Topic), refused}
 }
 
 // barrierError is a failed wait, with the reason a barrier failure is counted
@@ -629,10 +651,15 @@ func (p *outbound) notHeld(s store.Scope) error {
 type barrierError struct {
 	peer, reason string
 	err          error
+	refused      []store.Scope // for not-held: every named key the peer refused
 }
 
 func (e *barrierError) Error() string { return e.err.Error() }
 func (e *barrierError) Unwrap() error { return e.err }
+
+// RefusedScopes reports, for a not-held failure, every key the wait named
+// that the failing peer had refused, bare; nil for any other failure.
+func (e *barrierError) RefusedScopes() []store.Scope { return e.refused }
 
 // barrierReason is the reason a failed wait is counted under.
 func barrierReason(err error) string {
@@ -677,15 +704,15 @@ func (p *outbound) waitFor(ctx context.Context, up func(string) bool, keys []sto
 		p.mu.Lock()
 		if p.failed >= target && target > 0 {
 			p.mu.Unlock()
-			return &barrierError{p.name, "refused", fmt.Errorf("%w: %s (a frame was not delivered)", ErrReplicaUnavailable, p.name)}
+			return &barrierError{p.name, "refused", fmt.Errorf("%w: %s (a frame was not delivered)", ErrReplicaUnavailable, p.name), nil}
 		}
 		if p.streamBlocked {
 			p.mu.Unlock()
-			return &barrierError{p.name, "unscoped", fmt.Errorf("%w: %s (a refusal could not be scoped)", ErrReplicaUnavailable, p.name)}
+			return &barrierError{p.name, "unscoped", fmt.Errorf("%w: %s (a refusal could not be scoped)", ErrReplicaUnavailable, p.name), nil}
 		}
-		if s, blocked := p.refusedAmong(keys); blocked {
+		if refused := p.refusedAllAmong(keys); len(refused) > 0 {
 			p.mu.Unlock()
-			return p.notHeld(s)
+			return p.notHeld(refused)
 		}
 		target = p.clearedTargetLocked(keys, target)
 		if p.closed {
@@ -693,7 +720,7 @@ func (p *outbound) waitFor(ctx context.Context, up func(string) bool, keys []sto
 			// passed here let a node mid-shutdown acknowledge forwards whose
 			// copies died with it.
 			p.mu.Unlock()
-			return &barrierError{p.name, "stopped", fmt.Errorf("%w: %s (replication stopped)", ErrReplicaUnavailable, p.name)}
+			return &barrierError{p.name, "stopped", fmt.Errorf("%w: %s (replication stopped)", ErrReplicaUnavailable, p.name), nil}
 		}
 		if p.hole && peerUp {
 			// The peer acknowledges what it receives, including records for
@@ -701,7 +728,7 @@ func (p *outbound) waitFor(ctx context.Context, up func(string) bool, keys []sto
 			// acknowledgement says nothing about the copy until the resync
 			// has replaced it.
 			p.mu.Unlock()
-			return &barrierError{p.name, "resync", fmt.Errorf("%w: %s (frames were dropped; awaiting resync)", ErrReplicaUnavailable, p.name)}
+			return &barrierError{p.name, "resync", fmt.Errorf("%w: %s (frames were dropped; awaiting resync)", ErrReplicaUnavailable, p.name), nil}
 		}
 		if p.ackSeq >= target {
 			// Reaching a pass with a named key still refused would mean the
@@ -741,7 +768,7 @@ func (p *outbound) waitFor(ctx context.Context, up func(string) bool, keys []sto
 			p.push(frame{Kind: kindResyncMark})
 		}
 		if !peerUp {
-			return &barrierError{p.name, "down", fmt.Errorf("%w: %s", ErrReplicaUnavailable, p.name)}
+			return &barrierError{p.name, "down", fmt.Errorf("%w: %s", ErrReplicaUnavailable, p.name), nil}
 		}
 		select {
 		case <-w:
@@ -750,7 +777,7 @@ func (p *outbound) waitFor(ctx context.Context, up func(string) bool, keys []sto
 			ts := TimeoutSample{Target: target, Acked: p.ackSeq, Sent: p.sent}
 			p.mu.Unlock()
 			p.trace.timedOut(ts)
-			return &barrierError{p.name, "timeout", ctx.Err()}
+			return &barrierError{p.name, "timeout", ctx.Err(), nil}
 		case <-time.After(100 * time.Millisecond):
 			// Re-check the peer's state: it may have gone down while we wait.
 		}

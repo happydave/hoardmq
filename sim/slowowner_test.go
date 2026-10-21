@@ -36,9 +36,30 @@ func envMs(name string, def time.Duration) time.Duration {
 // answered Success must reach its subscriber, so n1 must refuse what it would
 // write into a copy L now owns.
 func TestAPreviousOwnerAcknowledgesNothingIntoASupersededCopy(t *testing.T) {
+	slowOwner(t, 0)
+}
+
+// TestARestartedOwnersWholeWriteKeepsWhatItAcknowledged: the slow-owner
+// scenario with the restarted node's first whole write of a session held 500
+// ms once its state is read. The restart's rebalance writes every session it
+// loaded whole to its target as forwarded deliveries are first admitted; one
+// acknowledged in between must not be replaced at the target by the older
+// copy, which the taker reads when its pull times out.
+func TestARestartedOwnersWholeWriteKeepsWhatItAcknowledged(t *testing.T) {
+	slowOwner(t, 500*time.Millisecond)
+}
+
+// slowOwner runs the slow-owner scenario; wholeHold, when not zero, holds the
+// restarted node's first whole write of a session after it is armed.
+func slowOwner(t *testing.T, wholeHold time.Duration) {
 	delay := envMs("SLOWOWNER_DELAY_MS", 4*time.Second)
 	lag := envMs("SLOWOWNER_LAG_MS", 6*time.Second)
 	hold := envMs("SLOWOWNER_IMPORT_MS", 2*time.Second)
+	var held atomic.Bool
+	half := "slowowner"
+	if wholeHold > 0 {
+		half = "slowowner-held"
+	}
 	pairs := 12
 	if n, err := strconv.Atoi(os.Getenv("SLOWOWNER_PAIRS")); err == nil && n > 0 {
 		pairs = n
@@ -48,12 +69,17 @@ func TestAPreviousOwnerAcknowledgesNothingIntoASupersededCopy(t *testing.T) {
 	var victimName, leaderName atomic.Value
 	victimName.Store("")
 	leaderName.Store("")
-	c := New(t, Options{TTL: ttl, Log: halfLog(t, "slowowner"),
+	c := New(t, Options{TTL: ttl, Log: halfLog(t, half),
 		TakeoverDelay: func(node string) time.Duration {
 			if armed.Load() && node == victimName.Load().(string) {
 				return delay
 			}
 			return 0
+		},
+		WholeWriteGate: func(node string) {
+			if armed.Load() && wholeHold > 0 && node == victimName.Load().(string) && held.CompareAndSwap(false, true) {
+				time.Sleep(wholeHold)
+			}
 		},
 		ImportGate: func(node, _, id string) {
 			if armed.Load() && hold > 0 && node == leaderName.Load().(string) && strings.HasPrefix(id, "so-s") {
@@ -169,6 +195,12 @@ func TestAPreviousOwnerAcknowledgesNothingIntoASupersededCopy(t *testing.T) {
 		c.Fault(lead, third, &transport.Fault{Drop: 1, Classes: []transport.Class{transport.Consensus}, Rand: rand.New(rand.NewSource(1))}) //nolint:gosec // seeded simulation
 	}
 	t.Logf("%s (leader %s, third %s) stopped, restarted and recovered in %v; takeover delay %v, %s's lag %v, import hold %v", n1.Name, lead.Name, third.Name, time.Since(cutAt).Round(time.Millisecond), delay, third.Name, lag, hold)
+	if wholeHold > 0 {
+		// Publishes are answered before any takeover for most of the hold, so
+		// a delivery into the held session is acknowledged, not refused as
+		// superseded, whichever session the hold met.
+		time.Sleep(wholeHold * 3 / 5)
+	}
 	for i := range pairs {
 		subs[i] = NewClient(ids[i], []string{lead.TCP}, 600, int64(200+i))
 		go func(s *Client) { _ = s.Run(ctx) }(subs[i])
@@ -228,6 +260,9 @@ func TestAPreviousOwnerAcknowledgesNothingIntoASupersededCopy(t *testing.T) {
 	}
 	for _, l := range losses {
 		t.Errorf("pair %02d (%s) seq %d: answered Success by %s at %+.3f s from the cut, never delivered", l.pair, ids[l.pair], l.seq, l.node, l.at)
+	}
+	if wholeHold > 0 && !held.Load() {
+		t.Errorf("no whole write of a session was held on %s after its restart", n1.Name)
 	}
 	// The scenario reached the path: the restarted node refused a write into
 	// a copy it had seen another node granted.

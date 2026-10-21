@@ -1630,6 +1630,22 @@ carried no session expiry: such a session ends with its connection, so this
 one is no loss and is counted apart). A clean start and a client's first
 connect are never counted.
 
+**A CONNECT looks for an adoption only once its node has recorded it.** A
+drain's hand-off or a dead owner's reassignment records the receiving node's
+adoption when that node applies it. A CONNECT on a follower can be answered by
+the leader before then — its acquire applied after the hand-off — and a
+CONNECT whose lookup ran mid-apply can find the lease already its node's
+before the adoption is recorded. Either would be served Session Present false
+for a session the adoption then imports, and a client that discards its state
+on that answer, as MQTT 5 requires, can then lose a QoS 2 publish to an
+identifier the restored session still holds. So such a CONNECT waits until
+its node has applied that command, usually milliseconds; past
+`cluster.leases.takeoverTimeoutMs` it is refused `0x89 Server Busy`
+(`hoardmq_lease_hook_waits_total{outcome="served"|"refused"}`,
+`hoardmq_lease_ops_total{op="acquire",outcome="hooks-behind"}`). A second
+CONNECT on a node still pulling the session for the first can still be served
+`raced` (WI 2394).
+
 **A lease granted after its CONNECT gave up is fetched before it is served.**
 A CONNECT that runs out of `cluster.leases.takeoverTimeoutMs` while its
 acquire is queued or proposed is refused, but the acquire can still be
@@ -2182,7 +2198,15 @@ dropped rather than handed on, and a hand-over carries the copy's own epoch,
 which a receiver whose lease has moved past refuses — a new
 shard leader promotes its replica retained messages (or receives them from
 the old holders), and new followers receive the shard's retained messages
-whole. A peer that reconnects is resynced whole. A resync refused because
+whole. A peer that reconnects is resynced whole. A session's whole copy, at a
+resync, a rebalance or a repair, is read and queued under the session's own
+lock, so a record written meanwhile reaches the peer behind the copy, never
+ahead of it where the older copy would replace it. A resync's retained
+messages, like a new follower's, are read and queued under the lock their
+writes' replication takes, so a retained write made meanwhile is never replaced
+by the older message. A session's whole copy carries the epoch it is held at, as
+its records do, never the lease table's token, which can be a later owner's or
+lag this node's own grant. A resync refused because
 one ran less than an acknowledgement timeout ago is retried when that
 interval ends, and every resync ends with a marker frame the peer
 acknowledges, so barriers recover once the peer is caught up, even when

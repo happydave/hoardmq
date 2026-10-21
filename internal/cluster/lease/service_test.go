@@ -60,6 +60,10 @@ type fakeSessions struct {
 	dropped     []string
 	durableErr  error
 	durableAsks int
+	// durableFn, when set, answers Durable in place of durableErr; durableCalls
+	// records the scopes of every call.
+	durableFn    func(scopes []store.Scope) error
+	durableCalls [][]store.Scope
 }
 
 type fakeSealed struct {
@@ -159,11 +163,16 @@ func (f *fakeSessions) SealedCount() int {
 	return len(f.sealed)
 }
 
-func (f *fakeSessions) Durable(context.Context, []store.Scope) error {
+func (f *fakeSessions) Durable(_ context.Context, scopes []store.Scope) error {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.durableAsks++
-	return f.durableErr
+	f.durableCalls = append(f.durableCalls, append([]store.Scope(nil), scopes...))
+	fn, err := f.durableFn, f.durableErr
+	f.mu.Unlock()
+	if fn != nil {
+		return fn(scopes)
+	}
+	return err
 }
 
 func (f *fakeSessions) setDurableErr(err error) {

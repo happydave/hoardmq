@@ -5,6 +5,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/happydave/hoardmq/internal/cluster/lease"
 	"github.com/happydave/hoardmq/internal/conn"
 )
 
@@ -36,6 +37,12 @@ type Hooks struct {
 	// AcquireGate is the lease service's: called by a CONNECT's acquire
 	// after its lookup and before it proposes, and again once granted.
 	AcquireGate func(ns, id string, granted bool)
+	// LeaseForwardGate is the lease service's ForwardedGate: called by the
+	// leader before it proposes a lease batch another node forwarded.
+	LeaseForwardGate func(peer string, ops []lease.Op)
+	// AdoptGate is the lease service's: called by this node's change hook
+	// when a lease moves to it offline, before the adoption is recorded.
+	AdoptGate func(ns, id string)
 	// DrainGate is called by a draining node after it has handed its leases
 	// off and before it waits for their confirmations, so a test can hold the
 	// drain there.
@@ -48,6 +55,10 @@ type Hooks struct {
 	// loaded and before its consensus core, lease service and replication
 	// open, so a test can hold a restart there.
 	StartGate func(node string)
+	// WholeWriteGate is called inside each whole write of a session by the
+	// replicator's rebalance or resync, once the state is read and before it
+	// is queued, so a test can hold one there.
+	WholeWriteGate func(node string)
 	// DrainHandoff is called by a draining node just before each attempt at
 	// its hand-off, numbered from 1.
 	DrainHandoff func(attempt int)

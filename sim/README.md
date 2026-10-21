@@ -297,6 +297,8 @@ drained node seen in its step, every node ready again, the probe publishing in e
   confirmation is among `ignored`, and its release is in `copies`;
 - the replica copies dropped and kept, by reason, and the checks of an owner's targets, by outcome (`copies`);
 - the sessions the nodes served empty, by reason (`served_empty`), the restarted node's included from its restart;
+- the CONNECTs that waited for their node to apply the command their lease came from, by outcome (`hook_waits`,
+  `hoardmq_lease_hook_waits_total`), the restarted node's included; absent when none waited;
 - with a cut, whether the drain was still running at it (`cut`), its status then (`cut_status`: phase, clients and
   leases left, sessions awaiting confirmation) and the leases the node's own table said it still owned
   (`cut_leases`; the status counts none while clients are redirected);

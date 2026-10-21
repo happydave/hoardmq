@@ -56,10 +56,13 @@ type Tokens interface {
 
 // Sessions is what the replicator needs from the session manager.
 type Sessions interface {
-	// Snapshot lists this node's persistent sessions and retained messages.
-	Snapshot() *store.State
-	// Export is one persistent session as this node holds it, for a repair.
-	Export(ns, id string) (*store.SessionState, bool)
+	// Persistent lists the persistent sessions this node serves.
+	Persistent() []store.Scope
+	// WholeState calls fn with one served session's state under the lock its
+	// records are written under, and reports whether the session is served.
+	// A whole write queued inside fn is ordered against every record of the
+	// session; fn must not block.
+	WholeState(ns, id string, fn func(*store.SessionState)) bool
 	// InjectRetained stores a retained message locally as the shard leader,
 	// reporting whether its record is durable here.
 	InjectRetained(msg *message.Message) (durable bool)
@@ -182,14 +185,19 @@ type Options struct {
 	// write on a moving shard, does not know the release's kind and ignores
 	// the hand-over mark. For the tests of a mixed pair; never configured.
 	PreRetainedMoves bool
-	// UnorderedRetainedPush reads a shard for a new follower's push without
-	// the lock that orders it against the shard's writes; a test control.
+	// UnorderedRetainedPush reads a shard for a new follower's push, and the
+	// retained messages for a resync, without the lock that orders them
+	// against the shard's writes; a test control.
 	UnorderedRetainedPush bool
 	// ConfirmMoved is told, after a rebalance has pushed a session this node
 	// serves whole to the targets it gained, the nodes that stopped being its
 	// targets: each keeps its copy until this node confirms the session
 	// durable at its targets now. Nil confirms nothing.
 	ConfirmMoved func(ns, id string, to []string)
+	// WholeWriteGate, when set, runs inside each whole write of a session in a
+	// rebalance or a resync, once its state is read and before it is queued,
+	// so a test can hold one there; never configured.
+	WholeWriteGate func()
 }
 
 // A fetch reads a copy and takes microseconds. The pool keeps it from waiting
@@ -361,6 +369,9 @@ type Replicator struct {
 	// pushGate, set by a test, runs inside the push lock between the push's
 	// read of the shard and its enqueue.
 	pushGate func()
+	// resyncRetainedGate, set by a test, runs in a resync between its read of
+	// the retained messages and their enqueue.
+	resyncRetainedGate func()
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -753,14 +764,14 @@ func (r *Replicator) barrier(ctx context.Context, keys []store.Scope, handOver b
 				// lost leader's successor is handed: a write acknowledged now
 				// would be missing from them.
 				r.count("hoardmq_replication_barrier_failures_total", map[string]string{"peer": "-", "reason": "moving"}, 1)
-				return &barrierError{"-", "moving", fmt.Errorf("%w: retained shard %d is moving", ErrReplicaUnavailable, shard)}
+				return &barrierError{"-", "moving", fmt.Errorf("%w: retained shard %d is moving", ErrReplicaUnavailable, shard), nil}
 			}
 		}
 	}
 	if k, seen, ok := r.supersededKey(keys); ok {
 		r.count("hoardmq_replication_barrier_failures_total", map[string]string{"peer": "-", "reason": "superseded"}, 1)
 		r.log.Debug("barrier refused: a later grant was seen for a session it names", "client", k.ClientID, "epoch", k.Epoch, "seen", seen)
-		return &barrierError{"-", "superseded", fmt.Errorf("%w: %s's copy at epoch %d is behind grant %d", ErrReplicaUnavailable, k.ClientID, k.Epoch, seen)}
+		return &barrierError{"-", "superseded", fmt.Errorf("%w: %s's copy at epoch %d is behind grant %d", ErrReplicaUnavailable, k.ClientID, k.Epoch, seen), nil}
 	}
 	// A wait that names nothing has nothing to check, and the records it was
 	// meant to cover would be acknowledged unexamined. Blocking is the only
@@ -1214,19 +1225,37 @@ func (r *Replicator) resyncPeer(peer string) {
 	if m.Version == 0 {
 		return
 	}
-	st := r.o.Sessions.Snapshot()
 	n := 0
 	bulk := newBulk("resync")
-	for _, ss := range st.Sessions {
-		shard := r.o.Map.ShardOf(ss.Namespace, ss.ClientID)
-		if contains(m.Targets(shard, r.o.Node), peer) {
-			bulk.note(r.outboundFor(peer))
-			r.sendSnapshot(peer, ss)
+	for _, k := range r.o.Sessions.Persistent() {
+		shard := r.o.Map.ShardOf(k.Namespace, k.ClientID)
+		if contains(m.Targets(shard, r.o.Node), peer) && r.wholeWrite(k, []string{peer}, bulk) {
 			n++
 		}
 	}
 	bulk.done()
-	for _, msg := range st.Retained {
+	n += r.resyncRetained(peer, m)
+	if n > 0 {
+		r.log.Info("replicas resynced to peer", "peer", peer, "items", n)
+	}
+}
+
+// resyncRetained pushes the peer every retained message of a shard this node
+// leads under m and the peer follows, read and queued under the push lock as
+// a new follower's push is: a retained record tapped meanwhile is either in
+// what was read or queued behind it, never ahead of an older copy that would
+// replace it.
+func (r *Replicator) resyncRetained(peer string, m shardmap.Map) int {
+	if !r.o.UnorderedRetainedPush {
+		r.pushMu.Lock()
+		defer r.pushMu.Unlock()
+	}
+	retained := r.o.Local.AllRetained()
+	if r.resyncRetainedGate != nil {
+		r.resyncRetainedGate()
+	}
+	n := 0
+	for _, msg := range retained {
 		shard := r.o.Map.ShardOf(msg.Namespace, msg.Topic)
 		if m.Shards[shard].Leader == r.o.Node && contains(m.Shards[shard].Followers, peer) {
 			rec := store.RetainRecord(msg)
@@ -1234,9 +1263,7 @@ func (r *Replicator) resyncPeer(peer string) {
 			n++
 		}
 	}
-	if n > 0 {
-		r.log.Info("replicas resynced to peer", "peer", peer, "items", n)
-	}
+	return n
 }
 
 // unappliedReason begins the rejection reason a follower gives for a record
@@ -1254,8 +1281,7 @@ func (r *Replicator) repair(peer string, p *outbound, scope store.Scope) {
 		r.count("hoardmq_replication_repairs_total", map[string]string{"outcome": "repeat"}, 1)
 		return
 	}
-	if ss, ok := r.o.Sessions.Export(scope.Namespace, scope.ClientID); ok {
-		r.sendSnapshot(peer, ss)
+	if r.wholeWrite(store.Scope{Namespace: scope.Namespace, ClientID: scope.ClientID}, []string{peer}, nil) {
 		r.count("hoardmq_replication_repairs_total", map[string]string{"outcome": "snapshot"}, 1)
 		r.audit("replication.repair", scope.Namespace+"/"+scope.ClientID, "snapshot", map[string]string{"to": peer})
 		return
@@ -1279,6 +1305,8 @@ func (r *Replicator) sendHandOver(peer string, ss *store.SessionState) {
 	r.count("hoardmq_replication_records_total", map[string]string{"direction": "out"}, 1)
 }
 
+// sendSnapshot pushes a replica copy whole at the lease's token, the hand-over
+// defect's form (Options.HandOverOwnedCopies).
 func (r *Replicator) sendSnapshot(peer string, ss *store.SessionState) {
 	var epoch uint64
 	if l, ok := r.o.Leases.Lookup(ss.Namespace, ss.ClientID); ok {
@@ -1286,6 +1314,40 @@ func (r *Replicator) sendSnapshot(peer string, ss *store.SessionState) {
 	}
 	r.outboundFor(peer).push(frame{Kind: kindSnapshot, Namespace: ss.Namespace, ClientID: ss.ClientID, Epoch: epoch, State: ss})
 	r.count("hoardmq_replication_records_total", map[string]string{"direction": "out"}, 1)
+}
+
+// wholeWrite queues a session this node serves whole to each of peers, read
+// and queued inside WholeState: a record written after the read is queued
+// behind the copy, so a peer never replaces an entry it acknowledged with an
+// older copy. The copy carries the epoch the session is held at, as its records
+// do: the table's token can be a later owner's, or lag this node's own grant.
+// Only a session with no epoch takes the table's token, looked up first,
+// outside the session's lock. It reports whether the session is served.
+func (r *Replicator) wholeWrite(k store.Scope, peers []string, bulk *bulk) bool {
+	if len(peers) == 0 {
+		return false
+	}
+	var token uint64
+	if l, ok := r.o.Leases.Lookup(k.Namespace, k.ClientID); ok {
+		token = l.Epoch
+	}
+	return r.o.Sessions.WholeState(k.Namespace, k.ClientID, func(ss *store.SessionState) {
+		if g := r.o.WholeWriteGate; g != nil {
+			g()
+		}
+		epoch := ss.Epoch
+		if epoch == 0 {
+			epoch = token
+		}
+		for _, p := range peers {
+			ob := r.outboundFor(p)
+			if bulk != nil {
+				bulk.note(ob)
+			}
+			ob.push(frame{Kind: kindSnapshot, Namespace: ss.Namespace, ClientID: ss.ClientID, Epoch: epoch, State: ss})
+			r.count("hoardmq_replication_records_total", map[string]string{"direction": "out"}, 1)
+		}
+	})
 }
 
 func contains(list []string, s string) bool {

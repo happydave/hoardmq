@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/happydave/hoardmq/internal/broker"
+	"github.com/happydave/hoardmq/internal/cluster/lease"
 	"github.com/happydave/hoardmq/internal/cluster/transport"
 	"github.com/happydave/hoardmq/internal/config"
 	"github.com/happydave/hoardmq/internal/ldap/ldaptest"
@@ -52,12 +53,18 @@ type Options struct {
 	// StartGate.
 	LoadGate  func(node string)
 	StartGate func(node string)
+	// WholeWriteGate is every node's broker.Hooks.WholeWriteGate.
+	WholeWriteGate func(node string)
 	// ForwardApplyGate is every node's broker.Hooks.ForwardApplyGate.
 	ForwardApplyGate func(node, peer string)
-	// ImportGate and AcquireGate, when set, are every node's broker.Hooks of
-	// the same names, told the node.
+	// ImportGate, AcquireGate and AdoptGate, when set, are every node's
+	// broker.Hooks of the same names, told the node.
 	ImportGate  func(node, ns, id string)
 	AcquireGate func(node, ns, id string, granted bool)
+	AdoptGate   func(node, ns, id string)
+	// LeaseForwardGate, when set, is every node's
+	// broker.Hooks.LeaseForwardGate, told the node.
+	LeaseForwardGate func(node, peer string, ops []lease.Op)
 	// TakeoverDelay, when set, gives a node's broker.Hooks.TakeoverDelay
 	// each time it starts.
 	TakeoverDelay func(node string) time.Duration
@@ -475,6 +482,7 @@ func (c *Cluster) start(n *Node) error {
 		DrainGate:        c.o.DrainGate,
 		LoadGate:         c.o.LoadGate,
 		StartGate:        c.o.StartGate,
+		WholeWriteGate:   c.o.WholeWriteGate,
 		ForwardApplyGate: c.o.ForwardApplyGate,
 	}
 	if g := c.o.ImportGate; g != nil {
@@ -482,6 +490,12 @@ func (c *Cluster) start(n *Node) error {
 	}
 	if g := c.o.AcquireGate; g != nil {
 		hooks.AcquireGate = func(ns, id string, granted bool) { g(n.Name, ns, id, granted) }
+	}
+	if g := c.o.AdoptGate; g != nil {
+		hooks.AdoptGate = func(ns, id string) { g(n.Name, ns, id) }
+	}
+	if g := c.o.LeaseForwardGate; g != nil {
+		hooks.LeaseForwardGate = func(peer string, ops []lease.Op) { g(n.Name, peer, ops) }
 	}
 	if c.o.TakeoverDelay != nil {
 		hooks.TakeoverDelay = c.o.TakeoverDelay(n.Name)
