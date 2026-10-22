@@ -572,9 +572,23 @@ func (l *Log) WriteCheckpoint(index uint64, payload []byte) error {
 
 // LatestCheckpoint returns the newest checkpoint whose checksum verifies.
 func (l *Log) LatestCheckpoint() (uint64, []byte, bool) {
+	idx, payload, name, _ := l.latestCheckpoint()
+	return idx, payload, name != ""
+}
+
+// SkippedCheckpoint is a checkpoint file passed over because it could not be
+// read or its checksum failed.
+type SkippedCheckpoint struct {
+	File   string
+	Reason string
+}
+
+// latestCheckpoint is LatestCheckpoint with the file's name, "" when none
+// verifies, and the files passed over on the way.
+func (l *Log) latestCheckpoint() (uint64, []byte, string, []SkippedCheckpoint) {
 	entries, err := os.ReadDir(l.dir)
 	if err != nil {
-		return 0, nil, false
+		return 0, nil, "", nil
 	}
 	var names []string
 	for _, e := range entries {
@@ -583,6 +597,7 @@ func (l *Log) LatestCheckpoint() (uint64, []byte, bool) {
 		}
 	}
 	sort.Sort(sort.Reverse(sort.StringSlice(names)))
+	var skipped []SkippedCheckpoint
 	for _, name := range names {
 		idx, err := strconv.ParseUint(strings.TrimSuffix(strings.TrimPrefix(name, "checkpoint-"), checkpointExt), 10, 64)
 		if err != nil {
@@ -591,13 +606,99 @@ func (l *Log) LatestCheckpoint() (uint64, []byte, bool) {
 		data, err := os.ReadFile(filepath.Join(l.dir, name))
 		if err != nil || len(data) < 4 {
 			l.log.Warn("skipping unreadable checkpoint", "file", name)
+			skipped = append(skipped, SkippedCheckpoint{File: name, Reason: "unreadable"})
 			continue
 		}
 		if crc32.Checksum(data[4:], castagnoli) != binary.BigEndian.Uint32(data[:4]) {
 			l.log.Warn("skipping checkpoint with a bad checksum", "file", name)
+			skipped = append(skipped, SkippedCheckpoint{File: name, Reason: "bad checksum"})
 			continue
 		}
-		return idx, data[4:], true
+		return idx, data[4:], name, skipped
 	}
-	return 0, nil, false
+	return 0, nil, "", skipped
+}
+
+// GapError reports that recovery would need records the log no longer holds:
+// records from the replay index on are missing before a segment that is
+// still there, dropped behind a checkpoint that is missing or failed to
+// verify, or lost between two segments. The node must not start over it.
+type GapError struct {
+	Log string
+	Dir string // the log's directory
+	// From is the index replay would start at: one past the checkpoint
+	// recovered, or 1 with none.
+	From       uint64
+	Checkpoint string // the checkpoint recovered, "" with none
+	// Missing and Through are the first and last index not held; Segment
+	// is the segment that holds the next one.
+	Missing, Through uint64
+	Segment          string
+	Skipped          []SkippedCheckpoint
+}
+
+func (e *GapError) Error() string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "wal %s: records %d to %d are not held, before segment %s in %s", e.Log, e.Missing, e.Through, e.Segment, e.Dir)
+	if e.Checkpoint != "" {
+		fmt.Fprintf(&b, "; replay starts at %d, after checkpoint %s", e.From, e.Checkpoint)
+	} else {
+		fmt.Fprintf(&b, "; replay starts at %d, and no checkpoint verifies", e.From)
+	}
+	for _, s := range e.Skipped {
+		fmt.Fprintf(&b, "; skipped %s (%s)", s.File, s.Reason)
+	}
+	b.WriteString("; refusing to recover without them")
+	return b.String()
+}
+
+// span is the run of indexes one segment holds: first to end, end being
+// first-1 for a segment with no records.
+type span struct{ first, end uint64 }
+
+// replayGap returns the first run of indexes at or after from that the log
+// does not hold although a later segment is held, and that segment's
+// position in spans, which are in order.
+func replayGap(from uint64, spans []span) (missing, through uint64, next int, gap bool) {
+	expect := from
+	for i, s := range spans {
+		if s.end < expect {
+			continue
+		}
+		if s.first > expect {
+			return expect, s.first - 1, i, true
+		}
+		expect = s.end + 1
+	}
+	return 0, 0, 0, false
+}
+
+// spans lists what each segment holds.
+func (l *Log) spans() []span {
+	out := make([]span, len(l.segments))
+	for i, s := range l.segments {
+		end := s.first - 1
+		if s.last != 0 {
+			end = s.last
+		}
+		out[i] = span{first: s.first, end: end}
+	}
+	return out
+}
+
+// RecoveryCheckpoint returns the newest checkpoint that verifies, as
+// LatestCheckpoint does, and a *GapError when the log does not hold every
+// record from the one replay would start at to its last.
+func (l *Log) RecoveryCheckpoint() (uint64, []byte, bool, error) {
+	idx, payload, name, skipped := l.latestCheckpoint()
+	ok := name != ""
+	from := uint64(1)
+	if ok {
+		from = idx + 1
+	}
+	if missing, through, next, gap := replayGap(from, l.spans()); gap {
+		return idx, payload, ok, &GapError{Log: l.name, Dir: l.dir, From: from, Checkpoint: name, Missing: missing,
+			Through: through, Segment: filepath.Base(l.segments[next].path), Skipped: skipped}
+	}
+	return idx, payload, ok, nil
 }

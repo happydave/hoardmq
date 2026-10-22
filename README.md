@@ -542,7 +542,10 @@ mentions the action decides:
 `principal` members (`username`, `clientId`, `cn`) must all match when
 present; `topic` is a filter with `${clientid}`, `${username}` and `${cn}`
 substituted; a subscribe or unsubscribe of a wildcard filter is allowed only
-by a rule that covers every topic it could match.
+by a rule that covers every topic it could match. A template value that is
+empty or contains a wildcard (`+`, `#`) or a level separator (`/`) makes the
+rule unusable for that identity: it neither allows nor denies, and a later
+rule decides. The client identifiers the broker assigns never contain them.
 
 ### Connection behaviour
 
@@ -1642,9 +1645,22 @@ identifier the restored session still holds. So such a CONNECT waits until
 its node has applied that command, usually milliseconds; past
 `cluster.leases.takeoverTimeoutMs` it is refused `0x89 Server Busy`
 (`hoardmq_lease_hook_waits_total{outcome="served"|"refused"}`,
-`hoardmq_lease_ops_total{op="acquire",outcome="hooks-behind"}`). A second
-CONNECT on a node still pulling the session for the first can still be served
-`raced` (WI 2394).
+`hoardmq_lease_ops_total{op="acquire",outcome="hooks-behind"}`).
+
+**A second CONNECT waits for the first's takeover on the same node.** A
+CONNECT that takes a lease from another node pulls the session and imports it
+after its acquire. A second CONNECT of the same client on that node — a client
+that gave up on its first attempt and connected again — would otherwise find
+the lease already its node's, be served Session Present false (with the QoS 2
+loss above for a client that discards its state), and then be disconnected
+(`0x8E`) by the first's import, which leaves the session on the connection the
+client abandoned. So it waits until the first has installed the
+session, and is then served it and displaces the older connection, as MQTT 5
+requires of a newer connection (MQTT-3.1.4-3). Of two CONNECTs waiting on one
+takeover, the later to arrive is served and the earlier refused `0x89 Server
+Busy`. Past `cluster.leases.takeoverTimeoutMs` a waiting CONNECT is refused
+`0x89 Server Busy` (`hoardmq_lease_takeover_waits_total{outcome="served"|"refused"|"overtaken"}`,
+`hoardmq_lease_ops_total{op="acquire",outcome="takeover-in-flight"|"takeover-overtaken"}`).
 
 **A lease granted after its CONNECT gave up is fetched before it is served.**
 A CONNECT that runs out of `cluster.leases.takeoverTimeoutMs` while its
@@ -1931,7 +1947,10 @@ routes arrive.
 not yet here from a member it can reach, or its own hooks behind the index;
 `unreachable`, the same from a member that is down; `unknown`) — a refusal that
 will end from one that will not — and `hoardmq_route_owners_forgotten_total`
-counts the owners forgotten this way. Across a rolling upgrade from a build
+counts the owners forgotten this way. A lost owner that comes back and sends a
+full route sync while a check is deciding its forget keeps that sync: the check
+forgets only if no full sync came from the owner since it read it, and counts
+the skip in `hoardmq_route_owners_forget_skipped_total{reason="synced"}`. Across a rolling upgrade from a build
 without the fact, neither build forgets on the other's word: the older build
 reads adoption state from full sets that no longer carry it, and the newer
 reads facts the older never proposes, so a node lost mid-roll keeps its
@@ -2099,6 +2118,10 @@ the key is rewritten whole or the stream resynced, and a barrier already
 waiting then passes only once the peer has acknowledged the rewrite. A node the map has
 dropped is waited on by nothing, and one it names again is waited on again
 with its stream as it is.
+A peer's acknowledgement wakes only the barriers whose records it covers, and
+its refusal only those naming the refused key; a reset, a resync or a stop wakes
+every barrier on the stream. A stream that carries thousands of refusals a
+second during a drain therefore does not hold its own acknowledgements back.
 A node that has seen a later grant for a session than the copy it holds
 refuses, at once, every publish that wrote into that copy: another node owns
 the session now, and a write here reaches no copy the new owner reads, whatever
@@ -2500,7 +2523,9 @@ a session's records up to its own, so each is applied once. The replica log's
 checkpoint is read under the lock its records are applied under, and is
 exact at one position. On start, a record cut short at the end of the last segment
 (a torn write) is discarded; a checksum failure anywhere stops the node with
-the segment and offset named, so a damaged log is never silently read past.
+the segment and offset named, and so do records missing from where recovery
+starts (see "Durability and group commit"), so a damaged log is never silently
+read past.
 
 ### Environment overrides
 
@@ -2569,6 +2594,18 @@ commit's counters in the harness's storm statistics (`sync`) include `failures`,
 part of it under the store's lock (`checkpoints`, `checkpoint_sec_total`,
 `checkpoint_hold_sec_total`). The same failures, repairs and checkpoints, for both
 logs, are on `/metrics` as the `hoardmq_journal_*` series (see "Observability").
+
+A node does not start over records its journal no longer holds. Recovery reads
+the newest checkpoint whose checksum verifies and replays every record after it;
+when one is missing — the checkpoint failed its checksum or could not be read
+after the segments before it were dropped, or a segment is gone from between two
+that are there — it logs an Error naming the missing records, the segment after
+them, the directory and each checkpoint it passed over, and `serve` exits 1. The
+files are left as they are. A checkpoint that fails its checksum while every
+record from the first is still held is passed over with a warning, and the whole
+log is replayed. A rewrite after a failed fsync that meets the same gap fails
+rather than writing what remains as the journal, and its callers are refused.
+The replica log refuses the same way.
 
 A record that fails to append refuses the QoS 1 or 2 publish that wrote it,
 whichever session it was written into: the publisher's own, a subscriber's on

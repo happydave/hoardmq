@@ -266,7 +266,7 @@ func TestUnansweredTakeoverFetchRefusesAndRecordsAnAdoption(t *testing.T) {
 	if ad == nil || !ad.job.takeover || ad.job.prev != "n1" || ad.job.epoch != l.Epoch || l.Owner != "n2" {
 		t.Fatalf("adoption %+v for lease %+v, want one recorded at the takeover's token", ad, l)
 	}
-	if st := b.svc.LivenessStats(); st.TakeoverUnanswered != 1 || st.TakeoverEmpty != 0 {
+	if st := b.svc.LivenessStats(); st.TakeoverUnanswered != 1 || st.TakeoverEmpty != 0 || st.ConnectsInFlight != 0 {
 		t.Fatalf("counters %+v", st)
 	}
 	res, err := acquire(t, b, "x", nil, 300, false)

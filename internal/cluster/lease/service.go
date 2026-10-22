@@ -250,6 +250,18 @@ type AcquireResult struct {
 	// and no state was obtained for it: if nothing is held here either, the
 	// client is served a fresh session although the lease says it had one.
 	Empty EmptyEvidence
+	// settle ends a takeover's time in flight on this node; nil otherwise.
+	settle func()
+}
+
+// Settle ends the CONNECT's time in flight on this node: AcquireFrom's caller
+// owes it once it has installed State and connected the client, or given up,
+// on every return. Until then another CONNECT of the client here waits. It is
+// idempotent and does nothing for a result that took no lease over.
+func (r AcquireResult) Settle() {
+	if r.settle != nil {
+		r.settle()
+	}
 }
 
 // mayHaveCopies decides whether an earlier session of the client may be on
@@ -367,10 +379,13 @@ type Service struct {
 	// returned.
 	transit     *transitSet
 	transitDone chan struct{}
-	abandoned   *abandonedAcquires
-	firsts      *firstAcquires
-	waitNotes   *waitNotes
-	race        claimRace
+	// connecting is this node's CONNECTs in flight per client
+	// (connecting.go).
+	connecting *connecting
+	abandoned  *abandonedAcquires
+	firsts     *firstAcquires
+	waitNotes  *waitNotes
+	race       claimRace
 
 	// Liveness counters, lock-free, for the harness (WI 1292 round 4: a
 	// full recovery that collapsed minutes later needed the lease service's
@@ -478,6 +493,15 @@ type Service struct {
 	// outlasted the handshake.
 	hookWaitsServed  atomic.Int64
 	hookWaitsRefused atomic.Int64
+	// CONNECTs that waited for another CONNECT of their client in flight
+	// here (connecting.go): served once it ended, refused when the wait
+	// outlasted the handshake, or refused for a newer CONNECT beside them.
+	takeoverWaitsServed    atomic.Int64
+	takeoverWaitsRefused   atomic.Int64
+	takeoverWaitsOvertaken atomic.Int64
+	// arrivals numbers the CONNECTs as they enter AcquireFrom, for the order
+	// between two that wait on one takeover (connecting.go).
+	arrivals atomic.Uint64
 	// What an adoption costs the handshake that settles it: time fetching the
 	// state, and time waiting on a fetch already running.
 	adoptInlineNs atomic.Int64
@@ -832,6 +856,16 @@ type LivenessStats struct {
 	TakeoverHolderUndeclared int64 `json:"takeover_holder_undeclared"`
 	AdoptHolderUndeclared    int64 `json:"adopt_holder_undeclared"`
 	PullsControlOnly         int64 `json:"pulls_control_only"`
+	// TakeoverWaitsServed, TakeoverWaitsRefused and TakeoverWaitsOvertaken
+	// count CONNECTs that waited for another CONNECT of their client in flight
+	// here: served, refused at their bound, refused for a newer CONNECT that
+	// waited beside them. ConnectsInFlight is the CONNECTs in flight now, and
+	// TakeoverWaiting those waiting on them.
+	TakeoverWaitsServed    int64 `json:"takeover_waits_served"`
+	TakeoverWaitsRefused   int64 `json:"takeover_waits_refused"`
+	TakeoverWaitsOvertaken int64 `json:"takeover_waits_overtaken"`
+	ConnectsInFlight       int   `json:"connects_in_flight"`
+	TakeoverWaiting        int   `json:"takeover_waiting"`
 	// AcquiresAbandoned counts acquires whose CONNECT gave up while they could
 	// still be granted; GrantsUnfetchedAdopted the ones a later CONNECT here
 	// found granted with no session, and adopted and fetched before it was
@@ -1065,6 +1099,12 @@ func (s *Service) LivenessStats() LivenessStats {
 		AdoptHolderUndeclared:    s.adoptHolderUndeclared.Load(),
 		PullsControlOnly:         s.pullsControlOnly.Load(),
 
+		TakeoverWaitsServed:    s.takeoverWaitsServed.Load(),
+		TakeoverWaitsRefused:   s.takeoverWaitsRefused.Load(),
+		TakeoverWaitsOvertaken: s.takeoverWaitsOvertaken.Load(),
+		ConnectsInFlight:       s.connecting.total(),
+		TakeoverWaiting:        s.connecting.waitingTotal(),
+
 		ImportConnBefore:     s.importConnBefore.Load(),
 		ImportConnAfter:      s.importConnAfter.Load(),
 		ImportConnRecovered:  s.importConnRecovered.Load(),
@@ -1211,6 +1251,7 @@ func New(o Options) (*Service, error) {
 	s.confirmOut.wake = make(chan struct{}, 1)
 	s.confirmDone = make(chan struct{})
 	s.transit = newTransitSet()
+	s.connecting = newConnecting()
 	s.transitDone = make(chan struct{})
 	s.abandoned = newAbandonedAcquires()
 	s.firsts = newFirstAcquires()
@@ -1354,12 +1395,17 @@ func (s *Service) Epoch(ns, id string) (uint64, bool) {
 // locally; another owner is taken over and, unless cleanStart, asked for
 // the session state.
 func (s *Service) Acquire(ctx context.Context, ns, id string, will *store.WillRecord, expiryInterval uint32, cleanStart bool) (AcquireResult, error) {
-	return s.AcquireFrom(ctx, ns, id, will, expiryInterval, cleanStart, Requester{})
+	res, err := s.AcquireFrom(ctx, ns, id, will, expiryInterval, cleanStart, Requester{})
+	res.Settle()
+	return res, err
 }
 
 // AcquireFrom is Acquire with the requesting connection described, for the
 // previous owner's takeover attribution.
 func (s *Service) AcquireFrom(ctx context.Context, ns, id string, will *store.WillRecord, expiryInterval uint32, cleanStart bool, from Requester) (AcquireResult, error) {
+	// Taken first, so that no path this CONNECT is slow on can make it look
+	// newer than one that arrived after it.
+	arrival := s.arrivals.Add(1)
 	if s.fenced.Load() && s.o.MinorityServes {
 		// Defects: grant without the core, the way a broker with no fence
 		// would; the harness's one-live-owner property must catch it.
@@ -1397,6 +1443,10 @@ func (s *Service) AcquireFrom(ctx context.Context, ns, id string, will *store.Wi
 	if existed {
 		if l.Owner == s.o.Node {
 			if err := s.awaitHooked(ctx, looked); err != nil {
+				return AcquireResult{}, err
+			}
+			// Another CONNECT here may be taking the session over.
+			if err := s.awaitTakeovers(ctx, key{ns, id}, arrival); err != nil {
 				return AcquireResult{}, err
 			}
 			st, ev, err := s.awaitAdoption(ctx, key{ns, id}, cleanStart)
@@ -1453,6 +1503,17 @@ func (s *Service) AcquireFrom(ctx context.Context, ns, id string, will *store.Wi
 	if !existed {
 		s.firsts.begin(key{ns, id}, s.steady())
 	}
+	// In flight here until the answer shows no takeover, or the caller settles
+	// the takeover; every error return ends it.
+	inFlight := existed
+	if inFlight {
+		s.connecting.begin(key{ns, id})
+		defer func() {
+			if inFlight {
+				s.connecting.end(key{ns, id})
+			}
+		}()
+	}
 	if g := s.o.AcquireGate; g != nil {
 		g(ns, id, false)
 	}
@@ -1497,7 +1558,16 @@ func (s *Service) AcquireFrom(ctx context.Context, ns, id string, will *store.Wi
 		// reassignment, so the adoption is looked for only once this node's
 		// hooks have reached the acquire's own command.
 		if existed {
+			// Ended before the wait, so that two such CONNECTs never wait on
+			// each other.
+			inFlight = false
+			s.connecting.end(key{ns, id})
 			if err := s.awaitHooked(ctx, res.Index); err != nil {
+				return AcquireResult{}, err
+			}
+			// The grant that made the lease this node's may be another
+			// CONNECT's takeover, still pulling or importing the session.
+			if err := s.awaitTakeovers(ctx, key{ns, id}, arrival); err != nil {
 				return AcquireResult{}, err
 			}
 		}
@@ -1674,6 +1744,10 @@ func (s *Service) AcquireFrom(ctx context.Context, ns, id string, will *store.Wi
 		s.count("hoardmq_lease_takeovers_total", map[string]string{"kind": kind}, 1)
 		s.audit("lease.takeover", ns+"/"+id, kind, map[string]string{"from": res.PrevOwner, "epoch": fmt.Sprint(res.Epoch)})
 		s.confirmLater(key{ns, id}, res.Epoch, res.PrevOwner)
+	}
+	if inFlight {
+		inFlight = false
+		out.settle = sync.OnceFunc(func() { s.connecting.end(key{ns, id}) })
 	}
 	s.count("hoardmq_lease_ops_total", map[string]string{"op": "acquire", "outcome": "ok"}, 1)
 	return out, nil

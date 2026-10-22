@@ -155,6 +155,10 @@ type rollStep struct {
 	// change hooks to reach the command they read, by outcome, summed as
 	// Failures is, and the restarted node's own.
 	HookWaits map[string]float64 `json:"hook_waits,omitempty"`
+	// TakeoverWaits is the rise of the CONNECTs that waited for another
+	// CONNECT of their client in flight on their node, by outcome, summed and
+	// read as HookWaits is.
+	TakeoverWaits map[string]float64 `json:"takeover_waits,omitempty"`
 }
 
 type phaseMark struct {
@@ -389,7 +393,7 @@ type keptSample struct {
 
 // rollDrainMetric picks the families a step reads from a node's metrics.
 func rollDrainMetric(name string) bool {
-	return strings.HasPrefix(name, "hoardmq_drain_") || rollFailureMetric(name) || rollCopyMetric(name) || rollEmptyMetric(name) || rollHookWaitMetric(name)
+	return strings.HasPrefix(name, "hoardmq_drain_") || rollFailureMetric(name) || rollCopyMetric(name) || rollEmptyMetric(name) || rollHookWaitMetric(name) || rollTakeoverWaitMetric(name)
 }
 
 // rollFailureMetric is a family a step's failures sum.
@@ -402,6 +406,9 @@ func rollEmptyMetric(name string) bool { return name == "hoardmq_sessions_rebuil
 
 // rollHookWaitMetric is the family a step's hook_waits sums.
 func rollHookWaitMetric(name string) bool { return name == "hoardmq_lease_hook_waits_total" }
+
+// rollTakeoverWaitMetric is the family a step's takeover_waits sums.
+func rollTakeoverWaitMetric(name string) bool { return name == "hoardmq_lease_takeover_waits_total" }
 
 // sumLost sums a step's served-empty counts but those of sessions that had
 // no expiry.

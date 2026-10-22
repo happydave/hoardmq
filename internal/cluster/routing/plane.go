@@ -355,6 +355,12 @@ type Plane struct {
 	// afterJudge, set only by tests, runs in refreshOwnerKnowledge between
 	// the judgement and its store.
 	afterJudge func()
+	// beforeForget, set only by tests, runs in a forget between its
+	// decision and the table's delete.
+	beforeForget func(owner string)
+	// afterSyncCount, set only by tests, runs in checkServed between its
+	// count of the syncs and its read of the hidden owners.
+	afterSyncCount func()
 
 	mu       sync.Mutex
 	sink     Sink
@@ -364,6 +370,10 @@ type Plane struct {
 	out      map[string]*outbound
 	in       map[string]*inbound
 	lastSync map[string]time.Time // peer → when its route sync last arrived
+	// syncs counts, per peer, the full syncs received since this node
+	// started; it is never reset, so a forget can tell whether one arrived
+	// after it read the owners it judged.
+	syncs map[string]uint64
 	// settled is, per lost owner this node has had no full sync from, the
 	// emptied index at which it found the owner's sessions served elsewhere
 	// with their routes held here: at that index it is not judged again.
@@ -385,6 +395,10 @@ type Plane struct {
 	// servedMu makes one served check at a time: a woken loop and a direct
 	// caller must not both forget the same owner.
 	servedMu sync.Mutex
+	// fullMu orders a full sync's merge and record with a forget, so a
+	// forget comes before both or after both. Taken before the table's lock
+	// and p.mu.
+	fullMu sync.Mutex
 	// batches is the number of the last delta batch composed, seeded like
 	// the entry versions; proofs is, per peer, how far its route updates are
 	// held without a gap. See routeproof.go.
@@ -460,7 +474,7 @@ func New(o Options) *Plane {
 	}
 	p := &Plane{o: o, log: o.Logger.With("component", "routing"), table: NewTable(o.Node), rr: map[string]int{}, sticky: map[string]string{},
 		rng: rand.New(rand.NewSource(time.Now().UnixNano())), stop: make(chan struct{}), done: make(chan struct{}), //nolint:gosec // distribution, not security
-		out: map[string]*outbound{}, in: map[string]*inbound{}, lastSync: map[string]time.Time{}, moving: map[routeID]time.Time{}, held: map[routeID]*time.Timer{}, ending: map[routeID]*time.Timer{},
+		out: map[string]*outbound{}, in: map[string]*inbound{}, lastSync: map[string]time.Time{}, syncs: map[string]uint64{}, moving: map[routeID]time.Time{}, held: map[routeID]*time.Timer{}, ending: map[routeID]*time.Timer{},
 		moves: map[routeID]map[string]*clientMove{}, byClient: map[clientKey]map[routeID]bool{},
 		pending: map[entryKey]Entry{}, fullTo: map[string]bool{}, wake: make(chan struct{}, 1),
 		zeroAt: map[string]uint64{}, settled: map[string]uint64{}, unknownWhy: map[string]string{}, awaitRoutes: map[string]uint64{}, servedWake: make(chan struct{}, 1),
@@ -907,6 +921,8 @@ func (p *Plane) receiveRoutes(peer string, payload []byte) {
 		}
 	}
 	if payload[0] == routeFull {
+		p.fullMu.Lock()
+		defer p.fullMu.Unlock()
 		_, withdrawn := p.table.MergeFull(peer, entries, snapshot)
 		p.count("hoardmq_route_syncs_total", map[string]string{"direction": "in"}, 1)
 		if n := len(withdrawn); n > 0 {
@@ -932,6 +948,7 @@ func (p *Plane) markSync(peer string) {
 	p.mu.Lock()
 	_, had := p.lastSync[peer]
 	p.lastSync[peer] = time.Now()
+	p.syncs[peer]++
 	p.mu.Unlock()
 	if !had {
 		// The first sync from this peer is what makes its routes known.

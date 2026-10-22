@@ -188,6 +188,12 @@ func (p *Plane) checkServed() {
 	// refusals for an owner this node never had routes from wait on its fact.
 	p.proposeCover()
 	p.proposeForUnknown()
+	// Read before the hidden owners: a full sync after this count may have
+	// replaced what the read saw.
+	synced := p.syncCounts()
+	if p.afterSyncCount != nil {
+		p.afterSyncCount()
+	}
 	hidden := p.table.HiddenOwners()
 	now := time.Now().UnixNano()
 	p.forgets.hidden(hidden, now)
@@ -261,12 +267,12 @@ func (p *Plane) checkServed() {
 			p.forgets.held(owner, why, now)
 			continue
 		}
-		p.table.Forget(owner)
+		if !p.forgetOwner(owner, synced[owner]) {
+			p.count("hoardmq_route_owners_forget_skipped_total", map[string]string{"reason": "synced"}, 1)
+			p.log.Info("a lost owner's routes kept: it sent a full sync since this check read it", "owner", owner)
+			continue
+		}
 		p.forgets.forgotten(owner, now)
-		p.mu.Lock()
-		delete(p.lastSync, owner)
-		delete(p.zeroAt, owner)
-		p.mu.Unlock()
 		p.count("hoardmq_route_owners_forgotten_total", map[string]string{"reason": "sessions-served"}, 1)
 		p.log.Info("a lost owner's routes forgotten: its sessions are served elsewhere", "owner", owner, "leaseIndex", zeroAt)
 		p.refreshOwnerKnowledge()
@@ -602,3 +608,42 @@ func (p *Plane) ForgetTimeline() []ForgetEvent {
 	sort.Slice(open, func(i, j int) bool { return open[i].Owner < open[j].Owner })
 	return append(out, open...)
 }
+
+// syncCounts copies how many full syncs each peer has sent.
+func (p *Plane) syncCounts() map[string]uint64 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make(map[string]uint64, len(p.syncs))
+	for peer, n := range p.syncs {
+		out[peer] = n
+	}
+	return out
+}
+
+// forgetOwner deletes a lost owner's routes and its sync record, under the
+// lock a full sync's merge and record take, unless forgetStands says a full
+// sync from it arrived after read was counted. It reports whether it forgot.
+func (p *Plane) forgetOwner(owner string, read uint64) bool {
+	p.fullMu.Lock()
+	defer p.fullMu.Unlock()
+	p.mu.Lock()
+	now := p.syncs[owner]
+	p.mu.Unlock()
+	if !forgetStands(read, now) {
+		return false
+	}
+	if p.beforeForget != nil {
+		p.beforeForget(owner)
+	}
+	p.table.Forget(owner)
+	p.mu.Lock()
+	delete(p.lastSync, owner)
+	delete(p.zeroAt, owner)
+	p.mu.Unlock()
+	return true
+}
+
+// forgetStands decides a lost owner's forget: it stands only if the owner has
+// sent no full sync since the judging pass counted read, because a later sync
+// may carry routes the pass never saw. It is pure.
+func forgetStands(read, now uint64) bool { return now == read }

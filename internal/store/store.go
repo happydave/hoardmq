@@ -301,7 +301,11 @@ func (s *Store) stateAtLocked() (*State, error) {
 	st := NewState()
 	from := uint64(1)
 	var held *heldRecords
-	if idx, payload, ok := s.wal.LatestCheckpoint(); ok {
+	idx, payload, ok, err := s.wal.RecoveryCheckpoint()
+	if err != nil {
+		return nil, err
+	}
+	if ok {
 		if err := json.Unmarshal(payload, st); err != nil {
 			return nil, fmt.Errorf("store: checkpoint %d: %w", idx, err)
 		}
@@ -309,7 +313,7 @@ func (s *Store) stateAtLocked() (*State, error) {
 		held = heldBy(st)
 	}
 	if from < s.keptFrom {
-		err := s.wal.Iterate(from, func(r wal.Record) error {
+		err = s.wal.Iterate(from, func(r wal.Record) error {
 			if r.Index >= s.keptFrom {
 				return errStopReplay
 			}
@@ -522,12 +526,18 @@ func (s *Store) SetTap(tap func(Record) func()) {
 }
 
 // Recover rebuilds the state from the latest checkpoint and the records
-// after it. An unknown record type or a checksum failure is fatal.
+// after it. An unknown record type, a checksum failure or a record the log no
+// longer holds after the checkpoint is fatal.
 func (s *Store) Recover() (*State, error) {
 	state := NewState()
 	from := uint64(1)
 	var held *heldRecords
-	if idx, payload, ok := s.wal.LatestCheckpoint(); ok {
+	idx, payload, ok, err := s.wal.RecoveryCheckpoint()
+	if err != nil {
+		s.log.Error("refusing to recover the journal", "err", err)
+		return nil, err
+	}
+	if ok {
 		if err := json.Unmarshal(payload, state); err != nil {
 			return nil, fmt.Errorf("store: checkpoint %d: %w", idx, err)
 		}
@@ -538,7 +548,7 @@ func (s *Store) Recover() (*State, error) {
 			s.log.Warn("checkpoint is newer than the log; using the checkpoint", "checkpoint", idx, "log", s.wal.LastIndex())
 		}
 	}
-	err := s.wal.Iterate(from, func(r wal.Record) error {
+	err = s.wal.Iterate(from, func(r wal.Record) error {
 		return replayOnto(state, held, r.Index, r.Type, r.Payload)
 	})
 	if err != nil {

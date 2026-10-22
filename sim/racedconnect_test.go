@@ -46,9 +46,10 @@ type rawOutcome struct {
 // TestRacedPathSecondConnectOnTheSameNodeAtTheBroker:
 // x's session, with queued messages, is on n1. A second CONNECT of x on n2
 // looks the lease up (n1) and is held; a first CONNECT on n2 then takes the
-// lease from n1 and pulls the session, its import held; the second is let go,
-// is served raced (Session Present false), and the first's import follows:
-// the client resumes the whole session, every acknowledged message with it.
+// lease from n1 and pulls the session, its import held. The second is let go
+// and waits while the import is held; once the import ends both are served
+// the session, the second last, and the client resumes it whole, every
+// acknowledged message with it.
 func TestRacedPathSecondConnectOnTheSameNodeAtTheBroker(t *testing.T) {
 	const id = "rc-x"
 	var armedAcquire, armedImport atomic.Bool
@@ -115,23 +116,25 @@ func TestRacedPathSecondConnectOnTheSameNodeAtTheBroker(t *testing.T) {
 		t.Fatal("precondition not reached: the first CONNECT's import was not held")
 	}
 	once1.Do(func() { close(acquireGo) })
-	s := <-second
-	if s.err != nil {
-		t.Fatalf("second CONNECT: %v", s.err)
-	}
-	if s.ack == nil || s.ack.ReasonCode != packet.Success || s.ack.SessionPresent {
-		t.Fatalf("second CONNECT: %+v, want Success with no session present (served raced)", s.ack)
+	select {
+	case s := <-second:
+		t.Fatalf("second CONNECT answered while the first's import was held: %+v, %v", s.ack, s.err)
+	case <-time.After(300 * time.Millisecond):
 	}
 	once2.Do(func() { close(importGo) })
 	f := <-first
 	if f.err != nil || f.ack == nil || f.ack.ReasonCode != packet.Success || !f.ack.SessionPresent {
 		t.Fatalf("first CONNECT: %+v %v, want Success with the session present", f.ack, f.err)
 	}
+	s := <-second
+	if s.err != nil || s.ack == nil || s.ack.ReasonCode != packet.Success || !s.ack.SessionPresent {
+		t.Fatalf("second CONNECT: %+v %v, want Success with the session present", s.ack, s.err)
+	}
 	if s.conn != nil {
 		_ = s.conn.Close()
 	}
-	if n := rollSnapshot(c)["n2"][`hoardmq_sessions_rebuilt_empty_total{reason="raced"}`]; n != 1 {
-		t.Fatalf("n2 counted %v sessions served empty raced, want 1", n)
+	if n := rollSnapshot(c)["n2"][`hoardmq_sessions_rebuilt_empty_total{reason="raced"}`]; n != 0 {
+		t.Fatalf("n2 counted %v sessions served empty raced, want 0", n)
 	}
 	_ = f.conn.Close()
 	resume := NewClient(id, []string{n2.TCP}, 600, 3)

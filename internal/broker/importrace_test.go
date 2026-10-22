@@ -399,8 +399,8 @@ func TestConnectImportAfterALaterGrantIsRefused(t *testing.T) {
 	if _, ok := nodes[r].srv.Sessions().Record(id); ok {
 		t.Fatalf("%s holds a session for %s, whose lease is n1's", r, id)
 	}
-	if st := nodes[r].srv.Leases().LivenessStats(); st.ConnectImportRefused != 1 {
-		t.Fatalf("%s's refused CONNECT installs: %d, want 1", r, st.ConnectImportRefused)
+	if st := nodes[r].srv.Leases().LivenessStats(); st.ConnectImportRefused != 1 || st.ConnectsInFlight != 0 {
+		t.Fatalf("%s's refused CONNECT installs: %d, CONNECTs in flight %d; want 1, and 0 so the client's next CONNECT there is not held", r, st.ConnectImportRefused, st.ConnectsInFlight)
 	}
 }
 

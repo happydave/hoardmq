@@ -116,7 +116,9 @@ func (f *FileAuthenticator) Authenticate(_ context.Context, req *Request) Result
 // A rule applies when every stated principal member matches the identity and
 // the topic filter, after template substitution, matches the request topic.
 // The first applicable rule that mentions the action decides; "deny" lists
-// refuse, "allow" lists grant. No applicable rule passes.
+// refuse, "allow" lists grant. No applicable rule passes. A rule whose
+// template value is empty or contains a wildcard or level separator is not
+// applicable to that identity.
 type FileAuthorizer struct {
 	path  string
 	mu    sync.RWMutex
@@ -210,18 +212,25 @@ func substitute(pattern string, id *Identity) string {
 }
 
 // templateUsable reports whether every template the pattern uses has a
-// non-empty value, so that an empty identity member cannot widen a rule.
+// usable value, so that no identity member can widen a rule.
 func templateUsable(pattern string, id *Identity) bool {
-	if strings.Contains(pattern, "${clientid}") && id.ClientID == "" {
+	if strings.Contains(pattern, "${clientid}") && !templateValueUsable(id.ClientID) {
 		return false
 	}
-	if strings.Contains(pattern, "${username}") && id.Username == "" {
+	if strings.Contains(pattern, "${username}") && !templateValueUsable(id.Username) {
 		return false
 	}
-	if strings.Contains(pattern, "${cn}") && id.CertCN == "" {
+	if strings.Contains(pattern, "${cn}") && !templateValueUsable(id.CertCN) {
 		return false
 	}
 	return true
+}
+
+// templateValueUsable reports whether a value can stand in a rule topic as
+// literal text. A wildcard ('+', '#') or level separator ('/') in it would
+// make the rule match other identities' topics.
+func templateValueUsable(v string) bool {
+	return v != "" && !strings.ContainsAny(v, "+#/")
 }
 
 // Authorize implements Authorizer. For subscribe and unsubscribe the topic

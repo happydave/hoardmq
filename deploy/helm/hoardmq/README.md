@@ -88,15 +88,18 @@ lost: at 10,000 clients the drains took 25.2–25.3 s and a roll 92 s, refusing
 last drain each time; at 100,000 clients the drains took 25.8–59.7 s (the last
 pod about 3,070 clients a second) and a roll 95–128 s, against 1,676 s at a
 fixed 100 a second (hoardmq `sim/results/roll2251b-10k-2026-10-09/`,
-`roll2251b-100k-2026-10-09/`). **A known cost at that size:** in 1 of 3 rolls
-the last pod's step refused about 41% of the probe's publishes (11,542
-refused and 718 failed without an acknowledgement over the roll, against at
-most 2,965 and 269 at a fixed 1,050 a second); the other rolls refused
-3,370–4,163. Nothing was lost in any roll. The spike comes with replication
-barrier timeouts on one receiver, and it is investigated as hoardmq work
-item 2254. The build before B, its drains cut at the grace, refused
-4,280–5,827, failed 4,693–5,743 and dropped about 100,000 connections a
-roll.
+`roll2251b-100k-2026-10-09/`). At 100,000 clients the last pod's step once
+refused 19–45% of the probe's publishes for about 20 s, while the replication
+stream to the pod that rejoined during its drain fell seconds behind on its
+acknowledgements. From hoardmq work item 2390 that stream wakes only the waits
+an acknowledgement or a refusal can decide. In 3 interleaved node-logged rolls
+of each build, the last step refused or failed 1.6–3.9% of the probe against
+35.6–41.3%, a roll 2.30–2.83% against 11.66–13.35%, and rolls took 95.1–95.2 s
+against 97.2–98.0 s. The second pod's step refused 568–1,016 of 32,000 around the
+first pod's restart, against 498 before. Nothing was lost in any roll (hoardmq
+`sim/results/roll2390fix-100k-2026-10-21/`). The build before B, its drains
+cut at the grace, refused 4,280–5,827, failed 4,693–5,743 and dropped about
+100,000 connections a roll.
 
 A draining pod leaves the shard map before it stops. Its hand-off marks it
 leaving, the map moves the copies it held to the other pods, and the drain

@@ -85,6 +85,9 @@ type servedFixture struct {
 	covered  []servedFact
 	// coverFail, when set, is what each cover proposal returns, uncommitted.
 	coverFail error
+	// onOwned, when set, runs at each count of an owner's leases, before the
+	// count is read: the test's seam inside a judging pass.
+	onOwned func(node string)
 }
 
 // servedMetrics keeps the last value of each gauge and the sum of each
@@ -154,6 +157,9 @@ func newServedPlane(t *testing.T, f *servedFixture) (*Plane, *stubTransport) {
 	p := New(Options{Node: "n2", Transport: tr, SyncInterval: time.Hour, ServedInterval: time.Hour, Logger: quiet, Metrics: &f.metrics,
 		Members: func() []string { return []string{"n1", "n2", "n3"} },
 		OwnedSessions: func(node string) (int, bool) {
+			if f.onOwned != nil {
+				f.onOwned(node)
+			}
 			f.mu.Lock()
 			defer f.mu.Unlock()
 			if f.countedFor != nil {

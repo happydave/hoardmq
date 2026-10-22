@@ -65,6 +65,9 @@ func (k core) Connect(c *conn.Conn, p *packet.Connect) conn.ConnectResult {
 		}
 		return conn.ConnectResult{Reason: packet.ServerUnavailable}
 	}
+	// Another CONNECT of the client here waits until this one has installed
+	// what its takeover pulled and connected, or refused.
+	defer res.Settle()
 	if res.State != nil {
 		// The state came from the previous owner (or a replica of it) and
 		// carries that owner's epoch. It is imported — journaled whole, and

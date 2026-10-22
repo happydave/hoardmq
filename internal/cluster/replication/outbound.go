@@ -85,7 +85,13 @@ type outbound struct {
 	lastProgress time.Time    // the last acknowledgement received or frame written
 	lastProbe    time.Time
 	closed       bool
-	waiters      []chan struct{}
+	// waiters are the barriers waiting on this stream, each registered once
+	// with what it waits for, so a change wakes only those it can decide.
+	waiters map[*waiter]struct{}
+	// wakeAll and wakeKeys are what the refusals recorded since the last
+	// refusalArrived wake: every barrier, or those naming these bare keys.
+	wakeAll  bool
+	wakeKeys []store.Scope
 
 	// droppedFloor is the newest sequence the window's cap dropped, and
 	// brokenAt the sequence the stream stood at when it last broke: what a
@@ -274,8 +280,7 @@ func (p *outbound) acked(seq uint64) {
 		}
 	}
 	p.lastProgress = time.Now()
-	waiters := p.waiters
-	p.waiters = nil
+	waiters := p.wakeLocked(func(w *waiter) bool { return w.target <= p.ackSeq })
 	p.mu.Unlock()
 	p.trace.ackedOne(seq, from)
 	for _, w := range waiters {
@@ -283,14 +288,21 @@ func (p *outbound) acked(seq uint64) {
 	}
 }
 
-// refusalArrived wakes the barriers waiting on this stream once a refusal has
-// been recorded, so one naming the refused key fails now. It moves no mark:
-// acked does that, on the peer's acknowledgement after its sync.
+// refusalArrived wakes the barriers the refusals failedAt recorded can
+// decide: those naming a recorded key, or all after one that blocked the
+// stream whole. It moves no mark: acked does that, on the peer's
+// acknowledgement after its sync.
 func (p *outbound) refusalArrived() {
 	p.mu.Lock()
 	p.lastProgress = time.Now()
-	waiters := p.waiters
-	p.waiters = nil
+	var waiters []chan struct{}
+	if p.wakeAll {
+		waiters = p.wakeAllLocked()
+	} else if len(p.wakeKeys) > 0 {
+		keys := p.wakeKeys
+		waiters = p.wakeLocked(func(w *waiter) bool { return w.namesAny(keys) })
+	}
+	p.wakeAll, p.wakeKeys = false, nil
 	p.mu.Unlock()
 	for _, w := range waiters {
 		close(w)
@@ -326,6 +338,7 @@ func (p *outbound) failedAt(seq uint64, reason string, named store.Scope) (needs
 			fb.Outcome = rejMismatch
 		}
 		p.blockWhole()
+		p.wakeAll = true
 		p.mu.Unlock()
 		p.trace.rejected(fb.Outcome, &fb)
 		if fallback == fallbackNoKey {
@@ -352,6 +365,7 @@ func (p *outbound) failedAt(seq uint64, reason string, named store.Scope) (needs
 		if scope.Epoch > cur.epoch {
 			p.refused[bare] = refusal{epoch: scope.Epoch, class: refusalClass(reason)}
 		}
+		p.wakeKeys = append(p.wakeKeys, bare)
 		p.mu.Unlock()
 		p.trace.rejected(rejRepeat, nil)
 		return false
@@ -360,6 +374,7 @@ func (p *outbound) failedAt(seq uint64, reason string, named store.Scope) (needs
 		fb := p.fallbackSampleLocked(seq, reason)
 		fb.Outcome = rejAtCap
 		p.blockWhole()
+		p.wakeAll = true
 		p.mu.Unlock()
 		p.trace.rejected(rejAtCap, &fb)
 		p.fallbackAtCap.Add(1)
@@ -371,6 +386,7 @@ func (p *outbound) failedAt(seq uint64, reason string, named store.Scope) (needs
 	}
 	p.refused[bare] = refusal{epoch: scope.Epoch, class: refusalClass(reason)}
 	p.markBlockedLocked()
+	p.wakeKeys = append(p.wakeKeys, bare)
 	p.mu.Unlock()
 	p.trace.rejected(rejScoped, nil)
 	return false
@@ -694,6 +710,7 @@ func (p *outbound) wait(ctx context.Context, up func(string) bool, keys []store.
 
 // waitFor is wait's loop over the target it read.
 func (p *outbound) waitFor(ctx context.Context, up func(string) bool, keys []store.Scope, target uint64) error {
+	self := newWaiter(keys)
 	for {
 		// A peer the transport still has is one whose acknowledgements are
 		// arriving, so a hole in its stream matters. A peer that is gone
@@ -761,18 +778,24 @@ func (p *outbound) waitFor(ctx context.Context, up func(string) bool, keys []sto
 			}
 		}
 		w := make(chan struct{})
-		p.waiters = append(p.waiters, w)
+		self.ch, self.target = w, target
+		if p.waiters == nil {
+			p.waiters = make(map[*waiter]struct{})
+		}
+		p.waiters[self] = struct{}{}
 		p.mu.Unlock()
 		if probe {
 			p.probes.Add(1)
 			p.push(frame{Kind: kindResyncMark})
 		}
 		if !peerUp {
+			p.forget(self)
 			return &barrierError{p.name, "down", fmt.Errorf("%w: %s", ErrReplicaUnavailable, p.name), nil}
 		}
 		select {
 		case <-w:
 		case <-ctx.Done():
+			p.forget(self)
 			p.mu.Lock()
 			ts := TimeoutSample{Target: target, Acked: p.ackSeq, Sent: p.sent}
 			p.mu.Unlock()
@@ -780,6 +803,7 @@ func (p *outbound) waitFor(ctx context.Context, up func(string) bool, keys []sto
 			return &barrierError{p.name, "timeout", ctx.Err(), nil}
 		case <-time.After(100 * time.Millisecond):
 			// Re-check the peer's state: it may have gone down while we wait.
+			p.forget(self)
 		}
 	}
 }
@@ -800,8 +824,7 @@ func (p *outbound) broken() {
 	p.hole = true
 	p.holeGen++
 	p.markBlockedLocked()
-	waiters := p.waiters
-	p.waiters = nil
+	waiters := p.wakeAllLocked()
 	p.mu.Unlock()
 	p.trace.broke()
 	for _, w := range waiters {
@@ -813,8 +836,7 @@ func (p *outbound) close() {
 	p.mu.Lock()
 	p.closed = true
 	p.queue = nil
-	waiters := p.waiters
-	p.waiters = nil
+	waiters := p.wakeAllLocked()
 	p.mu.Unlock()
 	for _, w := range waiters {
 		close(w)
@@ -904,8 +926,7 @@ func (p *outbound) whole(gen uint64, now time.Time) bool {
 	}
 	p.streamBlocked = false
 	p.clearBlockedLocked()
-	waiters := p.waiters
-	p.waiters = nil
+	waiters := p.wakeAllLocked()
 	p.mu.Unlock()
 	p.trace.resynced(true)
 	if wasBlocked {
