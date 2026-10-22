@@ -47,7 +47,7 @@ type Options struct {
 	Reorder bool
 
 	// MaxVersion lets a node advertise a framing version other than the
-	// current one, for negotiation tests. Zero means Version4.
+	// current one, for negotiation tests. Zero means Version5.
 	MaxVersion uint8
 }
 
@@ -206,7 +206,7 @@ func New(o Options) (*Transport, error) {
 		o.Logger = slog.Default()
 	}
 	if o.MaxVersion == 0 {
-		o.MaxVersion = Version4
+		o.MaxVersion = Version5
 	}
 	t := &Transport{o: o, vmin: Version1, vmax: o.MaxVersion, log: o.Logger.With("component", "cluster-transport"), peers: map[string]*peer{}, isolated: map[string]bool{}, heldData: map[string]bool{}}
 	if len(o.Peers) > 0 && o.Listen == "" {

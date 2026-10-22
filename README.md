@@ -984,7 +984,7 @@ import caused), cluster peers
 connected with cluster frames, bytes, reconnects, heartbeat misses and
 refusals, the consensus core (term, commit and applied index, snapshot
 index, leader flag, members by role, proposals by outcome, snapshots,
-dropped frames, and `hoardmq_raft_proposal_seconds_total{outcome}`, the time from a
+snapshot builds and transfers by outcome, dropped frames, and `hoardmq_raft_proposal_seconds_total{outcome}`, the time from a
 proposal to its outcome), leases (active, operations by outcome, takeovers by kind,
 adoptions, fences, connect refusals), routes (active by scope, updates and
 syncs by direction, forwards by kind, forward failures), replication
@@ -1411,7 +1411,10 @@ lease renewals written and flushed ahead of queued data); version 3 added
 the second connection: a version-2 peer is served on one connection carrying
 every class, with the same per-class dispatch on the receiver, until it is
 upgraded. Version 4 added the forwarded admin calls; a node on a link below
-it answers an admin call for that peer's client with 409 naming the peer. Heartbeats every `cluster.heartbeatMs` on each connection carry a
+it answers an admin call for that peer's client with 409 naming the peer.
+Version 5 added the snapshot transfer; a peer on a link below it cannot be
+sent a snapshot by a newer leader (counted `reason="peer-version"`, retried
+after the backoff) until it is upgraded. Heartbeats every `cluster.heartbeatMs` on each connection carry a
 stress level; `cluster.heartbeatMisses` silent intervals on the control
 connection mark a peer down (the data connection allows ten times that,
 since a slow data reader is back-pressure, not silence), and the dialing
@@ -1450,7 +1453,28 @@ exists: while it waits it is not ready and admits no client,
 joined or bootstrapped), and a warning naming the wait repeats every 30
 seconds. A snapshot is taken every
 `cluster.raft.snapshotEntries` applied entries and the log is compacted
-behind a `snapshotTrailing` window. A node that restarts, or installs a
+behind a `snapshotTrailing` window. A snapshot is a file in a directory
+beside the raft log (`logs/raft-snapshots` under `node.dataDir`); the raft
+log records which file. The loop captures the state at one applied index,
+which costs a pointer per lease, and a builder writes the file off the loop,
+so applies, heartbeats and elections carry on meanwhile. A follower that
+needs a snapshot is sent the file on the data connection in 256 KiB chunks
+with at most four unacknowledged, so anything else queued to that peer waits
+behind at most 1 MiB of it; the follower writes it to a file, checks its size
+and SHA-256, decodes it off its own loop and installs it by a swap. No frame
+grows with the snapshot, so `cluster.maxFrameBytes` does not bound how many
+clients or credentials a cluster holds. A transfer with no answer for ten
+election timeouts fails, one that is making progress has no deadline, and a
+failed one is retried after a backoff that starts at one election timeout and
+doubles to thirty. While a transfer is in flight the leader keeps its log
+back to that snapshot, so the follower can catch up from it; the hold ends
+with the transfer (`hoardmq_raft_log_pinned_entries`). Builds and transfers
+are counted (`hoardmq_raft_snapshot_builds_total{outcome}`,
+`hoardmq_raft_snapshot_transfers_total{direction,outcome,reason}`, with
+bytes, seconds and the transfers in flight), and a failed or refused transfer
+is logged at Warn on both sides with its reason. A node holds the current
+snapshot and, while it builds the next, a second: size its volume for twice
+`hoardmq_raft_snapshot_bytes` beside the logs. A node that restarts, or installs a
 snapshot, is **recovering** until its applied index reaches the commit index
 the leader announces (or, for a node the leader has nothing to send, a few
 heartbeats confirm it is current): the state-machine components apply the
@@ -2508,6 +2532,12 @@ Replication frames carry the level their sender read (`lvl`, absent at
 level 1), because a frame is applied off the log and the receiver's reading
 may differ. A frame of an unknown *kind* is still acknowledged unapplied, as
 before: a kind added later must be safe for a peer that ignores it.
+
+Raft snapshots are files of format 2 (above, "Consensus core"). A build
+before them stored a snapshot inline in the raft log; a newer build still
+reads that, and an older leader's inline snapshot, and writes its first file
+at its next snapshot. An older build meeting format 2 on its own disk, a
+rollback, refuses to start, naming the format.
 
 Level 1 is everything that shipped up to the first release tag. Metrics:
 `hoardmq_cluster_feature_level`, `hoardmq_cluster_feature_level_build`

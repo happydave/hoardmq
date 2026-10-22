@@ -321,7 +321,7 @@ func TestSecretModeConnectsAndCarriesFrames(t *testing.T) {
 			}
 			waitFor(t, "reverse frame", func() bool { return back.n() == 1 })
 			for _, n := range c.nodes {
-				if ps := n.t.Peers(); len(ps) != 1 || ps[0].State != Up || ps[0].Version != Version4 {
+				if ps := n.t.Peers(); len(ps) != 1 || ps[0].State != Up || ps[0].Version != Version5 {
 					t.Fatalf("%s peers %+v", n.t.o.Node, ps)
 				}
 				if !n.ev.has("cluster.peer.up", "ok") {
@@ -546,7 +546,7 @@ func TestVersionNegotiation(t *testing.T) {
 	e.nodes["p1"].waitUp(t, "p2")
 	e.nodes["p2"].waitUp(t, "p1")
 	for _, n := range e.nodes {
-		if v := n.t.Peers()[0].Version; v != Version4 {
+		if v := n.t.Peers()[0].Version; v != Version5 {
 			t.Fatalf("%s negotiated %d", n.t.o.Node, v)
 		}
 	}
@@ -740,7 +740,7 @@ func TestTwoConnectionsAreIndependent(t *testing.T) {
 	c.nodes["n1"].waitUp(t, "n2")
 	c.nodes["n2"].waitUp(t, "n1")
 	ps := c.nodes["n1"].t.Peers()
-	if ps[0].Version != Version4 || ps[0].State != Up || ps[0].DataState != Up {
+	if ps[0].Version != Version5 || ps[0].State != Up || ps[0].DataState != Up {
 		t.Fatalf("peer after start: %+v", ps[0])
 	}
 	c.nodes["n1"].t.pauseRole[RoleData].Store(true)
@@ -983,4 +983,52 @@ func TestControlUpIsReportedBeforeThePeerIsUp(t *testing.T) {
 	if ps := c.nodes["n1"].t.Peers(); ps[0].ControlUp {
 		t.Fatalf("stopped peer reads ControlUp: %+v", ps[0])
 	}
+}
+
+// TestSnapshotClassesNeedVersion5: a link negotiated at 4 refuses the
+// snapshot transfer's classes on the sending side and stays up; at 5 both
+// directions are delivered on the data connection.
+func TestSnapshotClassesNeedVersion5(t *testing.T) {
+	old := newCluster(t, "secret", []string{"n1", "n2"}, func(name string, o *Options) {
+		if name == "n2" {
+			o.MaxVersion = Version4
+		}
+	})
+	refused := received(old.nodes["n2"], SnapshotData)
+	routes := received(old.nodes["n2"], RouteUpdate)
+	old.start(t)
+	old.nodes["n1"].waitUp(t, "n2")
+	old.nodes["n2"].waitUp(t, "n1")
+	if v := old.nodes["n1"].t.Peers()[0].Version; v != Version4 {
+		t.Fatalf("negotiated %d with a version-4 peer", v)
+	}
+	for _, cl := range []Class{SnapshotData, SnapshotReply} {
+		if err := old.nodes["n1"].t.Send(context.Background(), "n2", cl, []byte("x")); !errors.Is(err, ErrUnsupportedClass) {
+			t.Fatalf("%s on a version-4 link: %v", cl, err)
+		}
+	}
+	if err := old.nodes["n1"].t.Send(context.Background(), "n2", RouteUpdate, []byte("after")); err != nil {
+		t.Fatalf("the link after a refused snapshot frame: %v", err)
+	}
+	waitFor(t, "a frame after the refusal", func() bool { return routes.n() == 1 })
+	if refused.n() != 0 {
+		t.Fatal("a version-4 link delivered a snapshot frame")
+	}
+
+	cur := newCluster(t, "secret", []string{"p1", "p2"}, nil)
+	data := received(cur.nodes["p2"], SnapshotData)
+	reply := received(cur.nodes["p1"], SnapshotReply)
+	cur.start(t)
+	cur.nodes["p1"].waitUp(t, "p2")
+	cur.nodes["p2"].waitUp(t, "p1")
+	if SnapshotData.lane() != RoleData || SnapshotReply.lane() != RoleData {
+		t.Fatal("the snapshot classes are not on the data connection")
+	}
+	if err := cur.nodes["p1"].t.Send(context.Background(), "p2", SnapshotData, []byte("chunk")); err != nil {
+		t.Fatal(err)
+	}
+	if err := cur.nodes["p2"].t.Send(context.Background(), "p1", SnapshotReply, []byte("ack")); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "both snapshot classes at version 5", func() bool { return data.n() == 1 && reply.n() == 1 })
 }

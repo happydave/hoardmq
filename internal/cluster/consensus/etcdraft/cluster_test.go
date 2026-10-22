@@ -50,6 +50,8 @@ type tnode struct {
 	dropJoinAnswers atomic.Bool
 	mu              sync.Mutex
 	sends           []sendRecord // what left this node and how durable the store was
+	// observe, when set, sees every send's class, size and error.
+	observe atomic.Pointer[func(peer string, cl transport.Class, size int, err error)]
 }
 
 // sendRecord is one Send seen by the recording transport: the store's
@@ -67,6 +69,9 @@ type tcluster struct {
 	nodes map[string]*tnode
 	addrs map[string]string
 	tweak func(o *Options)
+	// maxFrame and maxVersion, when set, configure the transports.
+	maxFrame   int
+	maxVersion map[string]uint8
 }
 
 func newTCluster(t *testing.T, tweak func(o *Options)) *tcluster {
@@ -84,7 +89,8 @@ func (c *tcluster) addTransport(name string, peers []string) *tnode {
 		ps = append(ps, config.Peer{Name: p, Address: "127.0.0.1:1"})
 	}
 	tr, err := transport.New(transport.Options{Node: name, ClusterID: "t", Listen: "127.0.0.1:0", Peers: ps, Auth: transport.Auth{Mode: "secret", Secret: []byte(secret)},
-		Heartbeat: 50 * time.Millisecond, HeartbeatMisses: 4, HandshakeTimeout: 2 * time.Second, Logger: quiet})
+		Heartbeat: 50 * time.Millisecond, HeartbeatMisses: 4, HandshakeTimeout: 2 * time.Second, Logger: quiet,
+		MaxFrame: c.maxFrame, MaxVersion: c.maxVersion[name]})
 	if err != nil {
 		c.t.Fatal(err)
 	}
@@ -163,9 +169,14 @@ func (r *recordingTransport) Send(ctx context.Context, peer string, cl transport
 		r.n.sends = append(r.n.sends, rec)
 		r.n.mu.Unlock()
 	}
-	return r.n.tr.Send(ctx, peer, cl, payload)
+	err := r.n.tr.Send(ctx, peer, cl, payload)
+	if obs := r.n.observe.Load(); obs != nil {
+		(*obs)(peer, cl, len(payload), err)
+	}
+	return err
 }
 func (r *recordingTransport) Handle(cl transport.Class, h transport.Handler) { r.n.tr.Handle(cl, h) }
+func (r *recordingTransport) ObserveData(o transport.Observer)               { r.n.tr.ObserveData(o) }
 func (r *recordingTransport) SetPeers(peers []config.Peer)                   { r.n.tr.SetPeers(peers) }
 func (r *recordingTransport) Peers() []transport.PeerInfo                    { return r.n.tr.Peers() }
 

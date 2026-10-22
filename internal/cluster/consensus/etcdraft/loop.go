@@ -94,6 +94,23 @@ func (c *Core) run() {
 			c.propose(n, p)
 		case ev := <-c.joins:
 			c.handleJoin(n, ev)
+		case res := <-c.builds:
+			if err := c.finishBuild(res); err != nil {
+				c.log.Error("consensus loop stopping", "err", err)
+				c.failed.Store(&err)
+				return
+			}
+		case r := <-c.reports:
+			if h := c.o.transferHooks; h != nil && h.onReport != nil {
+				h.onReport(r.to, r.status)
+			}
+			n.ReportSnapshot(r.to, r.status)
+		case <-c.floorFreed:
+			if err := c.compact(); err != nil {
+				c.log.Error("consensus loop stopping", "err", err)
+				c.failed.Store(&err)
+				return
+			}
 		}
 	}
 }
@@ -230,8 +247,12 @@ func (c *Core) propose(n raft.Node, p proposal) {
 func (c *Core) handleReady(n raft.Node, rd raft.Ready) error {
 	if rd.SoftState != nil {
 		c.mu.Lock()
+		wasLeader := c.state == raft.StateLeader
 		c.lead, c.state = rd.Lead, rd.RaftState
 		c.mu.Unlock()
+		if wasLeader && rd.RaftState != raft.StateLeader {
+			c.cancelOut(reasonCancelled, func(*outTransfer) bool { return false })
+		}
 	}
 	if rd.HardState != nil && !raft.IsEmptyHardState(rd.HardState) {
 		c.mu.Lock()
@@ -261,6 +282,8 @@ func (c *Core) handleReady(n raft.Node, rd raft.Ready) error {
 	for _, e := range rd.CommittedEntries {
 		c.apply(n, e)
 	}
+	c.releaseReceived(c.machine.Applied())
+	c.dropStaged(c.machine.Applied())
 	c.checkRecovered()
 	n.Advance()
 	c.proposeDeferred(n)
@@ -325,6 +348,12 @@ func (c *Core) send(n raft.Node, _ raftlog.Durable, msgs []*pb.Message) {
 			n.ReportUnreachable(m.GetTo())
 			continue
 		}
+		if m.GetType() == pb.MsgSnap {
+			// A snapshot is a file, streamed off the loop; the library is
+			// told how it went when the transfer ends.
+			c.startTransfer(to, m)
+			continue
+		}
 		c.sent.Add(1)
 		b, err := proto.Marshal(m)
 		if err != nil {
@@ -334,26 +363,10 @@ func (c *Core) send(n raft.Node, _ raftlog.Durable, msgs []*pb.Message) {
 		// Raft messages ride the control connection, which is never shared
 		// with data (WI 1340), so a send may wait up to an election timeout
 		// for its queue rather than the one tick that, on a shared queue
-		// under a storm, turned every raft message into a drop. A snapshot
-		// is bulk and goes on the data connection; a version-2 peer has one
-		// connection and takes it on the consensus class.
-		class := transport.Consensus
-		if m.GetType() == pb.MsgSnap {
-			class = transport.ConsensusSnapshot
-		}
+		// under a storm, turned every raft message into a drop.
 		ctx, cancel := context.WithTimeout(context.Background(), c.o.Tick*time.Duration(c.o.ElectionTicks))
-		err = c.o.Transport.Send(ctx, to, class, append([]byte{envRaft}, b...))
-		if errors.Is(err, transport.ErrUnsupportedClass) {
-			err = c.o.Transport.Send(ctx, to, transport.Consensus, append([]byte{envRaft}, b...))
-		}
+		err = c.o.Transport.Send(ctx, to, transport.Consensus, append([]byte{envRaft}, b...))
 		cancel()
-		if m.GetType() == pb.MsgSnap {
-			status := raft.SnapshotFinish
-			if err != nil {
-				status = raft.SnapshotFailure
-			}
-			n.ReportSnapshot(m.GetTo(), status)
-		}
 		if err != nil {
 			n.ReportUnreachable(m.GetTo())
 		}
@@ -367,9 +380,23 @@ func (c *Core) send(n raft.Node, _ raftlog.Durable, msgs []*pb.Message) {
 // and reverted in WI 1273 because it starved a node that needed the snapshot
 // to catch up (WI 1291 has the record).
 func (c *Core) installSnapshot(snap *pb.Snapshot) error {
-	index, _, machine, err := unwrapSnapshot(snap.Data)
-	if err != nil {
-		return err
+	var staged *consensus.StagedMachine
+	var machine []byte
+	if snapshotForm(snap.Data) == consensus.FileFormat {
+		d, _, err := decodeDesc(snap.Data)
+		if err != nil {
+			return err
+		}
+		if staged = c.takeStaged(d); staged == nil {
+			if staged, err = c.stageSnapshot(d); err != nil {
+				return err
+			}
+		}
+	} else {
+		var err error
+		if _, _, machine, err = unwrapSnapshot(snap.Data); err != nil {
+			return err
+		}
 	}
 	if applied := c.machine.Applied(); applied > 0 && snap.Metadata.GetIndex() <= applied {
 		c.count("hoardmq_raft_snapshots_total", map[string]string{"direction": "in-stale"}, 1)
@@ -380,11 +407,14 @@ func (c *Core) installSnapshot(snap *pb.Snapshot) error {
 		c.machine.BeginRecovery()
 		c.count("hoardmq_raft_recoveries_total", map[string]string{"kind": "snapshot"}, 1)
 	}
-	if err := c.machine.Restore(machine); err != nil {
+	if staged != nil {
+		if err := staged.Install(); err != nil {
+			return err
+		}
+	} else if err := c.machine.Restore(machine); err != nil {
 		return err
 	}
 	c.machine.SetApplied(snap.Metadata.GetIndex())
-	_ = index
 	c.applyConfState(snap.Metadata.GetConfState())
 	if live {
 		c.machine.EndRecovery()
@@ -520,6 +550,7 @@ func (c *Core) applyConfState(cs *pb.ConfState) {
 		c.audit("cluster.member.removed", c.o.Node, "self", nil)
 		c.log.Warn("this node was removed from the cluster")
 	}
+	c.cancelOut(reasonCancelled, func(x *outTransfer) bool { return c.members.Has(x.to) })
 	c.syncPeers()
 }
 
@@ -753,33 +784,21 @@ func (c *Core) maybePromote(n raft.Node) {
 	}
 }
 
-// maybeSnapshot takes a snapshot when enough entries have been applied since
-// the last one, then compacts the log behind a trailing window.
+// maybeSnapshot starts a build when enough entries have been applied since
+// the stored snapshot and no build is running. The build writes a file off
+// the loop; finishBuild records it and compacts the log.
 func (c *Core) maybeSnapshot() error {
-	applied := c.machine.Applied()
-	last := c.o.Store.SnapshotIndex()
-	if applied < last+c.o.SnapshotEntries {
+	if c.building {
 		return nil
 	}
-	data, err := c.machine.Snapshot()
-	if err != nil {
-		return err
+	applied := c.machine.Applied()
+	stored := c.o.Store.SnapshotIndex()
+	if c.forceBuild && applied > stored {
+		c.forceBuild = false
+		return c.startBuild(applied)
 	}
-	c.mu.Lock()
-	cs := c.confState
-	term := c.term
-	c.mu.Unlock()
-	if cs == nil {
-		cs = &pb.ConfState{}
+	if applied < stored+c.o.SnapshotEntries {
+		return nil
 	}
-	if _, err := c.o.Store.CreateSnapshot(applied, cs, wrapSnapshot(applied, term, data)); err != nil {
-		return fmt.Errorf("snapshot: %w", err)
-	}
-	c.count("hoardmq_raft_snapshots_total", map[string]string{"direction": "out"}, 1)
-	if applied > c.o.SnapshotTrailing {
-		if err := c.o.Store.Compact(applied - c.o.SnapshotTrailing); err != nil && !errors.Is(err, raft.ErrCompacted) {
-			return fmt.Errorf("compact: %w", err)
-		}
-	}
-	return nil
+	return c.startBuild(applied)
 }

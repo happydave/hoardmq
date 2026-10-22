@@ -47,6 +47,12 @@ const (
 	// Version4 on the link.
 	AdminRequest
 	AdminAnswer
+	// SnapshotData carries a raft snapshot's transfer from the sender: the
+	// offer, the file in chunks, the end. SnapshotReply carries the
+	// receiver's answers. Both are bulk and travel on the data connection;
+	// they need framing Version5 on the link.
+	SnapshotData
+	SnapshotReply
 	classCount
 )
 
@@ -55,6 +61,7 @@ var classNames = [...]string{
 	"forwarded-publish", "route-update", "lease-notification", "takeover-request",
 	"takeover-ack", "drain-announcement", "redirect-hint", "heartbeat", "lease-alive",
 	"connection-role", "consensus-snapshot", "admin-request", "admin-answer",
+	"snapshot-data", "snapshot-reply",
 }
 
 // Role is which of a peer pair's connections a link is: control carries
@@ -107,6 +114,8 @@ func (c Class) minVersion() uint8 {
 		return Version3
 	case AdminRequest, AdminAnswer:
 		return Version4
+	case SnapshotData, SnapshotReply:
+		return Version5
 	}
 	return Version1
 }
@@ -120,13 +129,15 @@ func (c Class) urgent() bool { return c == LeaseAlive || c == Heartbeat }
 // Framing versions. The handshake advertises a range and peers use the
 // highest version both support. Version2 adds the LeaseAlive class;
 // Version3 adds the second connection per peer pair (ConnectionRole) and
-// the ConsensusSnapshot class; Version4 adds AdminRequest and AdminAnswer.
+// the ConsensusSnapshot class; Version4 adds AdminRequest and AdminAnswer;
+// Version5 adds SnapshotData and SnapshotReply.
 // The frame encoding is unchanged throughout.
 const (
 	Version1 uint8 = 1
 	Version2 uint8 = 2
 	Version3 uint8 = 3
 	Version4 uint8 = 4
+	Version5 uint8 = 5
 )
 
 // headerSize is the fixed part of every frame: a 4-byte big-endian length of

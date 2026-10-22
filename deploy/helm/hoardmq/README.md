@@ -33,7 +33,10 @@ cluster one node short. Size for that:
   at most `replicaCount - 1`, so a node loss leaves a copy standing; the
   default 2 copies on 3 pods is the smallest safe deployment;
 - a quorum of the consensus core is `floor(replicaCount / 2) + 1` voters;
-  with 3 pods, one may be down.
+  with 3 pods, one may be down;
+- `persistence.size` holds the journals and two raft snapshots while one is
+  built: leave twice `hoardmq_raft_snapshot_bytes` free beside the logs (about
+  50 B a client without a Will, more with one).
 
 The drain moves clients off a pod at `cluster.drain.ratePerSecond` (100 a
 second by default) or faster: it redirects every client within

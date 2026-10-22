@@ -297,6 +297,26 @@ func clone(l *Lease) *Lease {
 	return &c
 }
 
+// A stored lease, node record or Will is never written in place: an apply
+// stores a changed copy, so a snapshot's capture of the pointers stays the
+// state at its index while later applies run.
+
+// cloneNode copies a node record, or makes an empty one for nil.
+func cloneNode(n *NodeInfo) *NodeInfo {
+	if n == nil {
+		return &NodeInfo{}
+	}
+	c := *n
+	return &c
+}
+
+// armedWill is a copy of w with its armed flag set.
+func armedWill(w *store.WillRecord, armed bool) *store.WillRecord {
+	c := *w
+	c.Armed = armed
+	return &c
+}
+
 // applyOne applies one operation with the lock held and returns the result
 // and the leases whose ownership or liveness changed.
 func (t *Table) applyOne(op Op) (Result, []change) {
@@ -324,6 +344,7 @@ func (t *Table) applyOne(op Op) (Result, []change) {
 			return Result{Reason: "stale"}, nil
 		}
 		before := clone(l)
+		l = clone(l)
 		prev, prevAlive := "", false
 		if l.Owner != op.Node {
 			prevAlive = t.live(l.Owner)
@@ -342,6 +363,7 @@ func (t *Table) applyOne(op Op) (Result, []change) {
 		}
 		l.Online, l.ExpiresAt, l.DisconnectedAt = true, time.Time{}, time.Time{}
 		l.ExpiryInterval, l.Will = op.ExpiryInterval, op.Will
+		t.leases[k] = l
 		return Result{OK: true, Epoch: l.Epoch, PrevOwner: prev, PrevAlive: prevAlive}, []change{{before, clone(l)}}
 	case OpDisconnected:
 		l := t.leases[k]
@@ -349,14 +371,17 @@ func (t *Table) applyOne(op Op) (Result, []change) {
 			return Result{Reason: "stale"}, nil
 		}
 		before := clone(l)
+		l = clone(l)
 		l.Online = false
 		l.ExpiresAt, l.DisconnectedAt = op.ExpiresAt, op.Now
 		if l.Will != nil {
-			l.Will.Armed = op.WillArmed
-			if !op.WillArmed {
+			if op.WillArmed {
+				l.Will = armedWill(l.Will, true)
+			} else {
 				l.Will = nil
 			}
 		}
+		t.leases[k] = l
 		return Result{OK: true, Epoch: l.Epoch}, []change{{before, clone(l)}}
 	case OpRelease:
 		l := t.leases[k]
@@ -371,14 +396,13 @@ func (t *Table) applyOne(op Op) (Result, []change) {
 		if l == nil || l.Owner != op.Node || l.Epoch != op.Epoch {
 			return Result{Reason: "stale"}, nil
 		}
+		l = clone(l)
 		l.Will = nil
+		t.leases[k] = l
 		return Result{OK: true, Epoch: l.Epoch}, nil
 	case OpAlive:
-		n := t.nodes[op.Node]
-		if n == nil {
-			n = &NodeInfo{}
-			t.nodes[op.Node] = n
-		}
+		n := cloneNode(t.nodes[op.Node])
+		t.nodes[op.Node] = n
 		if op.Now.After(n.Alive) {
 			n.Alive = op.Now
 		}
@@ -406,10 +430,10 @@ func (t *Table) applyOne(op Op) (Result, []change) {
 		// finished, or that the sessions it took in transit through op.Cover
 		// are held, or both. Each is recorded when it rises, on the node's
 		// record, never creating one: a record is what reads as alive.
-		n := t.nodes[op.Node]
-		if n == nil {
+		if t.nodes[op.Node] == nil {
 			return Result{Reason: "no record"}, nil
 		}
+		n := cloneNode(t.nodes[op.Node])
 		raised := false
 		if op.Served > n.ServedIndex {
 			n.ServedIndex, n.ServedRoutes = op.Served, op.Routes
@@ -422,6 +446,7 @@ func (t *Table) applyOne(op Op) (Result, []change) {
 		if !raised {
 			return Result{Reason: "not a raise"}, nil
 		}
+		t.nodes[op.Node] = n
 		t.served = append(t.served, op.Node)
 		return Result{OK: true}, nil
 	case OpReassign, OpHandoff:
@@ -439,6 +464,8 @@ func (t *Table) applyOne(op Op) (Result, []change) {
 		if n := t.nodes[op.Node]; op.Kind == OpReassign && n != nil {
 			// The leader's verdict, for every node to read. A drain's hand-off
 			// declares nothing: the node it empties is alive.
+			n = cloneNode(n)
+			t.nodes[op.Node] = n
 			n.DeadAt = max(t.applying, 1)
 			if !contains(t.declared, op.Node) {
 				t.declared = append(t.declared, op.Node)
@@ -446,6 +473,8 @@ func (t *Table) applyOne(op Op) (Result, []change) {
 		}
 		if n := t.nodes[op.Node]; op.Kind == OpHandoff && n != nil {
 			// A drain's hand-off is its word that the node is leaving.
+			n = cloneNode(n)
+			t.nodes[op.Node] = n
 			n.LeavingAt = max(t.applying, 1)
 			if !contains(t.leaving, op.Node) {
 				t.leaving = append(t.leaving, op.Node)
@@ -457,6 +486,8 @@ func (t *Table) applyOne(op Op) (Result, []change) {
 				continue
 			}
 			before := clone(l)
+			l = clone(l)
+			t.leases[key{l.Namespace, l.ClientID}] = l
 			t.lost(op.Node)
 			l.Owner = op.To
 			l.Epoch = t.token(l.Epoch)
@@ -469,7 +500,7 @@ func (t *Table) applyOne(op Op) (Result, []change) {
 					l.ExpiresAt = op.Now.Add(time.Duration(l.ExpiryInterval) * time.Second)
 				}
 				if l.Will != nil {
-					l.Will.Armed = true
+					l.Will = armedWill(l.Will, true)
 				}
 			}
 			changes = append(changes, change{before, clone(l)})

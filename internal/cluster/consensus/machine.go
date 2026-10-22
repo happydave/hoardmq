@@ -17,7 +17,7 @@ import (
 type Machine struct {
 	mu         sync.RWMutex
 	components map[Kind]Component
-	unknown    map[Kind][]byte
+	unknown    map[Kind]rawSection
 	applied    uint64
 	recovering bool
 	membership *Membership
@@ -28,7 +28,7 @@ type Machine struct {
 // NewMachine builds a machine with the built-in components: membership
 // (kept by the shell), cluster configuration and the epoch.
 func NewMachine() *Machine {
-	m := &Machine{components: map[Kind]Component{}, unknown: map[Kind][]byte{}, membership: newMembership(), config: &Config{values: map[string]string{}}, epoch: &Epoch{}}
+	m := &Machine{components: map[Kind]Component{}, unknown: map[Kind]rawSection{}, membership: newMembership(), config: &Config{values: map[string]string{}}, epoch: &Epoch{}}
 	m.components[KindConfig] = m.config
 	m.components[KindEpoch] = m.epoch
 	return m
@@ -49,8 +49,8 @@ func (m *Machine) Register(k Kind, c Component) {
 		panic(fmt.Sprintf("consensus: kind %d registered twice", k))
 	}
 	m.components[k] = c
-	if data, ok := m.unknown[k]; ok {
-		_ = c.Restore(data)
+	if raw, ok := m.unknown[k]; ok {
+		adoptSection(c, raw)
 		delete(m.unknown, k)
 	}
 }
@@ -162,7 +162,8 @@ type snapshotDoc struct {
 // snapshotVersion is the machine document version.
 const snapshotVersion = 1
 
-// Snapshot serialises every component and the membership.
+// Snapshot serialises every component and the membership as a format 1
+// document, the inline form an older build stored and sent.
 func (m *Machine) Snapshot() ([]byte, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -174,8 +175,10 @@ func (m *Machine) Snapshot() ([]byte, error) {
 		}
 		doc.Sections[k] = data
 	}
-	for k, data := range m.unknown {
-		doc.Sections[k] = data
+	for k, raw := range m.unknown {
+		if raw.enc == EncodingBlob && len(raw.records) == 1 {
+			doc.Sections[k] = raw.records[0]
+		}
 	}
 	mem, err := m.membership.snapshot()
 	if err != nil {
@@ -185,7 +188,34 @@ func (m *Machine) Snapshot() ([]byte, error) {
 	return json.Marshal(doc)
 }
 
-// Restore replaces every component's state from a snapshot document.
+// adoptSection gives a component registered late the section a snapshot
+// held for its kind.
+func adoptSection(c Component, raw rawSection) {
+	if raw.enc == EncodingBlob {
+		if len(raw.records) == 1 {
+			_ = c.Restore(raw.records[0])
+		}
+		return
+	}
+	s, ok := c.(Streamer)
+	if !ok {
+		return
+	}
+	i := 0
+	next := func() ([]byte, bool, error) {
+		if i >= len(raw.records) {
+			return nil, false, nil
+		}
+		i++
+		return raw.records[i-1], true, nil
+	}
+	if staged, err := s.Stage(raw.enc, next); err == nil {
+		staged.Install()
+	}
+}
+
+// Restore replaces every component's state from a format 1 document, the
+// snapshot an older build stored or sent inline.
 func (m *Machine) Restore(data []byte) error {
 	var doc snapshotDoc
 	if err := json.Unmarshal(data, &doc); err != nil {
@@ -202,7 +232,7 @@ func (m *Machine) Restore(data []byte) error {
 				return fmt.Errorf("restore of kind %d: %w", k, err)
 			}
 		} else {
-			m.unknown[k] = section
+			m.unknown[k] = rawSection{enc: EncodingBlob, records: [][]byte{section}}
 		}
 	}
 	if err := m.membership.restore(doc.Membership); err != nil {

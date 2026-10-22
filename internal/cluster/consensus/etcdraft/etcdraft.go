@@ -30,6 +30,7 @@ import (
 type Transport interface {
 	Send(ctx context.Context, peer string, c transport.Class, payload []byte) error
 	Handle(c transport.Class, h transport.Handler)
+	ObserveData(o transport.Observer)
 	SetPeers(peers []config.Peer)
 	Peers() []transport.PeerInfo
 }
@@ -61,6 +62,14 @@ type Options struct {
 	// are offered to the transport before the entries they depend on are
 	// durable. Never set from configuration.
 	SendBeforeSave bool
+	// SnapshotDir holds the snapshot files; empty is the raft log's path
+	// with "-snapshots" appended, beside it.
+	SnapshotDir string
+	// BuildGate, when set, is called by a snapshot build before it writes,
+	// so a test can hold the build. Nil in the product.
+	BuildGate func()
+
+	transferHooks *transferHooks
 }
 
 // Envelope kinds inside the transport's consensus class.
@@ -143,6 +152,35 @@ type Core struct {
 	// failed is the error the loop stopped on, nil while it runs or after a
 	// stop or a removal: only a restart starts the loop again.
 	failed atomic.Pointer[error]
+
+	// Snapshots are files in snapDir. building is set on the loop while a
+	// build runs off it; builds carries its result back. filesInUse counts
+	// the holders of each file, which removal leaves alone. bg is every
+	// goroutine Stop waits for after the loop ends.
+	snapDir    string
+	building   bool
+	builds     chan buildResult
+	filesMu    sync.Mutex
+	filesInUse map[string]int
+	received   snapDesc // a received file waiting for the loop
+	bg         sync.WaitGroup
+	// forceBuild asks for a build at the next Ready whatever the count,
+	// when a follower needs a snapshot and the stored one is not a file.
+	forceBuild bool
+
+	// Snapshot transfers: out, one per follower, by follower and by
+	// transfer; failures counts each follower's consecutive failed ones for
+	// the backoff; in is the one this node receives. reports carries a
+	// transfer's outcome to the loop, floorFreed a released floor.
+	xferMu     sync.Mutex
+	outByPeer  map[uint64]*outTransfer
+	outByID    map[uint64]*outTransfer
+	failures   map[uint64]int
+	in         *inTransfer
+	staged     *stagedSnapshot
+	closing    bool // Stop is waiting for bg
+	reports    chan snapReport
+	floorFreed chan struct{}
 }
 
 // Failed is the error the consensus loop stopped on, nil unless it stopped on
@@ -207,7 +245,13 @@ func New(o Options) (*Core, error) {
 	c := &Core{o: o, id: consensus.NodeID(o.Node), log: o.Logger.With("component", "consensus"), machine: o.Machine, members: o.Machine.Membership(),
 		waiters: map[uint64]chan result{}, ccWaiters: map[uint64][]chan error{}, idNames: map[uint64]string{}, readmit: map[uint64]consensus.Meta{}, readded: map[uint64]bool{},
 		inbox: make(chan *pb.Message, 4096), joins: make(chan joinEvent, 64), proposals: make(chan proposal, 256),
-		started: make(chan struct{}), stop: make(chan struct{}), done: make(chan struct{})}
+		started: make(chan struct{}), stop: make(chan struct{}), done: make(chan struct{}),
+		snapDir: o.SnapshotDir, builds: make(chan buildResult, 1), filesInUse: map[string]int{},
+		outByPeer: map[uint64]*outTransfer{}, outByID: map[uint64]*outTransfer{}, failures: map[uint64]int{},
+		reports: make(chan snapReport, 16), floorFreed: make(chan struct{}, 1)}
+	if c.snapDir == "" {
+		c.snapDir = o.Store.Path() + "-snapshots"
+	}
 	for _, p := range o.Peers {
 		c.idNames[consensus.NodeID(p.Name)] = p.Name
 	}
@@ -216,6 +260,9 @@ func New(o Options) (*Core, error) {
 		// Snapshots are bulk and travel on the data connection (WI 1340);
 		// the envelope is the same.
 		o.Transport.Handle(transport.ConsensusSnapshot, c.receive)
+		o.Transport.Handle(transport.SnapshotData, c.onData)
+		o.Transport.Handle(transport.SnapshotReply, c.onReply)
+		o.Transport.ObserveData(c.onDataState)
 	}
 	c.sendBeforeSave = o.SendBeforeSave
 	return c, nil
@@ -259,6 +306,7 @@ func (c *Core) Start() error {
 	if c.o.Transport != nil {
 		c.o.Transport.SetPeers(c.o.Peers)
 	}
+	c.removeSnapshotFiles(true)
 	switch {
 	case c.o.Store.HasState():
 		// A restart replays the committed history above the local snapshot
@@ -801,6 +849,14 @@ func (c *Core) Stop() {
 	c.mu.Unlock()
 	close(c.stop)
 	<-c.done
+	c.xferMu.Lock()
+	in := c.in
+	c.closing = true
+	c.xferMu.Unlock()
+	if in != nil {
+		c.cancelIn(in, reasonAborted, errStopped)
+	}
+	c.bg.Wait()
 	_ = c.o.Store.Close()
 }
 

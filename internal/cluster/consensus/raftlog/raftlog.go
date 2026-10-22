@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"sync"
 
 	"github.com/happydave/hoardmq/internal/wal"
@@ -44,6 +45,7 @@ type Store struct {
 	ckptWal uint64 // write-ahead index recorded by the latest checkpoint
 	durable uint64
 	logger  *slog.Logger
+	path    string
 }
 
 // Open reads the log under dir/name and rebuilds the index.
@@ -52,7 +54,7 @@ func Open(dir, name string, opts wal.Options) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Store{log: l, ents: []*pb.Entry{{Index: proto.Uint64(0), Term: proto.Uint64(0)}}, walIdx: []uint64{0}, hs: &pb.HardState{}, snap: &pb.Snapshot{Metadata: &pb.SnapshotMetadata{}}, logger: opts.Logger}
+	s := &Store{path: filepath.Join(dir, name), log: l, ents: []*pb.Entry{{Index: proto.Uint64(0), Term: proto.Uint64(0)}}, walIdx: []uint64{0}, hs: &pb.HardState{}, snap: &pb.Snapshot{Metadata: &pb.SnapshotMetadata{}}, logger: opts.Logger}
 	if s.logger == nil {
 		s.logger = slog.Default()
 	}
@@ -438,6 +440,9 @@ func (s *Store) Compact(index uint64) error {
 	}
 	return nil
 }
+
+// Path is the directory the log's segments are in.
+func (s *Store) Path() string { return s.path }
 
 // LastDurable is the latest token issued.
 func (s *Store) LastDurable() Durable {
