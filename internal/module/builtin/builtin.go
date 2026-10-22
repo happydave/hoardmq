@@ -198,6 +198,14 @@ func (w *walStore) Journal() extstore.Journal {
 }
 func (w *walStore) Recover() (*extstore.State, error) { return w.inner.Recover() }
 
+// Unrecoverable is the store's (store.Store.Unrecoverable), nil before Start.
+func (w *walStore) Unrecoverable() error {
+	if w.inner == nil {
+		return nil
+	}
+	return w.inner.Unrecoverable()
+}
+
 // SetTap installs the replication layer's record tap on the open store.
 func (w *walStore) SetTap(tap func(extstore.Record) func()) {
 	if w.inner != nil {

@@ -21,7 +21,7 @@ import (
 
 // APIVersion is the extension API's semantic version, independent of the
 // broker's.
-const APIVersion = "0.2.0"
+const APIVersion = "0.3.0"
 
 // ID is a module identifier of the form family.name.
 type ID string

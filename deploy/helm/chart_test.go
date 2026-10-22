@@ -112,6 +112,9 @@ func TestDesignedDeploymentProperties(t *testing.T) {
 		{"statefulset.yaml", "- -wait"},
 		{"statefulset.yaml", "path: /readyz"},
 		{"statefulset.yaml", "path: /healthz"},
+		// The liveness probe restarts a pod about 30 s after /healthz starts
+		// failing.
+		{"statefulset.yaml", "path: /healthz\n              port: observability\n            periodSeconds: 10\n            timeoutSeconds: 2\n            failureThreshold: 3"},
 		{"statefulset.yaml", "volumeClaimTemplates:"},
 		{"statefulset.yaml", "HOARDMQ_NODE_NAME"},
 		{"statefulset.yaml", "HOARDMQ_CLUSTER_ADVERTISE"},
@@ -257,5 +260,32 @@ func TestPreStopDrainsThroughTheAdminAPIWhenEnabled(t *testing.T) {
 	}
 	if !regexp.MustCompile(`(?m)^admin:\n(?:  #.*\n)*  enabled: false$`).Match(values) {
 		t.Error("the admin API is not off by default in values.yaml")
+	}
+}
+
+// TestObservabilityDrainIsLoopbackOnly: the observability listener binds all
+// interfaces for the probes and scrapes, and its /drain answers only loopback
+// callers, so the default preStop must reach it on the pod's loopback and the
+// README must not present the listener's drain as reachable from the network.
+func TestObservabilityDrainIsLoopbackOnly(t *testing.T) {
+	tpl := templates(t)
+	preStop := regexp.MustCompile(`(?s)preStop:.*?resources:`).FindString(tpl["statefulset.yaml"])
+	addr := regexp.MustCompile(`(?s)\{\{- else \}\}\s*- -address\s*- (\S+):\{\{ \.Values\.observability\.port \}\}`).FindStringSubmatch(preStop)
+	if addr == nil || addr[1] != "127.0.0.1" {
+		t.Errorf("the default preStop does not drain over the loopback: %v", addr)
+	}
+	if !strings.Contains(tpl["configmap.yaml"], `"observability" (dict "address" (printf "0.0.0.0:%d" (int .Values.observability.port)) "allowRemote" true)`) {
+		t.Error("the observability listener no longer binds all interfaces for the probes and /metrics")
+	}
+	data, err := os.ReadFile(filepath.Join(chartDir, "README.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	readme := strings.Join(strings.Fields(string(data)), " ")
+	if !strings.Contains(readme, "Its `/drain` answers only loopback callers") {
+		t.Error("the chart README does not say /drain answers only loopback callers")
+	}
+	if strings.Contains(readme, "Restrict it with a NetworkPolicy") {
+		t.Error("the chart README still offers a NetworkPolicy as the protection for /drain")
 	}
 }

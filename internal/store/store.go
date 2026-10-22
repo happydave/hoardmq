@@ -41,6 +41,8 @@ type Options struct {
 	Logger          *slog.Logger
 	// Sync is passed to the log for tests.
 	Sync func(*os.File) error
+	// Write is passed to the log for tests.
+	Write func(f *os.File, p []byte) (int, error)
 	// GroupMaxDelay is how long a commit-policy Sync may hold before its
 	// fsync to let concurrent callers join the group; 0 holds not at all and
 	// groups only what arrives while an fsync is already in flight.
@@ -98,6 +100,10 @@ type Store struct {
 	keptBytes   int
 	repairAfter time.Time
 	repairErr   error
+
+	// unrecoverable is the last rewrite's error while it is damage, which a
+	// later rewrite cannot get past (damaged); nil otherwise.
+	unrecoverable atomic.Pointer[error]
 
 	covered        atomic.Uint64 // the last index covered, as above
 	keptSyncing    atomic.Bool   // a Sync started for the kept records is running
@@ -180,11 +186,24 @@ func Open(dir string, opts Options) (*Store, error) {
 		opts.Logger = slog.Default()
 	}
 	s := &Store{opts: opts, log: opts.Logger.With("component", "store"), stop: make(chan struct{}), stopped: make(chan struct{})}
-	l, err := wal.Open(dir, "state", wal.Options{SegmentBytes: opts.SegmentBytes, Sync: s.countFailures(opts.Sync), Logger: opts.Logger, IgnoreChecksum: opts.IgnoreChecksum})
+	l, err := wal.Open(dir, "state", wal.Options{SegmentBytes: opts.SegmentBytes, Sync: s.countFailures(opts.Sync), Write: opts.Write, Logger: opts.Logger, IgnoreChecksum: opts.IgnoreChecksum})
 	if err != nil {
 		return nil, err
 	}
 	s.wal = l
+	if torn, removed := l.OpenRepairs(); torn+removed > 0 {
+		s.log.Info("journal repaired at open", "torn_tails", torn, "segments_removed", removed)
+	}
+	// A power cut inside a repair, after its checkpoint and before its new
+	// segment, leaves the checkpoint past the log's end. Recovery replays from
+	// one past the checkpoint, so the next record must be appended there.
+	if idx, ok := l.CheckpointIndex(); ok && idx > l.LastIndex() {
+		s.log.Warn("checkpoint is newer than the log; appending after it", "checkpoint", idx, "log", l.LastIndex())
+		if err := l.ContinueAfter(idx); err != nil {
+			_ = l.Close()
+			return nil, err
+		}
+	}
 	s.syncer.store = s
 	s.keptFrom = l.LastIndex() + 1
 	s.covered.Store(l.LastIndex())
@@ -243,6 +262,10 @@ func (s *Store) SyncStats() SyncStats { return s.syncer.stats() }
 // may not be on the disk.
 func (s *Store) SyncFailures() int64 { return s.syncFailures.Load() }
 
+// failures counts what makes the journal not whole: failed fsyncs, and failed
+// writes to the log, whose writer then holds back every later record.
+func (s *Store) failures() int64 { return s.syncFailures.Load() + s.wal.WriteFailures() }
+
 // wholeLocked reports whether the journal is whole, given the failure count the
 // caller read. The caller holds s.mu.
 func (s *Store) wholeLocked(failures int64) bool { return failures == s.wholeAt }
@@ -294,6 +317,29 @@ func (s *Store) trimKeptLocked() {
 
 var errStopReplay = errors.New("store: replay stopped")
 
+// errDamaged marks a checkpoint or record the rewrite read and could not
+// decode or apply.
+var errDamaged = errors.New("journal damaged")
+
+// damaged reports whether a rewrite failed on what it read rather than on
+// what it wrote: a run of records not held, a checksum failure, or a
+// checkpoint or record that does not decode or apply. Retrying reads the same
+// bytes, so only a restart over restored files gets past it.
+func damaged(err error) bool {
+	var gap *wal.GapError
+	var corrupt *wal.CorruptError
+	return errors.As(err, &gap) || errors.As(err, &corrupt) || errors.Is(err, errDamaged)
+}
+
+// Unrecoverable is the last rewrite's error while the journal is not whole and
+// the rewrite failed on damage (damaged), nil otherwise. Lock-free.
+func (s *Store) Unrecoverable() error {
+	if p := s.unrecoverable.Load(); p != nil {
+		return *p
+	}
+	return nil
+}
+
 // stateAtLocked rebuilds the state recovery would build from an undamaged log
 // at its last index: the latest checkpoint, the logged records after it that
 // clean fsyncs covered, and the kept records. The caller holds s.mu.
@@ -307,7 +353,7 @@ func (s *Store) stateAtLocked() (*State, error) {
 	}
 	if ok {
 		if err := json.Unmarshal(payload, st); err != nil {
-			return nil, fmt.Errorf("store: checkpoint %d: %w", idx, err)
+			return nil, fmt.Errorf("store: checkpoint %d: %w: %w", idx, errDamaged, err)
 		}
 		from = idx + 1
 		held = heldBy(st)
@@ -317,7 +363,10 @@ func (s *Store) stateAtLocked() (*State, error) {
 			if r.Index >= s.keptFrom {
 				return errStopReplay
 			}
-			return replayOnto(st, held, r.Index, r.Type, r.Payload)
+			if err := replayOnto(st, held, r.Index, r.Type, r.Payload); err != nil {
+				return fmt.Errorf("%w: %w", errDamaged, err)
+			}
+			return nil
 		})
 		if err != nil && !errors.Is(err, errStopReplay) {
 			return nil, err
@@ -329,7 +378,7 @@ func (s *Store) stateAtLocked() (*State, error) {
 			continue
 		}
 		if err := replayOnto(st, held, idx, k.typ, k.payload); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("%w: %w", errDamaged, err)
 		}
 	}
 	return st, nil
@@ -360,18 +409,25 @@ func (s *Store) repairLocked() error {
 	if now.Before(s.repairAfter) {
 		return s.repairErr
 	}
-	failures := s.syncFailures.Load()
+	failures := s.failures()
 	last, err := s.rewriteLocked()
-	if err == nil && s.syncFailures.Load() != failures {
-		err = errors.New("an fsync failed during the repair")
+	if err == nil && s.failures() != failures {
+		err = errors.New("an fsync or write of the journal failed during the repair")
 	}
 	if err != nil {
 		s.repairFailures.Add(1)
 		s.repairErr = fmt.Errorf("store: journal repair: %w", err)
 		s.repairAfter = now.Add(repairBackoff)
 		s.log.Error("journal repair failed", "err", err, "retry_after", repairBackoff)
+		if damaged(err) {
+			failed := s.repairErr
+			s.unrecoverable.Store(&failed)
+		} else {
+			s.unrecoverable.Store(nil)
+		}
 		return s.repairErr
 	}
+	s.unrecoverable.Store(nil)
 	s.wholeAt = failures
 	s.repairs.Add(1)
 	s.log.Warn("journal rewritten after a failed fsync", "index", last)
@@ -442,7 +498,7 @@ func (s *Store) countFailures(sync func(*os.File) error) func(*os.File) error {
 func (s *Store) NeedsCheckpoint() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.needCheckpt || (s.opts.SyncPolicy != Relaxed && !s.wholeLocked(s.syncFailures.Load()))
+	return s.needCheckpt || (s.opts.SyncPolicy != Relaxed && !s.wholeLocked(s.failures()))
 }
 
 // appendRecord appends an encoded record and taps it.
@@ -485,6 +541,13 @@ func (s *Store) appendAndTap(typ byte, k Key, payload []byte) (func(), error) {
 func (s *Store) appendLocked(typ byte, payload []byte, borrowed bool) error {
 	if s.closed {
 		return errors.New("store: closed")
+	}
+	// After a failed write the log's writer holds back every later record;
+	// the repair starts a segment with a new one.
+	if s.opts.SyncPolicy != Relaxed && s.wal.WriterFailed() {
+		if err := s.repairLocked(); err != nil {
+			return err
+		}
 	}
 	idx, err := s.wal.Append(typ, payload)
 	if err != nil {
@@ -544,9 +607,6 @@ func (s *Store) Recover() (*State, error) {
 		from = idx + 1
 		held = heldBy(state)
 		s.checkpointIdx.Store(idx)
-		if idx > s.wal.LastIndex() {
-			s.log.Warn("checkpoint is newer than the log; using the checkpoint", "checkpoint", idx, "log", s.wal.LastIndex())
-		}
 	}
 	err = s.wal.Iterate(from, func(r wal.Record) error {
 		return replayOnto(state, held, r.Index, r.Type, r.Payload)
@@ -606,7 +666,7 @@ func (s *Store) Checkpoint(snapshot Snapshot) error {
 	if s.closed {
 		return errClosed
 	}
-	failures := s.syncFailures.Load()
+	failures := s.failures()
 	if commit && !s.wholeLocked(failures) {
 		return s.repairLocked()
 	}
@@ -620,7 +680,7 @@ func (s *Store) Checkpoint(snapshot Snapshot) error {
 	}
 	synced := s.wal.LastIndex()
 	if commit {
-		if s.syncFailures.Load() != failures {
+		if s.failures() != failures {
 			return errors.New("store: checkpoint: another fsync of the journal failed during its sync")
 		}
 		s.coverLocked(synced)

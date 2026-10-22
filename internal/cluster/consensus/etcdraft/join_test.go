@@ -92,6 +92,9 @@ func TestAddMemberAPI(t *testing.T) {
 	}
 	waitFor(t, "n3 gone from the leader's view", 5*time.Second, func() bool { return c.members(lead) == 3 })
 	waitFor(t, "n3 knows it was removed", 5*time.Second, func() bool { return c.nodes["n3"].core.Status().Role == "removed" })
+	if err := c.nodes["n3"].core.Failed(); err != nil {
+		t.Errorf("a removed member reports its loop failed: %v", err)
+	}
 	if _, err := c.nodes["n3"].core.Propose(context.Background(), consensus.KindEpoch, nil); err == nil {
 		t.Fatal("removed node accepted a proposal")
 	}

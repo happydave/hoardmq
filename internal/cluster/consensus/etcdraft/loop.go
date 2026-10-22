@@ -76,6 +76,7 @@ func (c *Core) run() {
 		case rd := <-n.Ready():
 			if err := c.handleReady(n, rd); err != nil {
 				c.log.Error("consensus loop stopping", "err", err)
+				c.failed.Store(&err)
 				return
 			}
 			if c.isRemoved() {

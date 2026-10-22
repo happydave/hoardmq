@@ -394,6 +394,10 @@
           "description": "Cap on the Session Expiry Interval in seconds; 0 means no cap.",
           "type": "integer", "minimum": 0, "maximum": 4294967295
         },
+        "maxTopicAliasBytes": {
+          "description": "Topic bytes one connection's inbound topic aliases may hold; a PUBLISH whose alias would pass it closes the connection with Quota exceeded (0x97). 0 is unlimited; the default is 1048576.",
+          "type": "integer", "minimum": 0
+        },
         "clientMessageRate": {
           "description": "PUBLISH packets a second each client may send; one over it is read later, not refused (the broker stops reading the socket until the rate allows). 0, the default, is unlimited.",
           "type": "integer", "minimum": 0
@@ -594,6 +598,10 @@
         "anonymous": {
           "description": "Accept connections that present no credentials when no authenticator decides. Default false.",
           "type": "boolean"
+        },
+        "sessionBinding": {
+          "description": "principal (the default): a CONNECT for a client identifier whose session exists is refused with Not authorized when its principal, the username authentication settled on, differs from the session's, whether it resumes or starts clean. off: any principal may resume or replace it.",
+          "type": "string", "enum": ["principal", "off"]
         },
         "decisionTtlSeconds": {
           "description": "How long an authenticator's allow is held before it is made again without the client; a session whose credential no longer passes is ended. A token's own expiry, when sooner, is used instead. Default 3600.",

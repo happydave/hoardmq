@@ -108,10 +108,11 @@ func (g *groupSyncer) syncOnce() error {
 		s.mu.Unlock()
 		return errClosed
 	}
-	if _, _, err := s.wal.Flush(); err != nil {
+	if _, _, err := s.wal.Flush(); err != nil && s.wholeLocked(s.failures()) {
 		s.mu.Unlock()
 		return err
 	}
+	// A failed write leaves the journal not whole: the group's leader repairs.
 	want := s.wal.LastIndex()
 	s.mu.Unlock()
 
@@ -186,7 +187,7 @@ func (g *groupSyncer) lead(grp *syncGroup) error {
 	var f *os.File
 	var gen uint64
 	var err error
-	failures := s.syncFailures.Load()
+	failures := s.failures()
 	whole := s.wholeLocked(failures)
 	switch {
 	case s.closed:
@@ -215,7 +216,7 @@ func (g *groupSyncer) lead(grp *syncGroup) error {
 		switch {
 		case err != nil:
 			s.log.Error("journal fsync failed", "index", target, "err", err)
-		case s.syncFailures.Load() != failures:
+		case s.failures() != failures:
 			s.log.Error("another fsync of the journal failed while this one ran", "index", target)
 			err = errCovered
 		}

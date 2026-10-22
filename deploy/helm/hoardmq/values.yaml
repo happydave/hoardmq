@@ -80,8 +80,9 @@ service:
 
 observability:
   # The metrics, health and drain listener; bound on all interfaces inside
-  # the pod so the kubelet's probes reach it. Its /drain is closed when the
-  # admin API is enabled.
+  # the pod so the kubelet's probes reach it. Its /drain answers only
+  # loopback callers, the preStop's, and is closed when the admin API is
+  # enabled.
   port: 9090
 
 # The admin REST API. Off by default. Enabled, it listens on the pod's

@@ -241,6 +241,13 @@ type JournalStatsProvider interface {
 	JournalStats() store.JournalStats
 }
 
+// RecoverabilityProvider is a store provider that reports when its journal
+// cannot recover without a restart: the error every rewrite of it fails on,
+// nil while it can recover.
+type RecoverabilityProvider interface {
+	Unrecoverable() error
+}
+
 // ListenerProvider is a module that serves a listener of its own and reports
 // the address it bound.
 type ListenerProvider interface {

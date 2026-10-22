@@ -483,8 +483,8 @@ func TestFlappingTripsToABan(t *testing.T) {
 		time.Sleep(100 * time.Millisecond) // each end reaches the detector before the next connect
 	}
 	waitTrips(t, f, 1)
-	waitIndexed(t, f, "clientid:flappy", true)
-	rec, ok := f.srv.records.Load().Get(bans.Collection, "clientid:flappy")
+	waitIndexed(t, f, "clientid-username:/flappy", true)
+	rec, ok := f.srv.records.Load().Get(bans.Collection, "clientid-username:/flappy")
 	var e bans.Entry
 	if !ok || json.Unmarshal(rec.Value, &e) != nil || e.Source != bans.SourceFlapping || e.ExpiresAt == nil {
 		t.Fatalf("the verdict's record: %+v %s", ok, rec.Value)
@@ -492,7 +492,7 @@ func TestFlappingTripsToABan(t *testing.T) {
 	if code := connectAs(t, addr, packet.V5, "flappy", ""); code != packet.Banned {
 		t.Fatalf("a flapping client's next CONNECT: %s", code)
 	}
-	if !hasEvent(auditEvents(t, f), "flapping", "ban.create", "clientid:flappy", "written") {
+	if !hasEvent(auditEvents(t, f), "flapping", "ban.create", "clientid-username:/flappy", "written") {
 		t.Fatal("the detector's ban is not audited")
 	}
 	time.Sleep(time.Until(*e.ExpiresAt) + 50*time.Millisecond)
@@ -538,7 +538,7 @@ func TestNotFlaps(t *testing.T) {
 	if n := flap.trips.Load(); n != 0 {
 		t.Fatalf("%d trips from graceful, refused and taken-over connections", n)
 	}
-	if _, ok := f.srv.records.Load().Get(bans.Collection, "clientid:polite"); ok {
+	if _, ok := f.srv.records.Load().Get(bans.Collection, "clientid-username:/polite"); ok {
 		t.Fatal("a client that disconnects politely was banned")
 	}
 }
@@ -717,11 +717,11 @@ func TestFlappingLeavesAnExistingBan(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	waitTrips(t, f, 1)
-	waitIndexed(t, f, "clientid:flappy2", true)
+	waitIndexed(t, f, "clientid-username:/flappy2", true)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	v, _ := json.Marshal(bans.Entry{Reason: "operator", Source: bans.SourceAdmin})
-	if res, err := f.srv.records.Load().Put(ctx, bans.Collection, "clientid:flappy2", v, nil, "op", time.Now()); err != nil || !res.OK {
+	if res, err := f.srv.records.Load().Put(ctx, bans.Collection, "clientid-username:/flappy2", v, nil, "op", time.Now()); err != nil || !res.OK {
 		t.Fatal(res, err)
 	}
 	// The flapping ban has been replaced by the operator's; flap again past
@@ -735,7 +735,7 @@ func TestFlappingLeavesAnExistingBan(t *testing.T) {
 		t.Fatalf("trips %d, want %d", f.srv.policy.flap.trips.Load(), before+1)
 	}
 	time.Sleep(300 * time.Millisecond)
-	rec, _ := f.srv.records.Load().Get(bans.Collection, "clientid:flappy2")
+	rec, _ := f.srv.records.Load().Get(bans.Collection, "clientid-username:/flappy2")
 	var e bans.Entry
 	_ = json.Unmarshal(rec.Value, &e)
 	if e.Source != bans.SourceAdmin || e.Reason != "operator" || e.ExpiresAt != nil {

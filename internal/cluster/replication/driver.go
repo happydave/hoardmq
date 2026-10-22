@@ -262,13 +262,7 @@ func (r *Replicator) writeReconciled(version uint64) {
 	data, _ := json.Marshal(struct {
 		Version uint64 `json:"version"`
 	}{version})
-	path := filepath.Join(r.o.ReplicaDir, reconciledFile)
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		r.log.Warn("reconciled map version not written", "err", err)
-		return
-	}
-	if err := os.Rename(tmp, path); err != nil {
+	if err := writeDurably(filepath.Join(r.o.ReplicaDir, reconciledFile), data); err != nil {
 		r.log.Warn("reconciled map version not written", "err", err)
 		return
 	}

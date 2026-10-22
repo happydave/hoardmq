@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -156,11 +158,154 @@ func TestDrainEndpoint(t *testing.T) {
 	}
 }
 
+// Over a real socket from an address of this host that is not loopback, the
+// listener bound on all interfaces serves /metrics and refuses /drain.
+func TestDrainRefusesARemoteCallerOverTheNetwork(t *testing.T) {
+	ip := nonLoopbackIPv4(t)
+	m := &prometheus{}
+	ctx := &module.Context{Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), Observability: module.Observability{Address: "0.0.0.0:0", MetricsPath: "/metrics"}}
+	if err := m.Provision(ctx, json.RawMessage(`{}`)); err != nil {
+		t.Fatal(err)
+	}
+	started := 0
+	m.drain = func() { started++ }
+	m.drainStatus = func() module.DrainStatus { return module.DrainStatus{Draining: started > 0} }
+	if err := m.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = m.Stop(context.Background()) }()
+	m.Add("hoardmq_connections_total", nil, 1)
+	_, port, _ := net.SplitHostPort(m.Addr().String())
+	base := "http://" + net.JoinHostPort(ip, port)
+	// No pooled connection outlives the test into the listener's shutdown.
+	client := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
+	resp, err := client.Get(base + "/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != 200 || !strings.Contains(string(body), "hoardmq_connections_total 1") {
+		t.Fatalf("GET /metrics from %s: %d %q", ip, resp.StatusCode, body)
+	}
+	for _, method := range []string{http.MethodPost, http.MethodGet} {
+		req, _ := http.NewRequest(method, base+"/drain", nil)
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusForbidden || !strings.Contains(string(body), "loopback") {
+			t.Errorf("%s /drain from %s: %d %q", method, ip, resp.StatusCode, body)
+		}
+	}
+	if started != 0 {
+		t.Fatalf("a remote caller started %d drains", started)
+	}
+}
+
+func TestDrainRefusal(t *testing.T) {
+	for _, c := range []struct {
+		addr string
+		open bool
+	}{
+		{"127.0.0.1:40000", true},
+		{"127.8.9.10:1", true},
+		{"[::1]:1", true},
+		{"[::ffff:127.0.0.1]:1", true},
+		{"10.1.2.3:1", false},
+		{"192.0.2.7:9090", false},
+		{"[2001:db8::1]:1", false},
+		{"[fe80::1%eth0]:1", false},
+		{"0.0.0.0:1", false},
+		{"localhost:1", false},
+		{"garbage", false},
+		{"", false},
+	} {
+		r := drainRefusal(false, c.addr)
+		if c.open && r != "" {
+			t.Errorf("%q refused: %q", c.addr, r)
+		}
+		if !c.open && !strings.Contains(r, "loopback") {
+			t.Errorf("%q: %q, want the loopback refusal", c.addr, r)
+		}
+	}
+}
+
+// Through the listener's mux, a peer off the loopback gets every path but
+// /drain: it is shown the probes and metrics first, so the refusals below are
+// of /drain alone.
+func TestDrainRefusedToARemotePeer(t *testing.T) {
+	m := &prometheus{}
+	ctx := &module.Context{Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), Observability: module.Observability{MetricsPath: "/metrics"}}
+	if err := m.Provision(ctx, json.RawMessage(`{}`)); err != nil {
+		t.Fatal(err)
+	}
+	started := 0
+	m.drain = func() { started++ }
+	m.drainStatus = func() module.DrainStatus { return module.DrainStatus{Draining: started > 0} }
+	m.ready = func() bool { return true }
+	m.serving = func() (bool, string) { return true, "" }
+	m.Add("hoardmq_connections_total", nil, 1)
+	h := m.handler()
+	serve := func(method, path string) (int, string) {
+		req := httptest.NewRequest(method, path, nil)
+		req.RemoteAddr = "10.1.2.3:51000"
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec.Code, rec.Body.String()
+	}
+	if code, body := serve(http.MethodGet, "/metrics"); code != 200 || !strings.Contains(body, "hoardmq_connections_total 1") {
+		t.Fatalf("GET /metrics from a remote peer: %d %q", code, body)
+	}
+	for path, want := range map[string]string{"/healthz": "ok\n", "/readyz": "ready\n", "/servingz": "serving\n"} {
+		if code, body := serve(http.MethodGet, path); code != 200 || body != want {
+			t.Fatalf("GET %s from a remote peer: %d %q", path, code, body)
+		}
+	}
+	if code, _ := serve(http.MethodGet, "/other"); code != http.StatusNotFound {
+		t.Fatalf("GET /other from a remote peer: %d", code)
+	}
+	if code, body := serve(http.MethodPost, "/drain"); code != http.StatusForbidden || !strings.Contains(body, "loopback") || started != 0 {
+		t.Errorf("POST /drain from a remote peer: %d %q, %d drains started", code, body, started)
+	}
+	if code, body := serve(http.MethodGet, "/drain"); code != http.StatusForbidden || strings.Contains(body, "draining") {
+		t.Errorf("GET /drain from a remote peer: %d %q", code, body)
+	}
+}
+
+// nonLoopbackIPv4 returns an IPv4 address of an interface that is up and not
+// loopback, or skips the test when the host has none.
+func nonLoopbackIPv4(t *testing.T) string {
+	t.Helper()
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ifc := range ifaces {
+		if ifc.Flags&net.FlagUp == 0 || ifc.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, err := ifc.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, a := range addrs {
+			if n, ok := a.(*net.IPNet); ok && n.IP.To4() != nil && !n.IP.IsLoopback() {
+				return n.IP.String()
+			}
+		}
+	}
+	t.Skip("no non-loopback IPv4 address on this host")
+	return ""
+}
+
 // With the admin API configured this listener's /drain refuses every method
 // and starts nothing; the probes and /metrics are unchanged.
 func TestDrainDoorClosedWhenAdminOwnsDrain(t *testing.T) {
-	if !drainDoorOpen(false) || drainDoorOpen(true) {
-		t.Fatal("drainDoorOpen")
+	if r := drainRefusal(true, "127.0.0.1:1"); !strings.Contains(r, "admin API") {
+		t.Fatalf("drainRefusal with the admin API owning the drain: %q", r)
 	}
 	m := &prometheus{}
 	ctx := &module.Context{Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), Observability: module.Observability{Address: "127.0.0.1:0", MetricsPath: "/metrics", AdminOwnsDrain: true}}

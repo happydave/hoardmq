@@ -34,10 +34,13 @@ type Options struct {
 	StoreAdmission   int
 	DropNewest       bool
 	MaxSessionExpiry uint32 // 0 means no cap
-	Authorizers      auth.AuthorizerChain
-	Logger           *slog.Logger
-	Clock            Clock
-	Router           Router
+	// BindPrincipal refuses a CONNECT whose principal (its identity's
+	// username) differs from the existing session's, resume or clean start.
+	BindPrincipal bool
+	Authorizers   auth.AuthorizerChain
+	Logger        *slog.Logger
+	Clock         Clock
+	Router        Router
 	// Journal is the store provider; nil means no persistence.
 	Journal Journal
 	// Observer receives delivery, retained and Will events; nil means none.
@@ -495,11 +498,17 @@ func (m *Manager) connect(c Connection, pkt *packet.Connect, leaseEpoch uint64, 
 	release := m.admit()
 	defer release()
 	sh := m.shardFor(k)
+	principal := c.Identity().Username
 	sh.mu.Lock()
 	s, existed := sh.sessions[k]
 	var resumed *Session
 	if c := sh.sealed[k]; !existed && c != nil {
-		switch sealedConnect(c.token, leaseEpoch, pkt.CleanStart) {
+		verdict := sealedConnect(c.token, leaseEpoch, pkt.CleanStart)
+		if verdict != sealedRefuse && principalRefused(m.opts.BindPrincipal, c.st.Username, principal) {
+			sh.mu.Unlock()
+			return m.refusePrincipal()
+		}
+		switch verdict {
 		case sealedRefuse:
 			sh.mu.Unlock()
 			m.connectsRefusedSealed.Add(1)
@@ -531,6 +540,11 @@ func (m *Manager) connect(c Connection, pkt *packet.Connect, leaseEpoch uint64, 
 	}
 	if existed {
 		s.mu.Lock()
+		if principalRefused(m.opts.BindPrincipal, s.identity.Username, principal) {
+			s.mu.Unlock()
+			sh.mu.Unlock()
+			return m.refusePrincipal()
+		}
 		if s.conn != nil {
 			old = s.conn
 			delete(sh.byConn, old)
@@ -885,6 +899,20 @@ func (m *Manager) forwardWriter(msg *message.Message) *journalWriter {
 }
 
 func qosLabel(q byte) string { return string(rune('0' + q)) }
+
+// principalRefused decides whether a CONNECT by connecting may take a session
+// recorded for owner: with binding on, only the same principal may resume it
+// or replace it with a clean start.
+func principalRefused(bind bool, owner, connecting string) bool {
+	return bind && owner != connecting
+}
+
+// refusePrincipal answers a CONNECT refused for its principal; nothing of the
+// session has been changed.
+func (m *Manager) refusePrincipal() conn.ConnectResult {
+	m.count("hoardmq_connect_refusals_total", map[string]string{"reason": "principal"}, 1)
+	return conn.ConnectResult{Reason: packet.NotAuthorized}
+}
 
 // count adds to a metric when a provider is configured.
 func (m *Manager) count(name string, labels map[string]string, delta float64) {

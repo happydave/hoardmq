@@ -285,3 +285,46 @@ func TestSyncHookAndCheckpoints(t *testing.T) {
 		t.Fatal("append after close")
 	}
 }
+
+// TestStartSegmentReplacesAFailedWriter: once a write through the segment
+// writer fails, every later append and flush fails and is counted; a new
+// segment gets a new writer and the log takes records again.
+func TestStartSegmentReplacesAFailedWriter(t *testing.T) {
+	dir := t.TempDir()
+	var full atomic.Bool
+	l := open(t, dir, Options{Write: func(f *os.File, p []byte) (int, error) {
+		if full.Load() {
+			return 0, errors.New("injected: no space")
+		}
+		return f.Write(p)
+	}})
+	defer func() { _ = l.Close() }()
+	appendN(t, l, 1, 2)
+	full.Store(true)
+	if _, _, err := l.Flush(); err == nil {
+		t.Fatal("a flush on a full disk succeeded")
+	}
+	full.Store(false)
+	if _, err := l.Append(1, []byte("after")); err == nil || !l.WriterFailed() {
+		t.Fatalf("an append after the failure: %v (writer failed %v), want the kept error", err, l.WriterFailed())
+	}
+	if got := l.WriteFailures(); got != 2 {
+		t.Fatalf("write failures %d, want 2", got)
+	}
+	if err := l.StartSegment(); err != nil {
+		t.Fatalf("start segment: %v", err)
+	}
+	if l.WriterFailed() {
+		t.Fatal("the new segment's writer is marked failed")
+	}
+	idx, err := l.Append(1, []byte("record-3"))
+	if err != nil || idx != 3 {
+		t.Fatalf("append after the new segment: %d %v", idx, err)
+	}
+	if err := l.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if got := collect(t, l, 3); len(got) != 1 || string(got[0].Payload) != "record-3" {
+		t.Fatalf("read back %v", got)
+	}
+}

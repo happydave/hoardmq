@@ -139,6 +139,19 @@ type Core struct {
 	onReady        func(entries, messages int, mustSync bool)
 	sent           atomic.Uint64 // frames handed to the transport
 	unroutable     atomic.Uint64 // messages with no known peer
+
+	// failed is the error the loop stopped on, nil while it runs or after a
+	// stop or a removal: only a restart starts the loop again.
+	failed atomic.Pointer[error]
+}
+
+// Failed is the error the consensus loop stopped on, nil unless it stopped on
+// one. Lock-free.
+func (c *Core) Failed() error {
+	if p := c.failed.Load(); p != nil {
+		return *p
+	}
+	return nil
 }
 
 type result struct {
@@ -742,6 +755,8 @@ func (c *Core) Status() consensus.Status {
 		st.Role = "stopped"
 	case c.removed:
 		st.Role = "removed"
+	case c.Failed() != nil:
+		st.Role = "failed"
 	case c.node == nil:
 		st.Role = "joining"
 	case c.state == raft.StateLeader:
@@ -766,7 +781,7 @@ func (c *Core) Ready() bool {
 }
 
 func (c *Core) readyLocked() bool {
-	if c.node == nil || c.removed || c.stopped || c.lead == 0 {
+	if c.node == nil || c.removed || c.stopped || c.lead == 0 || c.Failed() != nil {
 		return false
 	}
 	if !c.members.Has(c.id) {

@@ -141,3 +141,34 @@ func TestPeerAddr(t *testing.T) {
 		t.Errorf("no address: %v", got)
 	}
 }
+
+func TestClientIDUsernameBans(t *testing.T) {
+	ok := Entry{Source: SourceFlapping}
+	for _, key := range []string{"clientid-username:alice/c1", "clientid-username:a%2Fb/c1", "clientid-username:/c1", "clientid-username:alice/a/b"} {
+		if err := CheckBan(key, ok); err != nil {
+			t.Errorf("%s refused: %v", key, err)
+		}
+	}
+	for _, key := range []string{"clientid-username:alice", "clientid-username:alice/", "clientid-username:%zz/c1"} {
+		if err := CheckBan(key, ok); err == nil {
+			t.Errorf("%s accepted", key)
+		}
+	}
+	if got := PairValue("a/b", "c1"); got != "a%2Fb/c1" {
+		t.Fatalf("PairValue: %q", got)
+	}
+	ix := Build([]Item{{Key: Key(ClientIDUsername, PairValue("alice", "c1")), Entry: ok}})
+	if ix.Size() != 1 {
+		t.Fatalf("indexed %d", ix.Size())
+	}
+	now := time.Now()
+	if m, hit := ix.BannedPair("c1", "alice", now); !hit || m.Kind != ClientIDUsername {
+		t.Fatalf("alice on c1: %+v %v", m, hit)
+	}
+	if _, hit := ix.BannedPair("c1", "mallory", now); hit {
+		t.Fatal("mallory on c1 matched alice's pair ban")
+	}
+	if _, hit := ix.Banned("c1", "alice", true, netip.Addr{}, now); hit {
+		t.Fatal("the pair ban matched before authentication")
+	}
+}

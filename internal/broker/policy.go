@@ -126,6 +126,15 @@ func (p *policy) Banned(clientID, username string, hasUsername bool, remote stri
 	return m.Kind, ok
 }
 
+// BannedPrincipal implements conn.Options.BannedPrincipal.
+func (p *policy) BannedPrincipal(clientID, principal string) (string, bool) {
+	m, ok := p.index.Load().BannedPair(clientID, principal, time.Now())
+	if ok {
+		p.banned.Add(1)
+	}
+	return m.Kind, ok
+}
+
 // start runs the watcher and the sweeper once the records store is open.
 func (p *policy) start(st *records.Store) {
 	p.done.Add(2)
@@ -245,9 +254,10 @@ func (p *policy) sweepLoop(st *records.Store) {
 	}
 }
 
-// flapping counts, per client identifier, the established connections that
-// ended abnormally on the client's side, and bans a client that reaches the
-// threshold within the window.
+// flapping counts, per client identifier and principal, the established
+// connections that ended abnormally on the client's side, and bans that
+// principal's use of that identifier when it reaches the threshold within the
+// window, so no principal's flapping bans another's client.
 type flapping struct {
 	cfg     atomic.Pointer[config.Flapping] // in force; a reload replaces it
 	p       *policy
@@ -291,7 +301,7 @@ func (f *flapping) ended(c *conn.Conn, how conn.Ending) {
 	if !cfg.Enabled || how != conn.EndedAbnormal || c.ClientID() == "" {
 		return
 	}
-	id, now := c.ClientID(), time.Now()
+	id, now := bans.PairValue(c.Identity().Username, c.ClientID()), time.Now()
 	window := time.Duration(cfg.WindowSeconds) * time.Second
 	f.mu.Lock()
 	times := f.seen[id]
@@ -357,7 +367,7 @@ func (f *flapping) propose(id string, now time.Time) {
 	outcome := "written"
 	cfg := f.cfg.Load()
 	until := now.Add(time.Duration(cfg.BanSeconds) * time.Second).UTC()
-	key := bans.Key(bans.ClientID, id)
+	key := bans.Key(bans.ClientIDUsername, id)
 	defer func() {
 		f.p.s.count("hoardmq_flapping_bans_total", map[string]string{"outcome": outcome}, 1)
 		f.p.s.record("flapping", "ban.create", key, outcome, map[string]string{"expiresAt": until.Format(time.RFC3339)})

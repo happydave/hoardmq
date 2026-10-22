@@ -66,6 +66,16 @@ func Open(dir, name string, opts wal.Options) (*Store, error) {
 		s.ckptWal = idx
 		replayFrom = from
 	}
+	// A log that lost records its checkpoint covers (a disk that dropped
+	// synced writes) can end below the checkpoint's replay point; records
+	// appended there would be skipped by the next replay.
+	if replayFrom > l.LastIndex()+1 {
+		s.logger.Warn("raft log ends before its checkpoint's replay point; appending after it", "replay_from", replayFrom, "log", l.LastIndex())
+		if err := l.ContinueAfter(replayFrom - 1); err != nil {
+			_ = l.Close()
+			return nil, err
+		}
+	}
 	err = l.Iterate(replayFrom, func(r wal.Record) error { return s.replay(r) })
 	if err != nil {
 		_ = l.Close()
@@ -368,6 +378,11 @@ func (s *Store) applySnapshot(snap *pb.Snapshot) error {
 func (s *Store) writeCheckpoint() error {
 	payload, err := s.checkpointPayload()
 	if err != nil {
+		return err
+	}
+	// The checkpoint replays from past every record already appended, and it
+	// advances the durable token: both hold only once those records are synced.
+	if err := s.log.Sync(); err != nil {
 		return err
 	}
 	idx := s.log.LastIndex()

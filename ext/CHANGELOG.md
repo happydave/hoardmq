@@ -66,3 +66,16 @@ Additions only; nothing is removed or changed.
 - `ext/mqtt` holds the broker's topic rules: `ValidateTopicName`,
   `ValidateTopicFilter`, `MatchTopic` (with the `$`-topic exclusion),
   `HasWildcard`, `IsSharedFilter`, `SplitSharedFilter` and `SharePrefix`.
+
+## 0.3.0
+
+Additions only; nothing is removed or changed.
+
+- `LivenessProvider`, which the broker's `Services` implement: `Live` reports
+  whether the node can still recover without a restart and, when it cannot,
+  why. A metrics module serving a liveness endpoint fails it while `Live`
+  reports false.
+- `RecoverabilityProvider`, optional on a store provider: `Unrecoverable`
+  returns the error every rewrite of its journal fails on, such as a damaged
+  record, and nil while the journal can recover. The broker's liveness reads
+  it.

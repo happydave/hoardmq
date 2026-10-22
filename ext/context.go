@@ -36,6 +36,13 @@ type Services interface {
 	Records() RecordStore
 }
 
+// LivenessProvider is Services that report whether the node can still
+// recover without a restart and, when it cannot, why. A metrics module's
+// liveness endpoint fails while it reports false.
+type LivenessProvider interface {
+	Live() (bool, string)
+}
+
 // RecordStore is the replicated records store: named collections of keyed
 // JSON records that every node applies from the consensus log. Reads are
 // this node's applied state; a write returns once it has committed and

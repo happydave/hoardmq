@@ -124,6 +124,8 @@ spec:
               path: /healthz
               port: observability
             periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
           readinessProbe:
             httpGet:
               path: /readyz

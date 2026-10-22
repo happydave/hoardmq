@@ -1,6 +1,7 @@
 package store
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"sort"
@@ -8,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/happydave/hoardmq/internal/store/faultdisk"
+	"github.com/happydave/hoardmq/internal/wal"
 )
 
 // checkpointFile is the one checkpoint file under dir, by name.
@@ -179,6 +181,10 @@ func TestRepairOverABadCheckpointRefuses(t *testing.T) {
 	}
 	if got := s.SyncStats().Repairs; got != 0 {
 		t.Errorf("repairs = %d, want 0", got)
+	}
+	var gap *wal.GapError
+	if err := s.Unrecoverable(); !errors.As(err, &gap) {
+		t.Errorf("Unrecoverable() = %v, want the gap: no later rewrite can get past it", err)
 	}
 	if err := s.Close(); err != nil {
 		t.Fatal(err)

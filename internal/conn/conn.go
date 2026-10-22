@@ -83,10 +83,13 @@ type Options struct {
 	Capabilities   packet.Capabilities
 	MaxPacketSize  uint32 // inbound limit handed to the decoder and advertised
 	ReceiveMaximum uint16 // inbound unacknowledged QoS 1 and 2 publishes
-	MaxKeepAlive   uint16 // 0 accepts the client's value
-	ConnectTimeout time.Duration
-	Anonymous      bool
-	Authenticators auth.AuthenticatorChain
+	// MaxTopicAliasBytes bounds the topic bytes a connection's inbound
+	// aliases hold; 0 is unlimited.
+	MaxTopicAliasBytes int
+	MaxKeepAlive       uint16 // 0 accepts the client's value
+	ConnectTimeout     time.Duration
+	Anonymous          bool
+	Authenticators     auth.AuthenticatorChain
 	// CertificateAuthenticators run before the chain and before any
 	// mechanism: a certificate one refuses is refused whatever else the
 	// client presents.
@@ -114,6 +117,10 @@ type Options struct {
 	// Banned is asked once per CONNECT, before the gate: the kind of the ban
 	// the CONNECT meets, if any. Nil bans nothing.
 	Banned func(clientID, username string, hasUsername bool, remote string) (kind string, banned bool)
+	// BannedPrincipal is asked once per authenticated CONNECT, before its
+	// session is acquired: the kind of a ban of this principal's use of this
+	// client identifier, if any. Nil bans nothing.
+	BannedPrincipal func(clientID, principal string) (kind string, banned bool)
 	// ClientLimits gives a namespace's per-client PUBLISH rates; it is asked
 	// for every PUBLISH, and a different value than the last rebuilds the
 	// connection's buckets. Nil or a nil answer limits nothing.
@@ -203,6 +210,7 @@ type Conn struct {
 	quota       int
 	inflightIn  map[uint16]struct{}
 	aliasesIn   map[uint16]string
+	aliasBytes  int
 	aliasesOut  map[string]uint16
 	closed      bool
 	closeReason packet.ReasonCode
@@ -489,6 +497,12 @@ func (c *Conn) handshake() bool {
 		c.identity.Username = result.Username
 	case !connect.HasUsername && req.CertCN != "":
 		c.identity.Username = req.CertCN
+	}
+	if c.opts.BannedPrincipal != nil {
+		if kind, banned := c.opts.BannedPrincipal(c.clientID, c.identity.Username); banned {
+			c.refuseBanned(c.clientID, kind)
+			return false
+		}
 	}
 
 	// Keep alive.
@@ -1227,10 +1241,22 @@ func (c *Conn) handlePublish(p *packet.Publish) (packet.ReasonCode, bool) {
 			}
 			c.mu.Lock()
 			if p.Topic != "" {
+				old := len(c.aliasesIn[*alias])
+				if !aliasFits(c.aliasBytes, old, len(p.Topic), c.opts.MaxTopicAliasBytes) {
+					held := c.aliasBytes
+					c.mu.Unlock()
+					if c.opts.Metrics != nil {
+						c.opts.Metrics.Add("hoardmq_topic_alias_refusals_total", map[string]string{"listener": c.listener}, 1)
+					}
+					c.log.Info("topic aliases over their byte bound; closing", "client", c.clientID, "alias", *alias,
+						"held", held, "topic", len(p.Topic), "bound", c.opts.MaxTopicAliasBytes)
+					return c.refuseClose(packet.QuotaExceeded)
+				}
 				if c.aliasesIn == nil {
 					c.aliasesIn = map[uint16]string{}
 				}
 				c.aliasesIn[*alias] = p.Topic
+				c.aliasBytes += len(p.Topic) - old
 			} else {
 				t, ok := c.aliasesIn[*alias]
 				if !ok {
@@ -1287,6 +1313,13 @@ func (c *Conn) handlePublish(p *packet.Publish) (packet.ReasonCode, bool) {
 		}
 	}
 	return 0, true
+}
+
+// aliasFits decides whether a connection's inbound alias table holding held
+// topic bytes may map an alias to a topic of next bytes in place of one of
+// replaced bytes (0 when the alias is new) within bound; bound 0 is unlimited.
+func aliasFits(held, replaced, next, bound int) bool {
+	return bound == 0 || held-replaced+next <= bound
 }
 
 // refusePublish answers a refused publish: with a reason code on the

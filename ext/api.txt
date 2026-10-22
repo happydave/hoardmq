@@ -1,8 +1,8 @@
-hoardmq extension API 0.2.0
+hoardmq extension API 0.3.0
 
 package github.com/happydave/hoardmq/ext
 
-const APIVersion = "0.2.0"
+const APIVersion = "0.3.0"
 var OK = Outcome{Action: Continue}
 func Register(id ID, f Factory)
 type Action byte
@@ -116,6 +116,9 @@ type JournalStatsProvider interface {
 type ListenerProvider interface {
 	Addr() net.Addr
 }
+type LivenessProvider interface {
+	Live() (bool, string)
+}
 type Metric struct {
 	Name   string
 	Labels map[string]string
@@ -172,6 +175,9 @@ type RecordStore interface {
 	List(collection, after string, limit int) (items []records.Entry, more bool)
 	Put(ctx context.Context, collection, key string, value json.RawMessage, ifVersion *uint64, by string, at time.Time) (records.Result, error)
 	Delete(ctx context.Context, collection, key string, ifVersion *uint64, by string, at time.Time) (records.Result, error)
+}
+type RecoverabilityProvider interface {
+	Unrecoverable() error
 }
 type Reloader interface {
 	Reload() error

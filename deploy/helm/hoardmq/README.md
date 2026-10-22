@@ -17,7 +17,7 @@ helm install hoardmq deploy/helm/hoardmq --namespace hoardmq --create-namespace 
 | StatefulSet `<release>` | `replicaCount` pods, `podManagementPolicy: Parallel` (the broker's join-not-bootstrap ordering forms the cluster), a volume claim per pod, `terminationGracePeriodSeconds` = drain timeout + confirmation timeout + margin, preStop `hoardmq drain -wait`, readiness on `/readyz`, liveness on `/healthz` |
 | Service `<release>-headless` | `publishNotReadyAddresses: true`; peers resolve `<release>-<i>.<release>-headless` before they are ready |
 | Service `<release>` | the client-facing MQTT port(s) |
-| ConfigMap `<release>` | the broker's JSON configuration; the pod's name becomes `node.name` and its headless DNS name the advertised client address, and `metrics.prometheus` serves the probes, `/metrics` and `/drain` (closed with `admin.enabled`, which adds the admin API on the pod's loopback) |
+| ConfigMap `<release>` | the broker's JSON configuration; the pod's name becomes `node.name` and its headless DNS name the advertised client address, and `metrics.prometheus` serves the probes, `/metrics` and `/drain` (to loopback callers only, the preStop among them; closed with `admin.enabled`, which adds the admin API on the pod's loopback) |
 | Secret `<release>-cluster-tls` | the cluster CA and one certificate per ordinal, each with the node name as its common name (`tls.mode: generated`, kept across upgrades), or one cert-manager `Certificate` per ordinal (`tls.mode: certManager`) |
 | Secret `<release>-admin` | with `admin.enabled` only: the admin API's `drain.token` (the preStop's) and `operator.token`, generated once and kept across upgrades and uninstall |
 | PodDisruptionBudget | `maxUnavailable: 1` |
@@ -59,6 +59,16 @@ returns to it; the restarted pod becomes ready once its own view has been
 stable that long. The
 readiness probe is deliberately fast (`periodSeconds: 2`,
 `failureThreshold: 1`) so a draining pod leaves the client Service at once.
+
+The liveness probe on `/healthz` (`periodSeconds: 10`, `timeoutSeconds: 2`,
+`failureThreshold: 3`) restarts a pod about 30 s after the broker says it
+cannot recover without a restart: its consensus loop stopped on an error, or
+its own or its replica journal cannot be rewritten because what the rewrite
+reads is damaged. A full or failing disk does not fail it; the pod stays up,
+refusing QoS 1 and 2 publishes, until the disk works. A pod restarted over a
+damaged journal refuses to start and goes into `CrashLoopBackOff`, its sessions
+served from their replicas on the other pods; its volume needs the damaged files
+restored or cleared. The startup probe reads `/healthz` too.
 
 Kubernetes runs the preStop hook before SIGTERM: `hoardmq drain -wait`
 (through the admin API when `admin.enabled`)
@@ -205,9 +215,13 @@ the drain, set `cluster.drain.onSignal: true` in the configuration document
 so SIGTERM drains before exiting; a second signal exits at once.
 
 The observability listener binds all interfaces inside the pod so the
-kubelet's probes reach it; `/metrics` and `/drain` are on the same port.
-Restrict it with a NetworkPolicy if pods in other namespaces must not reach
-it, or enable the admin API, which closes that `/drain`.
+kubelet's probes and a Prometheus scrape reach it. Its `/drain` answers only
+loopback callers, which the preStop is, and refuses any other with 403.
+Anything sharing the pod's network namespace is a loopback caller: another
+container in the pod, `kubectl port-forward`, and a sidecar proxy that
+forwards inbound connections to the broker from a loopback address, which
+makes every caller look local. Where that matters, enable the admin API: its
+drain needs the preStop's token, and it closes the listener's `/drain`.
 
 ## The admin API
 
@@ -220,7 +234,7 @@ chart generates the Secret `<release>-admin` holding two tokens, mounted at
 - `drain.token`, scoped `cluster:drain` and `cluster:read`: the preStop runs
   `hoardmq drain -admin 127.0.0.1:<admin.port> -token-file
   /etc/hoardmq/admin/drain.token -wait`, because the admin API closes the
-  observability listener's unauthenticated `/drain`;
+  observability listener's `/drain`;
 - `operator.token`, every scope, for people:
 
 ```sh

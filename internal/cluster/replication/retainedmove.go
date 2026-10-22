@@ -368,13 +368,7 @@ func (r *Replicator) writeKeptRetainedLocked() {
 		byShard[strconv.Itoa(s)] = n
 	}
 	data, _ := json.Marshal(byShard)
-	path := filepath.Join(r.o.ReplicaDir, keptRetainedFile)
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		r.log.Warn("kept retained notes not written", "err", err)
-		return
-	}
-	if err := os.Rename(tmp, path); err != nil {
+	if err := writeDurably(filepath.Join(r.o.ReplicaDir, keptRetainedFile), data); err != nil {
 		r.log.Warn("kept retained notes not written", "err", err)
 	}
 }

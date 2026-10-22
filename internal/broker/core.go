@@ -100,8 +100,9 @@ func (k core) Connect(c *conn.Conn, p *packet.Connect) conn.ConnectResult {
 	if res.Empty.Reason != "" && !out.SessionPresent && !p.CleanStart && out.Reason == packet.Success {
 		k.leases.NoteServedEmpty(ns, c.ClientID(), res.Empty)
 	}
-	if out.Reason == packet.ImplementationSpecificError {
-		// The manager refused after installing the session and left it as a
+	if out.Reason == packet.ImplementationSpecificError || out.Reason == packet.NotAuthorized {
+		// The manager refused after installing the session, or refused a
+		// session this CONNECT's takeover imported, and left it as a
 		// disconnect would; no Disconnect follows a refused CONNECT.
 		k.leftOffline(c)
 	}

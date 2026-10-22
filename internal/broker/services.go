@@ -3,6 +3,7 @@ package broker
 import (
 	"time"
 
+	"github.com/happydave/hoardmq/ext"
 	"github.com/happydave/hoardmq/internal/message"
 	"github.com/happydave/hoardmq/internal/module"
 	"github.com/happydave/hoardmq/internal/packet"
@@ -57,6 +58,40 @@ func (v services) Ready() bool {
 func (v services) Serving() (bool, string) { return v.s.Serving() }
 
 func (v services) Drain() { v.s.Drain() }
+
+// Live is the liveness signal (Server.Liveness).
+func (v services) Live() (bool, string) { return v.s.Liveness() }
+
+// Liveness reports whether the node can still recover without a restart, and
+// when not, why: its consensus loop stopped on an error, or its own or its
+// replica journal cannot be rewritten over damage.
+func (s *Server) Liveness() (bool, string) {
+	var consensusErr, journalErr, replicaErr error
+	if s.consensus != nil {
+		consensusErr = s.consensus.Failed()
+	}
+	if j, ok := s.store.(ext.RecoverabilityProvider); ok {
+		journalErr = j.Unrecoverable()
+	}
+	if s.replica != nil {
+		replicaErr = s.replica.Unrecoverable()
+	}
+	return liveness(consensusErr, journalErr, replicaErr)
+}
+
+// liveness decides the liveness signal from its three causes, the first in
+// this order naming the reason.
+func liveness(consensusErr, journalErr, replicaErr error) (bool, string) {
+	switch {
+	case consensusErr != nil:
+		return false, "consensus-stopped: " + consensusErr.Error()
+	case journalErr != nil:
+		return false, "journal-unrecoverable: " + journalErr.Error()
+	case replicaErr != nil:
+		return false, "replica-journal-unrecoverable: " + replicaErr.Error()
+	}
+	return true, ""
+}
 
 // Records is the replicated records store, nil until the core is open.
 func (v services) Records() module.RecordStore {

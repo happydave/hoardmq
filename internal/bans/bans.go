@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -25,10 +26,33 @@ const (
 	CIDR          = "cidr"
 	ClientIDRegex = "clientid-regex"
 	UsernameRegex = "username-regex"
+	// ClientIDUsername bans one principal's use of one client identifier;
+	// its value is PairValue's, and it is matched once the credentials are
+	// authenticated (BannedPair), not with the others.
+	ClientIDUsername = "clientid-username"
 )
 
 // Kinds lists every kind, in the order a CONNECT is matched against them.
-var Kinds = []string{ClientID, Username, Address, CIDR, ClientIDRegex, UsernameRegex}
+var Kinds = []string{ClientID, Username, Address, CIDR, ClientIDRegex, UsernameRegex, ClientIDUsername}
+
+// PairValue is a clientid-username ban's value: the username escaped as a
+// URL path segment (so it holds no "/"), "/", then the client identifier.
+// The empty username is the anonymous principal.
+func PairValue(username, clientID string) string { return url.PathEscape(username) + "/" + clientID }
+
+// SplitPair reads a clientid-username value back; ok is false when it has no
+// "/", no client identifier, or a username that does not unescape.
+func SplitPair(value string) (username, clientID string, ok bool) {
+	esc, clientID, found := strings.Cut(value, "/")
+	if !found || clientID == "" {
+		return "", "", false
+	}
+	username, err := url.PathUnescape(esc)
+	if err != nil {
+		return "", "", false
+	}
+	return username, clientID, true
+}
 
 // Sources.
 const (
@@ -98,6 +122,10 @@ func CheckBan(key string, e Entry) error {
 		if c := p.Masked().String(); c != value {
 			return fmt.Errorf("write the prefix as %s", c)
 		}
+	case ClientIDUsername:
+		if _, _, ok := SplitPair(value); !ok {
+			return errors.New("a clientid-username ban's value is the username, URL path-escaped, then /, then the client identifier")
+		}
 	case ClientIDRegex, UsernameRegex:
 		if _, err := compile(value); err != nil {
 			return fmt.Errorf("the regular expression does not compile: %v", err)
@@ -157,7 +185,7 @@ func Build(items []Item) *Index {
 		ix.size++
 		kind, value, _ := SplitKey(it.Key)
 		switch kind {
-		case ClientID, Username, Address:
+		case ClientID, Username, Address, ClientIDUsername:
 			ix.exact[it.Key] = it.Entry
 		case CIDR:
 			p, _ := netip.ParsePrefix(value)
@@ -228,6 +256,19 @@ func (ix *Index) Banned(clientID, username string, hasUsername bool, addr netip.
 				return Match{Key: b.key, Kind: UsernameRegex, Entry: b.entry}, true
 			}
 		}
+	}
+	return Match{}, false
+}
+
+// BannedPair is the decision on an authenticated CONNECT: a live
+// clientid-username ban of this principal's use of this client identifier.
+func (ix *Index) BannedPair(clientID, principal string, now time.Time) (Match, bool) {
+	if ix == nil {
+		return Match{}, false
+	}
+	k := Key(ClientIDUsername, PairValue(principal, clientID))
+	if e, ok := ix.exact[k]; ok && Live(e, now) {
+		return Match{Key: k, Kind: ClientIDUsername, Entry: e}, true
 	}
 	return Match{}, false
 }

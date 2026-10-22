@@ -195,6 +195,9 @@ type Hooks struct {
 // Auth holds the authentication defaults that are not a module's own.
 type Auth struct {
 	Anonymous bool `json:"anonymous"`
+	// SessionBinding is "principal", refusing a CONNECT whose principal
+	// differs from its client identifier's existing session's, or "off".
+	SessionBinding string `json:"sessionBinding"`
 	// DecisionTTLSeconds bounds how long an authenticator's allow is held
 	// before it is made again without the client.
 	DecisionTTLSeconds int `json:"decisionTtlSeconds"`
@@ -394,6 +397,9 @@ type Limits struct {
 	ConnectTimeout    int    `json:"connectTimeout"`
 	QueueDrop         string `json:"queueDrop"`
 	MaxSessionExpiry  int64  `json:"maxSessionExpiry"`
+	// MaxTopicAliasBytes bounds the topic bytes one connection's inbound
+	// topic aliases hold; 0 is unlimited.
+	MaxTopicAliasBytes int `json:"maxTopicAliasBytes"`
 	// ConnectRate and ConnectBurst are the node's connect-rate limit across
 	// every listener, as Listener's are for one.
 	ConnectRate  int `json:"connectRate"`
@@ -543,8 +549,8 @@ func Default() Document {
 			Replication: Replication{AckTimeoutMs: 2000},
 			Drain:       Drain{RatePerSecond: 100, TimeoutMs: 30000, ConfirmTimeoutMs: 30000},
 			Readiness:   Readiness{StableMs: 5000}},
-		Limits:        Limits{MaxPacketSize: 1048576, ReceiveMaximum: 1024, MaxQueuedMessages: 1000, ConnectTimeout: 10, QueueDrop: "oldest"},
-		Auth:          Auth{DecisionTTLSeconds: 3600, Argon2MemoryBytes: 256 << 20, Cache: AuthCache{TTLSeconds: 60, MaxEntries: 100000}},
+		Limits:        Limits{MaxPacketSize: 1048576, ReceiveMaximum: 1024, MaxQueuedMessages: 1000, ConnectTimeout: 10, QueueDrop: "oldest", MaxTopicAliasBytes: 1 << 20},
+		Auth:          Auth{SessionBinding: "principal", DecisionTTLSeconds: 3600, Argon2MemoryBytes: 256 << 20, Cache: AuthCache{TTLSeconds: 60, MaxEntries: 100000}},
 		Log:           Log{Level: "info", Format: "text"},
 		Hooks:         Hooks{Fallback: "continue"},
 		Overload:      Overload{QueuedMessages: 1000000, ReplicationLag: 400000},

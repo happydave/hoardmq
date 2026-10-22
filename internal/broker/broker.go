@@ -149,6 +149,7 @@ func NewWithHooks(cfg config.Document, log *slog.Logger, seams Hooks) (*Server, 
 		Capabilities:              cfg.MQTT.Capabilities(),
 		MaxPacketSize:             uint32(cfg.Limits.MaxPacketSize),
 		ReceiveMaximum:            uint16(cfg.Limits.ReceiveMaximum),
+		MaxTopicAliasBytes:        cfg.Limits.MaxTopicAliasBytes,
 		MaxKeepAlive:              uint16(cfg.Limits.MaxKeepAlive),
 		ConnectTimeout:            time.Duration(cfg.Limits.ConnectTimeout) * time.Second,
 		Anonymous:                 cfg.Auth.Anonymous,
@@ -169,6 +170,7 @@ func NewWithHooks(cfg config.Document, log *slog.Logger, seams Hooks) (*Server, 
 	s.policy = newPolicy(s, seams)
 	s.opts.ConnectGate = s.admit
 	s.opts.Banned = s.policy.Banned
+	s.opts.BannedPrincipal = s.policy.BannedPrincipal
 	s.opts.ClientLimits = s.policy.ClientLimits
 	s.opts.OnEnded = s.policy.flap.ended
 	s.opts.OnWritable = func(c *conn.Conn) {
@@ -597,6 +599,7 @@ func (s *Server) openStore() error {
 		MaxQueued:        s.config().Limits.MaxQueuedMessages,
 		DropNewest:       s.config().Limits.QueueDrop == "newest",
 		MaxSessionExpiry: uint32(s.config().Limits.MaxSessionExpiry),
+		BindPrincipal:    s.config().Auth.SessionBinding != "off",
 		Shards:           s.config().Node.SessionShards,
 		StoreAdmission:   s.config().Node.StoreAdmission,
 		Authorizers:      s.opts.Authorizers,

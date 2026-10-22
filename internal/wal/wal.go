@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -32,6 +33,11 @@ const (
 
 var castagnoli = crc32.MakeTable(crc32.Castagnoli)
 
+// maxRecordBytes bounds a record's payload: Append refuses a larger one, so a
+// larger length on disk is damage. A message at MQTT's packet limit is about
+// 342 MiB as base64 in JSON.
+var maxRecordBytes int64 = 1 << 30
+
 // Options configure a log.
 type Options struct {
 	// SegmentBytes is the size at which the active segment rolls.
@@ -39,6 +45,9 @@ type Options struct {
 	// Sync is the durability call; nil means (*os.File).Sync. Tests inject a
 	// barrier or a counter.
 	Sync func(*os.File) error
+	// Write, when set, is every write to a segment or checkpoint file in place
+	// of (*os.File).Write. Tests inject a disk that fills.
+	Write func(f *os.File, p []byte) (int, error)
 	// Logger receives recovery notes.
 	Logger *slog.Logger
 	// IgnoreChecksum is the simulation harness's injected defect: a record
@@ -47,17 +56,23 @@ type Options struct {
 	IgnoreChecksum bool
 }
 
-// CorruptError reports a record whose checksum failed. The node must not
-// start over it.
+// CorruptError reports a record whose checksum failed or whose length is
+// damaged. The node must not start over it.
 type CorruptError struct {
 	Log     string
 	Segment string
 	Offset  int64
 	Index   uint64
+	// Reason is what is wrong with the record, "" for a checksum mismatch.
+	Reason string
 }
 
 func (e *CorruptError) Error() string {
-	return fmt.Sprintf("wal %s: checksum mismatch in %s at offset %d (record %d)", e.Log, e.Segment, e.Offset, e.Index)
+	what := e.Reason
+	if what == "" {
+		what = "checksum mismatch"
+	}
+	return fmt.Sprintf("wal %s: %s in %s at offset %d (record %d)", e.Log, what, e.Segment, e.Offset, e.Index)
 }
 
 // Record is one entry read back from the log.
@@ -73,6 +88,10 @@ type segment struct {
 	last  uint64 // 0 while unknown
 	size  int64
 }
+
+// empty reports whether the segment holds no record: its last index is 0 when
+// it was started in this process and first-1 when Open read it.
+func (s *segment) empty() bool { return s.last < s.first }
 
 // Log is one named log.
 type Log struct {
@@ -94,6 +113,14 @@ type Log struct {
 	// was already synced and closed by roll.
 	rollMu sync.RWMutex
 	gen    uint64
+	// What Open repaired: torn tails truncated, and segments removed that a
+	// crash left before their header reached the disk.
+	tornTails, removedSegments int
+	// writerFailed is set when a write through w fails: the writer keeps the
+	// error, so nothing more reaches the active segment until a new segment
+	// gets a new writer. writeFailures counts every such failure.
+	writerFailed  bool
+	writeFailures atomic.Int64
 	// syncMu is held across every sync of the active file. Linux reports a
 	// write-back error to one fsync of a file, so two that overlap can see one
 	// fail and the other succeed over the pages the failure dropped (WI 1812).
@@ -117,11 +144,13 @@ func Open(dir, name string, opts Options) (*Log, error) {
 	if err := os.MkdirAll(l.dir, 0o750); err != nil {
 		return nil, fmt.Errorf("wal %s: %w", name, err)
 	}
-	if err := l.scan(); err != nil {
+	restart, err := l.scan()
+	if err != nil {
 		return nil, err
 	}
 	if len(l.segments) == 0 {
-		if err := l.roll(1); err != nil {
+		l.last = restart - 1
+		if err := l.roll(restart); err != nil {
 			return nil, err
 		}
 		return l, nil
@@ -133,11 +162,12 @@ func Open(dir, name string, opts Options) (*Log, error) {
 }
 
 // scan lists segments, validates headers, and verifies every record of every
-// segment, repairing a torn tail on the last one.
-func (l *Log) scan() error {
+// segment, repairing a torn tail on the last one. It returns the index a log
+// left with no segment starts at.
+func (l *Log) scan() (uint64, error) {
 	entries, err := os.ReadDir(l.dir)
 	if err != nil {
-		return fmt.Errorf("wal %s: %w", l.name, err)
+		return 0, fmt.Errorf("wal %s: %w", l.name, err)
 	}
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), segmentExt) {
@@ -145,16 +175,28 @@ func (l *Log) scan() error {
 		}
 		first, err := strconv.ParseUint(strings.TrimSuffix(e.Name(), segmentExt), 10, 64)
 		if err != nil {
-			return fmt.Errorf("wal %s: unexpected file %s", l.name, e.Name())
+			return 0, fmt.Errorf("wal %s: unexpected file %s", l.name, e.Name())
 		}
 		l.segments = append(l.segments, &segment{path: filepath.Join(l.dir, e.Name()), first: first})
 	}
 	sort.Slice(l.segments, func(i, j int) bool { return l.segments[i].first < l.segments[j].first })
+	restart := uint64(1)
+	if n := len(l.segments); n > 0 {
+		s := l.segments[n-1]
+		removed, err := l.removeTornSegment(s)
+		if err != nil {
+			return 0, err
+		}
+		if removed {
+			l.segments = l.segments[:n-1]
+			restart = s.first
+		}
+	}
 	for i, s := range l.segments {
 		isLast := i == len(l.segments)-1
 		last, size, err := l.verify(s, isLast)
 		if err != nil {
-			return err
+			return 0, err
 		}
 		s.last, s.size = last, size
 		if last != 0 {
@@ -163,7 +205,66 @@ func (l *Log) scan() error {
 			l.last = s.first - 1
 		}
 	}
-	return nil
+	return restart, nil
+}
+
+// tornSegment reports whether a segment of size bytes, whose first bytes are
+// head, is one a crash left while creating it: shorter than its header, or a
+// header of zeros with nothing after it. Only the last segment can be one.
+func tornSegment(head []byte, size int64) bool {
+	if size > headerSize {
+		return false
+	}
+	if size < headerSize {
+		return true
+	}
+	for _, b := range head {
+		if b != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// removeTornSegment removes the last segment if a crash left it before its
+// header reached the disk. It holds no record.
+func (l *Log) removeTornSegment(s *segment) (bool, error) {
+	f, err := os.Open(s.path)
+	if err != nil {
+		return false, fmt.Errorf("wal %s: %w", l.name, err)
+	}
+	head := make([]byte, headerSize)
+	n, err := io.ReadFull(f, head)
+	_ = f.Close()
+	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+		return false, fmt.Errorf("wal %s: %w", l.name, err)
+	}
+	size := int64(n)
+	if n == headerSize {
+		info, err := os.Stat(s.path)
+		if err != nil {
+			return false, fmt.Errorf("wal %s: %w", l.name, err)
+		}
+		size = info.Size()
+	}
+	if !tornSegment(head[:n], size) {
+		return false, nil
+	}
+	l.log.Warn("removing a segment cut short before its header", "segment", filepath.Base(s.path), "bytes", size)
+	if err := os.Remove(s.path); err != nil {
+		return false, fmt.Errorf("wal %s: %w", l.name, err)
+	}
+	if err := syncDir(l.dir); err != nil {
+		return false, fmt.Errorf("wal %s: %w", l.name, err)
+	}
+	l.removedSegments++
+	return true, nil
+}
+
+// OpenRepairs is what Open repaired: torn tails truncated, and segments a
+// crash left before their header reached the disk, removed.
+func (l *Log) OpenRepairs() (tornTails, removedSegments int) {
+	return l.tornTails, l.removedSegments
 }
 
 // verify walks a segment, returning its last index and byte size. On the
@@ -180,6 +281,10 @@ func (l *Log) verify(s *segment, isLast bool) (uint64, int64, error) {
 	}
 	if first != s.first {
 		return 0, 0, fmt.Errorf("wal %s: segment %s header says first index %d", l.name, filepath.Base(s.path), first)
+	}
+	info, err := f.Stat()
+	if err != nil {
+		return 0, 0, fmt.Errorf("wal %s: %w", l.name, err)
 	}
 	r := bufio.NewReader(f)
 	offset := int64(headerSize)
@@ -199,6 +304,26 @@ func (l *Log) verify(s *segment, isLast bool) (uint64, int64, error) {
 		length := binary.BigEndian.Uint32(hdr[0:4])
 		typ := hdr[4]
 		want := binary.BigEndian.Uint32(hdr[5:9])
+		left := info.Size() - offset - recordHeader
+		if int64(length) > maxRecordBytes {
+			return 0, 0, &CorruptError{Log: l.name, Segment: filepath.Base(s.path), Offset: offset, Index: index + 1,
+				Reason: fmt.Sprintf("record length %d over the maximum", length)}
+		}
+		if int64(length) > left {
+			// A whole record whose length alone is damaged is not a torn
+			// write: its checksum still matches the bytes it was written with.
+			if isLast && !l.opts.IgnoreChecksum {
+				rest := make([]byte, max(left, 0))
+				if _, err := io.ReadFull(r, rest); err != nil {
+					return 0, 0, fmt.Errorf("wal %s: %w", l.name, err)
+				}
+				if lengthDamaged(typ, want, rest) {
+					return 0, 0, &CorruptError{Log: l.name, Segment: filepath.Base(s.path), Offset: offset, Index: index + 1,
+						Reason: fmt.Sprintf("record length %d damaged (past the end of the segment)", length)}
+				}
+			}
+			return l.torn(f, s, isLast, offset, index+1, "record payload cut short")
+		}
 		payload := make([]byte, length)
 		if _, err := io.ReadFull(r, payload); err != nil {
 			if err == io.EOF || err == io.ErrUnexpectedEOF {
@@ -226,7 +351,39 @@ func (l *Log) torn(f *os.File, s *segment, isLast bool, offset int64, index uint
 	if err := f.Sync(); err != nil {
 		return 0, 0, err
 	}
+	l.tornTails++
 	return index - 1, offset, nil
+}
+
+// lengthDamaged reports whether a record whose length reaches past the end of
+// its segment was nonetheless written whole: its checksum, over its type and
+// payload, matches a prefix of rest (the bytes after its header), and that
+// prefix ends at the end of rest or where a sound record starts. A record cut
+// short by a crash matches only by chance.
+func lengthDamaged(typ byte, want uint32, rest []byte) bool {
+	c := ^crc32.Update(0, castagnoli, []byte{typ})
+	for n := 0; ; n++ {
+		if ^c == want && (n == len(rest) || soundRecord(rest[n:])) {
+			return true
+		}
+		if n == len(rest) {
+			return false
+		}
+		c = castagnoli[byte(c)^rest[n]] ^ (c >> 8)
+	}
+}
+
+// soundRecord reports whether b starts with a whole record whose checksum
+// matches.
+func soundRecord(b []byte) bool {
+	if len(b) < recordHeader {
+		return false
+	}
+	length := int64(binary.BigEndian.Uint32(b[0:4]))
+	if length > maxRecordBytes || length > int64(len(b)-recordHeader) {
+		return false
+	}
+	return crc(b[4], b[recordHeader:recordHeader+length]) == binary.BigEndian.Uint32(b[5:9])
 }
 
 func readHeader(f *os.File, name, seg string) (uint64, error) {
@@ -243,14 +400,30 @@ func readHeader(f *os.File, name, seg string) (uint64, error) {
 	return binary.BigEndian.Uint64(h[16:24]), nil
 }
 
-func writeHeader(f *os.File, first uint64) error {
+func writeHeader(w io.Writer, first uint64) error {
 	var h [headerSize]byte
 	copy(h[:8], magic)
 	binary.BigEndian.PutUint16(h[8:10], formatVersion)
 	binary.BigEndian.PutUint64(h[16:24], first)
 	binary.BigEndian.PutUint64(h[24:32], uint64(time.Now().Unix()))
-	_, err := f.Write(h[:])
+	_, err := w.Write(h[:])
 	return err
+}
+
+// fileWriter writes to f through Options.Write.
+type fileWriter struct {
+	f     *os.File
+	write func(*os.File, []byte) (int, error)
+}
+
+func (w fileWriter) Write(p []byte) (int, error) { return w.write(w.f, p) }
+
+// writer is what writes to f: f itself, or Options.Write when set.
+func (l *Log) writer(f *os.File) io.Writer {
+	if l.opts.Write == nil {
+		return f
+	}
+	return fileWriter{f: f, write: l.opts.Write}
 }
 
 func crc(typ byte, payload []byte) uint32 {
@@ -277,13 +450,38 @@ func (l *Log) StartSegment() error {
 	if l.closed {
 		return errors.New("wal: closed")
 	}
-	if l.segments[len(l.segments)-1].last == 0 {
+	if l.segments[len(l.segments)-1].empty() {
 		return nil
 	}
-	if err := l.w.Flush(); err != nil {
-		return err
+	// A writer that failed keeps its error; what it holds is in the caller's
+	// checkpoint, so it is left behind with its segment.
+	if !l.writerFailed {
+		_ = l.wrote(l.w.Flush())
 	}
 	return l.switchTo(l.last + 1)
+}
+
+// ContinueAfter makes the next record's index index+1 when the log ends below
+// it, by starting a new segment there; the records between are in the
+// caller's checkpoint at index. It does nothing when the log already reaches
+// index.
+func (l *Log) ContinueAfter(index uint64) error {
+	if l.closed {
+		return errors.New("wal: closed")
+	}
+	if index <= l.last {
+		return nil
+	}
+	if !l.writerFailed {
+		if err := l.w.Flush(); err != nil {
+			return l.wrote(err)
+		}
+	}
+	if err := l.switchTo(index + 1); err != nil {
+		return err
+	}
+	l.last = index
+	return nil
 }
 
 // switchTo makes a new segment whose first index is first the active one. The
@@ -300,7 +498,7 @@ func (l *Log) switchTo(first uint64) error {
 		_ = os.Remove(path)
 		return err
 	}
-	if err := writeHeader(f, first); err != nil {
+	if err := writeHeader(l.writer(f), first); err != nil {
 		return abandon(err)
 	}
 	if err := l.opts.Sync(f); err != nil {
@@ -319,7 +517,8 @@ func (l *Log) switchTo(first uint64) error {
 	s := &segment{path: path, first: first, size: headerSize}
 	l.segments = append(l.segments, s)
 	l.active = f
-	l.w = bufio.NewWriterSize(f, 64<<10)
+	l.w = bufio.NewWriterSize(l.writer(f), 64<<10)
+	l.writerFailed = false
 	l.activeSz = headerSize
 	return nil
 }
@@ -331,7 +530,7 @@ func (l *Log) openActive() error {
 		return fmt.Errorf("wal %s: %w", l.name, err)
 	}
 	l.active = f
-	l.w = bufio.NewWriterSize(f, 64<<10)
+	l.w = bufio.NewWriterSize(l.writer(f), 64<<10)
 	l.activeSz = s.size
 	return nil
 }
@@ -351,6 +550,9 @@ func (l *Log) Append(typ byte, payload []byte) (uint64, error) {
 	if l.closed {
 		return 0, errors.New("wal: closed")
 	}
+	if int64(len(payload)) > maxRecordBytes {
+		return 0, fmt.Errorf("wal %s: a record of %d bytes is over the maximum of %d", l.name, len(payload), maxRecordBytes)
+	}
 	if l.activeSz >= l.opts.SegmentBytes {
 		if err := l.roll(l.last + 1); err != nil {
 			return 0, err
@@ -361,10 +563,10 @@ func (l *Log) Append(typ byte, payload []byte) (uint64, error) {
 	hdr[4] = typ
 	binary.BigEndian.PutUint32(hdr[5:9], crc(typ, payload))
 	if _, err := l.w.Write(hdr[:]); err != nil {
-		return 0, err
+		return 0, l.wrote(err)
 	}
 	if _, err := l.w.Write(payload); err != nil {
-		return 0, err
+		return 0, l.wrote(err)
 	}
 	l.last++
 	l.activeSz += int64(recordHeader) + int64(len(payload))
@@ -392,7 +594,7 @@ func (l *Log) Flush() (*os.File, uint64, error) {
 		return nil, 0, errors.New("wal: closed")
 	}
 	if err := l.w.Flush(); err != nil {
-		return nil, 0, err
+		return nil, 0, l.wrote(err)
 	}
 	return l.active, l.gen, nil
 }
@@ -415,12 +617,28 @@ func (l *Log) Fsync(f *os.File, gen uint64) error {
 
 func (l *Log) flushAndSync() error {
 	if err := l.w.Flush(); err != nil {
-		return err
+		return l.wrote(err)
 	}
 	l.syncMu.Lock()
 	defer l.syncMu.Unlock()
 	return l.opts.Sync(l.active)
 }
+
+// wrote records a failed write through the segment writer and returns err.
+func (l *Log) wrote(err error) error {
+	if err != nil {
+		l.writerFailed = true
+		l.writeFailures.Add(1)
+	}
+	return err
+}
+
+// WriterFailed reports whether a write to the active segment has failed since
+// it became active. The caller holds whatever lock serializes Append.
+func (l *Log) WriterFailed() bool { return l.writerFailed }
+
+// WriteFailures counts the writes to segment files that failed, lock-free.
+func (l *Log) WriteFailures() int64 { return l.writeFailures.Load() }
 
 // LastIndex is the index of the newest record, 0 when empty.
 func (l *Log) LastIndex() uint64 { return l.last }
@@ -436,9 +654,9 @@ func (l *Log) FirstIndex() uint64 {
 // Iterate calls fn for every record with index >= from, in order. Records
 // not yet synced are visible after Flush; Iterate flushes first.
 func (l *Log) Iterate(from uint64, fn func(Record) error) error {
-	if l.w != nil {
+	if l.w != nil && !l.writerFailed {
 		if err := l.w.Flush(); err != nil {
-			return err
+			return l.wrote(err)
 		}
 	}
 	for _, s := range l.segments {
@@ -461,6 +679,10 @@ func (l *Log) iterateSegment(s *segment, from uint64, fn func(Record) error) err
 	if _, err := readHeader(f, l.name, filepath.Base(s.path)); err != nil {
 		return err
 	}
+	info, err := f.Stat()
+	if err != nil {
+		return err
+	}
 	r := bufio.NewReader(f)
 	index := s.first - 1
 	offset := int64(headerSize)
@@ -473,6 +695,13 @@ func (l *Log) iterateSegment(s *segment, from uint64, fn func(Record) error) err
 			return err
 		}
 		length := binary.BigEndian.Uint32(hdr[0:4])
+		if int64(length) > maxRecordBytes {
+			return &CorruptError{Log: l.name, Segment: filepath.Base(s.path), Offset: offset, Index: index + 1,
+				Reason: fmt.Sprintf("record length %d over the maximum", length)}
+		}
+		if int64(length) > info.Size()-offset-recordHeader {
+			return nil // a record not yet whole in the file
+		}
 		payload := make([]byte, length)
 		if _, err := io.ReadFull(r, payload); err != nil {
 			return nil
@@ -497,6 +726,9 @@ func (l *Log) Truncate(before uint64) error {
 	for i, s := range l.segments {
 		if i < len(l.segments)-1 && s.last != 0 && s.last < before {
 			if err := os.Remove(s.path); err != nil && !os.IsNotExist(err) {
+				// keep shares the list's array: what was moved down, then
+				// this segment and every one after it.
+				l.segments = append(keep, l.segments[i:]...)
 				return err
 			}
 			continue
@@ -540,11 +772,12 @@ func (l *Log) WriteCheckpoint(index uint64, payload []byte) error {
 	}
 	var sum [4]byte
 	binary.BigEndian.PutUint32(sum[:], crc32.Checksum(payload, castagnoli))
-	if _, err := f.Write(sum[:]); err != nil {
+	w := l.writer(f)
+	if _, err := w.Write(sum[:]); err != nil {
 		_ = f.Close()
 		return err
 	}
-	if _, err := f.Write(payload); err != nil {
+	if _, err := w.Write(payload); err != nil {
 		_ = f.Close()
 		return err
 	}
@@ -572,9 +805,32 @@ func (l *Log) WriteCheckpoint(index uint64, payload []byte) error {
 
 // LatestCheckpoint returns the newest checkpoint whose checksum verifies.
 func (l *Log) LatestCheckpoint() (uint64, []byte, bool) {
-	idx, payload, name, _ := l.latestCheckpoint()
+	idx, payload, name, skipped := l.latestCheckpoint()
+	l.logSkipped(skipped)
 	return idx, payload, name != ""
 }
+
+// CheckpointIndex is the index of the newest checkpoint whose checksum
+// verifies, read without logging the files passed over.
+func (l *Log) CheckpointIndex() (uint64, bool) {
+	idx, _, name, _ := l.latestCheckpoint()
+	return idx, name != ""
+}
+
+func (l *Log) logSkipped(skipped []SkippedCheckpoint) {
+	for _, s := range skipped {
+		if s.Reason == skippedUnreadable {
+			l.log.Warn("skipping unreadable checkpoint", "file", s.File)
+		} else {
+			l.log.Warn("skipping checkpoint with a bad checksum", "file", s.File)
+		}
+	}
+}
+
+const (
+	skippedUnreadable  = "unreadable"
+	skippedBadChecksum = "bad checksum"
+)
 
 // SkippedCheckpoint is a checkpoint file passed over because it could not be
 // read or its checksum failed.
@@ -605,13 +861,11 @@ func (l *Log) latestCheckpoint() (uint64, []byte, string, []SkippedCheckpoint) {
 		}
 		data, err := os.ReadFile(filepath.Join(l.dir, name))
 		if err != nil || len(data) < 4 {
-			l.log.Warn("skipping unreadable checkpoint", "file", name)
-			skipped = append(skipped, SkippedCheckpoint{File: name, Reason: "unreadable"})
+			skipped = append(skipped, SkippedCheckpoint{File: name, Reason: skippedUnreadable})
 			continue
 		}
 		if crc32.Checksum(data[4:], castagnoli) != binary.BigEndian.Uint32(data[:4]) {
-			l.log.Warn("skipping checkpoint with a bad checksum", "file", name)
-			skipped = append(skipped, SkippedCheckpoint{File: name, Reason: "bad checksum"})
+			skipped = append(skipped, SkippedCheckpoint{File: name, Reason: skippedBadChecksum})
 			continue
 		}
 		return idx, data[4:], name, skipped
@@ -691,6 +945,7 @@ func (l *Log) spans() []span {
 // record from the one replay would start at to its last.
 func (l *Log) RecoveryCheckpoint() (uint64, []byte, bool, error) {
 	idx, payload, name, skipped := l.latestCheckpoint()
+	l.logSkipped(skipped)
 	ok := name != ""
 	from := uint64(1)
 	if ok {

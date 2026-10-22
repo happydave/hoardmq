@@ -154,6 +154,8 @@ func TestEachRuleHasAFailingFixture(t *testing.T) {
 		{"maxPacketSize high", `{"version":1,"node":{"dataDir":"d"},"limits":{"maxPacketSize":268435456}}`, "/limits/maxPacketSize", "at most"},
 		{"receiveMaximum high", `{"version":1,"node":{"dataDir":"d"},"limits":{"receiveMaximum":65536}}`, "/limits/receiveMaximum", "at most"},
 		{"maxQueued negative", `{"version":1,"node":{"dataDir":"d"},"limits":{"maxQueuedMessages":-1}}`, "/limits/maxQueuedMessages", "at least 0"},
+		{"maxTopicAliasBytes negative", `{"version":1,"node":{"dataDir":"d"},"limits":{"maxTopicAliasBytes":-1}}`, "/limits/maxTopicAliasBytes", "at least 0"},
+		{"sessionBinding", `{"version":1,"node":{"dataDir":"d"},"auth":{"sessionBinding":"username"}}`, "/auth/sessionBinding", "one of"},
 		{"integer not float", `{"version":1,"node":{"dataDir":"d"},"limits":{"receiveMaximum":1.5}}`, "/limits/receiveMaximum", "expected integer"},
 		{"module id", `{"version":1,"node":{"dataDir":"d"},"modules":{"Auth":{}}}`, "/modules/Auth", "must match"},
 		{"module not object", `{"version":1,"node":{"dataDir":"d"},"modules":{"auth.file":1}}`, "/modules/auth.file", "expected object"},
@@ -414,5 +416,37 @@ func TestSinkKafkaSchema(t *testing.T) {
 	}
 	if _, p := Parse([]byte(`{"version":1,"node":{"dataDir":"d"},"modules":{"hook.test":{"anything":[1,2]}}}`), nil); len(p) != 0 {
 		t.Errorf("another module's object: %v", p)
+	}
+}
+
+// The inbound topic-alias table's byte bound defaults to 1 MiB, accepts 0
+// (unlimited), and changes only with a restart.
+func TestMaxTopicAliasBytes(t *testing.T) {
+	if got := Default().Limits.MaxTopicAliasBytes; got != 1048576 {
+		t.Fatalf("default %d, want 1048576", got)
+	}
+	d, p := Parse([]byte(`{"version":1,"node":{"dataDir":"d"},"limits":{"maxTopicAliasBytes":0}}`), nil)
+	if len(p) != 0 || d.Limits.MaxTopicAliasBytes != 0 {
+		t.Fatalf("0: %v %d", p, d.Limits.MaxTopicAliasBytes)
+	}
+	next := Default()
+	next.Limits.MaxTopicAliasBytes = 4096
+	if _, restartOnly := Changes(Default(), next); len(restartOnly) != 1 || restartOnly[0] != "/limits/maxTopicAliasBytes" {
+		t.Fatalf("restart-only %v", restartOnly)
+	}
+}
+
+// A session is bound to its principal unless the document turns it off.
+func TestSessionBindingDefault(t *testing.T) {
+	if got := Default().Auth.SessionBinding; got != "principal" {
+		t.Fatalf("default %q", got)
+	}
+	d, p := Parse([]byte(`{"version":1,"node":{"dataDir":"d"},"auth":{"sessionBinding":"off"}}`), nil)
+	if len(p) != 0 || d.Auth.SessionBinding != "off" {
+		t.Fatalf("off: %v %q", p, d.Auth.SessionBinding)
+	}
+	d, p = Parse([]byte(`{"version":1,"node":{"dataDir":"d"}}`), nil)
+	if len(p) != 0 || d.Auth.SessionBinding != "principal" {
+		t.Fatalf("absent: %v %q", p, d.Auth.SessionBinding)
 	}
 }

@@ -331,7 +331,7 @@ func (s *Server) routes() []Route {
 		{Method: "GET", Path: "/bans", Scope: BansRead, Summary: "The ban list, by key (<kind>:<value>): what each ban matches, why, until when and who wrote it. The list is the cluster's: every node enforces the same.",
 			Query: pagingParams, Response: BanPage{}, Status: 200, Problems: banProblems, handle: s.listBans},
 		{Method: "POST", Path: "/bans", Scope: BansWrite, Action: "ban.create",
-			Summary: "Ban a client identifier, username, address or prefix, or a regular expression over identifiers or usernames, until expiresAt, for expiresInSeconds, or for good. A matching CONNECT is refused before its credentials are examined. 409 when the key exists.",
+			Summary: "Ban a client identifier, username, address or prefix, a regular expression over identifiers or usernames, or one principal's use of one client identifier (kind clientid-username, value the username URL path-escaped, /, then the identifier), until expiresAt, for expiresInSeconds, or for good. A matching CONNECT is refused before its credentials are examined, or for clientid-username once they are authenticated. 409 when the key exists.",
 			Body:    BanRequest{}, Response: Ban{}, Status: 201, Problems: banProblems, target: func(*http.Request) string { return "" },
 			handle: s.createBan},
 		{Method: "DELETE", Path: "/bans/{key}", Scope: BansWrite, Action: "ban.delete",

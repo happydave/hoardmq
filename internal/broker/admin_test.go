@@ -381,6 +381,74 @@ func TestObservabilityDrainWithoutAdmin(t *testing.T) {
 	}
 }
 
+// A caller that is not on the node's loopback cannot drain it through the
+// observability listener, which still serves it metrics: the chart binds that
+// listener on all interfaces for the probes and scrapes.
+func TestObservabilityDrainRefusesARemoteCaller(t *testing.T) {
+	ip := nonLoopbackIPv4(t)
+	f := start(t, func(d *config.Document) {
+		d.Observability.Address = "0.0.0.0:0"
+		d.Observability.AllowRemote = true
+		d.Modules["metrics.prometheus"] = json.RawMessage(`{}`)
+	})
+	_, port, err := net.SplitHostPort(f.srv.ObservabilityAddr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := "http://" + net.JoinHostPort(ip, port)
+	// No pooled connection outlives the test into the listener's shutdown.
+	client := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
+	resp, err := client.Get(base + "/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("GET /metrics from %s: %d", ip, resp.StatusCode)
+	}
+	for _, method := range []string{http.MethodPost, http.MethodGet} {
+		req, _ := http.NewRequest(method, base+"/drain", nil)
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusForbidden || !strings.Contains(string(body), "loopback") {
+			t.Errorf("%s /drain from %s: %d %q", method, ip, resp.StatusCode, body)
+		}
+	}
+	if f.srv.Draining() {
+		t.Fatal("a remote caller drained the node")
+	}
+}
+
+// nonLoopbackIPv4 returns an IPv4 address of an interface that is up and not
+// loopback, or skips the test when the host has none.
+func nonLoopbackIPv4(t *testing.T) string {
+	t.Helper()
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ifc := range ifaces {
+		if ifc.Flags&net.FlagUp == 0 || ifc.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, err := ifc.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, a := range addrs {
+			if n, ok := a.(*net.IPNet); ok && n.IP.To4() != nil && !n.IP.IsLoopback() {
+				return n.IP.String()
+			}
+		}
+	}
+	t.Skip("no non-loopback IPv4 address on this host")
+	return ""
+}
+
 // A taken admin port refuses the start with nothing created.
 func TestAdminBindIsAllOrNothing(t *testing.T) {
 	l, err := net.Listen("tcp", "127.0.0.1:0")

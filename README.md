@@ -58,7 +58,7 @@ end — or until a drain completes (see "Drain and readiness"), when it exits
 0, at once or, with `cluster.drain.holdExitMs`, on the stop signal or once
 that hold has passed. SIGHUP reloads the configuration file (see "Reloading the
 configuration"). `drain -address host:port [-wait] [-timeout d]` posts to a node's
-observability listener; with `-wait` it polls until the drain is complete or
+observability listener, which answers only a loopback caller; with `-wait` it polls until the drain is complete or
 the node has exited, which is what the Helm chart's preStop hook runs. Only a
 refused, reset or closed connection reads as the exit: a status request that
 times out or fails otherwise is printed, and the wait goes on until `-timeout`,
@@ -120,10 +120,11 @@ reports every problem in one run, as `PATH: /json/pointer: message`, sorted.
                "advertise": "broker1.example:1883" },
   "limits": { "maxPacketSize": 1048576, "receiveMaximum": 1024, "maxQueuedMessages": 1000,
               "maxKeepAlive": 0, "connectTimeout": 10, "connectRate": 0, "connectBurst": 0,
-              "clientMessageRate": 0, "clientMessageBurst": 0, "clientByteRate": 0, "clientByteBurst": 0 },
+              "clientMessageRate": 0, "clientMessageBurst": 0, "clientByteRate": 0, "clientByteBurst": 0,
+              "maxTopicAliasBytes": 1048576 },
   "overload": { "queuedMessages": 1000000, "replicationLag": 400000, "memoryBytes": 0 },
   "flapping": { "enabled": true, "windowSeconds": 60, "maxCount": 15, "banSeconds": 300 },
-  "auth": { "anonymous": false, "decisionTtlSeconds": 3600, "argon2MemoryBytes": 268435456,
+  "auth": { "anonymous": false, "sessionBinding": "principal", "decisionTtlSeconds": 3600, "argon2MemoryBytes": 268435456,
             "cache": { "ttlSeconds": 60, "maxEntries": 100000 } },
   "modules": { "auth.file": { "path": "users.json" }, "authz.file": { "path": "acl.json" } },
   "log": { "level": "info", "format": "text" },
@@ -222,6 +223,24 @@ open a development broker:
 ```
 
 with an `acl.json` of `{"rules":[{"topic":"#","allow":["publish","subscribe","unsubscribe"]}]}`.
+
+**A session belongs to the principal that made it.** The principal is the
+username authentication settled on: the authenticator's (a JWT's username
+claim, an enhanced authentication's user), else the CONNECT's username the
+authenticator verified, else, with no username, the verified certificate's
+common name; anonymous clients are one principal. While a client
+identifier's session exists, a CONNECT for it by another principal is
+refused with Not authorized (0x87; return code 5 at 3.1.1 and 3.1), whether
+it resumes the session or starts clean, and the session, its connection and
+its queue are left as they were (counted in
+`hoardmq_connect_refusals_total{reason="principal"}`). To give a client
+identifier to another principal, end its session through the admin API
+(`DELETE /clients/{id}/session`, `hoardmq clients invalidate`).
+`auth.sessionBinding: "off"` lets any principal resume or replace any
+session, as before. Across nodes, a refused CONNECT may still close the
+rightful client's connection, since its session is taken over before it can
+be compared; the client reconnects to its session, and nothing is delivered
+to the refused principal.
 
 `auth.file` checks username and password against a users file:
 
@@ -556,7 +575,12 @@ unacknowledged QoS 1 and 2 publishes; `limits.maxPacketSize` bounds inbound
 packets and is advertised. The client's Maximum Packet Size is honoured
 outbound: a publish that does not fit is dropped silently, any other packet
 is retried without its Reason String and User Properties. Topic aliases work
-in both directions. Every refusal carries a reason code at MQTT 5.0; at 3.1
+in both directions. A connection's inbound aliases may hold
+`limits.maxTopicAliasBytes` of topics (1 MiB by default, 0 unlimited); a
+PUBLISH whose alias would pass it closes the connection with Quota exceeded
+(0x97), counted in `hoardmq_topic_alias_refusals_total{listener}`. An alias
+grants nothing: a PUBLISH that uses one alone is authorized on its topic like
+any other. Every refusal carries a reason code at MQTT 5.0; at 3.1
 and 3.1.1, which have none, the connection is closed. When the server ends a
 connection it flushes the DISCONNECT, half-closes the socket and keeps
 reading for half a second, so a client that is still sending receives the
@@ -620,7 +644,10 @@ log, so a ban written through any node refuses on every node once applied
 there. An entry has a kind and a value: `clientid`, `username`, `address` (an
 IP address, written in its canonical form, `192.0.2.1`), `cidr` (a prefix,
 canonical: `10.0.0.0/8`), `clientid-regex` and `username-regex` (RE2 at most
-256 bytes, matched against the whole value). It may carry a reason and an
+256 bytes, matched against the whole value), and `clientid-username`, one
+principal's use of one client identifier (the username URL path-escaped, `/`,
+then the identifier: `alice/sensor-1`), which is matched once the credentials
+are authenticated rather than before. It may carry a reason and an
 expiry. A ban is checked as soon as the CONNECT is read, before the
 connect-rate limits and before any credential is examined, so a banned
 client costs no rate token and no key derivation: CONNACK 0x8A (Banned) at
@@ -636,15 +663,17 @@ entries, the limit of a collection in the consensus log.
 **Flapping.** A client whose established connections end abnormally on its
 side — the network closed or reset, the keep-alive expired, or it broke the
 protocol — `flapping.maxCount` times (default 15) within
-`flapping.windowSeconds` (default 60) is banned by client identifier for
-`flapping.banSeconds` (default 300), as an ordinary entry with the source
+`flapping.windowSeconds` (default 60) is banned for
+`flapping.banSeconds` (default 300) by a `clientid-username` entry, so the
+count and the ban are of that principal's use of that client identifier and
+never refuse another principal using it, as an ordinary entry with the source
 `flapping`, audited as `ban.create` by `flapping`. A client's DISCONNECT is
 not a flap, and neither is any end the broker chose (a takeover, a redirect,
 an administrative close, shutdown) nor any CONNECT refused before it was
 established, so a storm of the broker's own refusals cannot become a storm of
 bans. An existing ban, an operator's included, is left as it is. Each node
-tracks at most 100,000 identifiers, and writes at most one ban per
-identifier per ban time and 100 a second. `flapping.enabled: false` turns
+tracks at most 100,000 identifier and principal pairs, and writes at most one ban per
+pair per ban time and 100 a second. `flapping.enabled: false` turns
 the detector off. `hoardmq_connections_ended_total{how}` (`graceful`,
 `server`, `abnormal`) counts what the detector saw;
 `hoardmq_flapping_trips_total` and `hoardmq_flapping_bans_total{outcome}` what
@@ -936,12 +965,14 @@ overrides.
 ### Observability
 
 `observability.address` (empty by default) starts an HTTP listener serving
-`/metrics` in the Prometheus text format, `/healthz` (liveness, 200 while
-the process serves), `/readyz` (readiness: joined, caught up, unfenced, not
+`/metrics` in the Prometheus text format, `/healthz` (liveness: 503 naming
+the cause while the node cannot recover without a restart — see "Drain and
+readiness"), `/readyz` (readiness: joined, caught up, unfenced, not
 draining, topology stable — see "Drain and readiness"), `/servingz` (ready
 and able to acknowledge a QoS 1 or 2 publish; not a probe) and `/drain` (POST
-starts the graceful leave, GET reports it; closed with 403 once the admin API
-is configured, which then owns the drain). The host must be a loopback
+starts the graceful leave, GET reports it, to a caller on the node's loopback
+only, any other refused with 403; closed with 403 once the admin API is
+configured, which then owns the drain). The host must be a loopback
 address unless `observability.allowRemote` is true. Metrics are exported by the
 `metrics.prometheus` module, which replaces `metrics.internal` and reads the
 same counters: connections (total by listener, active, and closed by cause —
@@ -972,7 +1003,8 @@ revocation checks by method and status and unknown statuses by policy,
 enhanced-authentication exchanges by method and outcome, held decisions made
 again by outcome (`hoardmq_auth_rechecks_total`), password verifications derived
 and answered from the cache and the cache's size, CONNECTs refused by a
-connect-rate limit by listener and limit, LDAP decisions by outcome
+connect-rate limit by listener and limit, connections closed for their topic
+aliases' byte bound by listener, LDAP decisions by outcome
 (`hoardmq_auth_ldap_decisions_total`), unavailable directories by policy and
 directory connections by outcome, the cluster stress level by scope
 (`hoardmq_overload_level{scope}`, `node` or `cluster`) and its indicators
@@ -2337,7 +2369,7 @@ and replica fetches.
 ### Drain and readiness
 
 A drain is the node's graceful leave, started by the admin API's `POST
-/api/v1/cluster/drain`, the observability listener's `POST /drain` when the
+/api/v1/cluster/drain`, the observability listener's `POST /drain` from the node's loopback when the
 admin API is not configured, the `hoardmq drain` command or a Kubernetes
 preStop hook. It closes the client
 listeners (readiness turns false at once), disconnects connected clients —
@@ -2412,8 +2444,21 @@ record — has been unchanged for
 joining, or one lost and declared dead, therefore makes every node briefly not
 ready, which is what keeps traffic off a cluster still settling. The shard
 map is not part of it: a drain or a return moves only the map, and the other
-nodes stay ready. Liveness (`/healthz`) is
-the process only.
+nodes stay ready. A node whose consensus loop has stopped on an error (a failed
+write or fsync of the consensus log, a snapshot it could not install) is not
+ready either.
+
+Liveness (`/healthz`) fails, answering 503 with the cause, only while the node
+cannot recover without a restart: its consensus loop has stopped on an error
+(`consensus-stopped`), or its own or its replica journal cannot be rewritten
+after a failed write or fsync because what the rewrite reads is damaged — a
+checksum failure, records missing behind a checkpoint that fails, a checkpoint
+or record that does not decode (`journal-unrecoverable`,
+`replica-journal-unrecoverable`). A full or failing disk does not fail it: the
+node refuses QoS 1 and 2 publishes and rewrites the journal once the disk
+works. A restart over a damaged journal then refuses to start, naming the
+files, and the node's sessions are taken over from their replicas. The
+consensus log is not rewritten after a failure; the restart replays it.
 
 A ready node can still refuse QoS 1 and 2 publishes: while it lacks the
 routes of an owner that holds sessions — after restarting beside a peer it
@@ -2522,10 +2567,13 @@ read that session at; recovery replays the records after the first and skips
 a session's records up to its own, so each is applied once. The replica log's
 checkpoint is read under the lock its records are applied under, and is
 exact at one position. On start, a record cut short at the end of the last segment
-(a torn write) is discarded; a checksum failure anywhere stops the node with
-the segment and offset named, and so do records missing from where recovery
-starts (see "Durability and group commit"), so a damaged log is never silently
-read past.
+(a torn write) is discarded, and so is a last segment a crash left before its
+header reached the disk (shorter than a header, or a header of zeros with
+nothing after it), which holds no record; the start logs what it discarded.
+In an earlier segment either is corruption. Corruption, a checksum failure
+anywhere, and records missing from where recovery starts (see "Durability and
+group commit") each stop the node with the files named, so a damaged log is
+never silently read past.
 
 ### Environment overrides
 
@@ -2606,6 +2654,56 @@ record from the first is still held is passed over with a warning, and the whole
 log is replayed. A rewrite after a failed fsync that meets the same gap fails
 rather than writing what remains as the journal, and its callers are refused.
 The replica log refuses the same way.
+
+A power cut inside a rewrite, after its checkpoint reached the disk and before
+its new segment did, can leave the checkpoint past the log's end: the records
+the failed fsync covered are in the checkpoint and gone from the segment. The
+next start logs a warning naming both indexes, recovers from the checkpoint,
+and starts a segment one past it before anything is appended, so every later
+record lies where recovery replays from. The run of indexes this leaves between
+the segments is below the checkpoint and is not refused; if that checkpoint
+later fails its checksum, those records are held nowhere and the node refuses
+to start as above. The replica log does the same.
+
+The consensus log syncs itself before it writes a checkpoint (one fsync for each
+snapshot taken or installed), so a checkpoint never names records the disk
+does not hold and the durability it reports covers them. If a disk loses
+records it had synced and the log ends below where its checkpoint replays from,
+the next start appends from that point, logging a warning, so later records are
+not skipped.
+
+A record's length is outside its checksum, so recovery tells a torn write from a
+damaged length by the checksum it has: a record in the last segment whose length
+reaches past the end of the file is truncated as a torn write unless its
+checksum matches its bytes up to the end of the file or up to where a whole,
+sound record starts. Then the record was written whole and only its length is
+wrong, and the node stops with the segment, offset and record named instead of
+truncating it and every record after it. A length over 1 GiB is damage wherever
+it is, and nothing is allocated for a length beyond the bytes the segment holds;
+a record over 1 GiB is refused when it is written, which refuses its publish.
+This cannot tell a damaged length apart from a torn write when the same record's
+type, checksum or payload is damaged too, or when the damaged record is followed
+only by a torn one: those are still truncated as a torn tail.
+
+A failed write to the journal, such as a full disk, also leaves it not whole: the
+log's buffered writer keeps the error, so nothing written after it would reach
+the file. The callers it held are refused, and the next append, `Sync` or
+checkpoint rewrites the journal as after a failed fsync, starting its new
+segment with a new writer; while the disk is still full the rewrite fails and is
+tried again no sooner than a second later, refusing in between. Once the disk
+has room the node takes and acknowledges writes again without a restart. The
+replica log does the same; the consensus log does not, and keeps a failed write
+until the node restarts.
+
+The replication layer keeps two small files beside the replica log: the last
+shard map version it acted on, which a restart never drops replica copies
+below, and the retained shards it keeps for their new leader. Each is replaced
+as a checkpoint is: a temporary file synced, renamed into place, and the
+directory synced, so a crash leaves the old content or the new. A write that
+fails leaves the old file and is logged at Warn; the version in memory moves
+only once the new one is on the disk. When the journal drops the segments
+before a checkpoint and one cannot be removed, the segments not yet removed
+stay listed and the next checkpoint tries again.
 
 A record that fails to append refuses the QoS 1 or 2 publish that wrote it,
 whichever session it was written into: the publisher's own, a subscriber's on

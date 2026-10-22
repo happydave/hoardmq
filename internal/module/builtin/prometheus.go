@@ -28,6 +28,7 @@ type prometheus struct {
 	metricsPath string
 	ready       func() bool
 	serving     func() (bool, string)
+	live        func() (bool, string)
 	drain       func()
 	drainStatus func() ext.DrainStatus
 	// adminOwnsDrain closes /drain here: the admin API serves it.
@@ -63,6 +64,9 @@ func (p *prometheus) Provision(ctx *ext.Context, raw json.RawMessage) error {
 	if ctx.Services != nil {
 		p.ready = ctx.Services.Ready
 		p.serving = ctx.Services.Serving
+		if l, ok := ctx.Services.(ext.LivenessProvider); ok {
+			p.live = l.Live
+		}
 		p.drain = ctx.Services.Drain
 		p.drainStatus = ctx.Services.DrainStatus
 	}
@@ -79,10 +83,25 @@ func (p *prometheus) Start(context.Context) error {
 	if err != nil {
 		return fmt.Errorf("observability listener: %w", err)
 	}
+	p.ln = ln
+	p.srv = &http.Server{Handler: p.handler(), ReadHeaderTimeout: 5 * time.Second}
+	go func() { _ = p.srv.Serve(ln) }()
+	return nil
+}
+
+// handler is the listener's mux: every path answers any caller but /drain.
+func (p *prometheus) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc(p.metricsPath, p.serveMetrics)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		if p.live != nil {
+			if ok, reason := p.live(); !ok {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = w.Write([]byte("not live: " + reason + "\n"))
+				return
+			}
+		}
 		_, _ = w.Write([]byte("ok\n"))
 	})
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
@@ -111,10 +130,11 @@ func (p *prometheus) Start(context.Context) error {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		_, _ = w.Write([]byte(servingText(reason) + "\n"))
 	})
-	// The drain endpoint: POST starts the graceful leave, GET reports it.
+	// The drain endpoint: POST starts the graceful leave, GET reports it, for
+	// a caller on this node's loopback only.
 	mux.HandleFunc("/drain", func(w http.ResponseWriter, r *http.Request) {
-		if !drainDoorOpen(p.adminOwnsDrain) {
-			http.Error(w, "the drain is served by the admin API", http.StatusForbidden)
+		if refusal := drainRefusal(p.adminOwnsDrain, r.RemoteAddr); refusal != "" {
+			http.Error(w, refusal, http.StatusForbidden)
 			return
 		}
 		if p.drainStatus == nil {
@@ -134,16 +154,24 @@ func (p *prometheus) Start(context.Context) error {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(p.drainStatus())
 	})
-	p.ln = ln
-	p.srv = &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
-	go func() { _ = p.srv.Serve(ln) }()
-	return nil
+	return mux
 }
 
-// drainDoorOpen decides whether this listener's /drain may start or report a
-// drain: not once the admin API owns it, since this listener authenticates
-// nobody.
-func drainDoorOpen(adminOwnsDrain bool) bool { return !adminOwnsDrain }
+// drainRefusal decides whether this listener's /drain may start or report a
+// drain for a caller at remoteAddr, returning why not or "". This listener
+// authenticates nobody, so it refuses once the admin API owns the drain, and
+// otherwise refuses any peer that is not on this node's loopback: it may be
+// bound on every interface for the probes and scrapes.
+func drainRefusal(adminOwnsDrain bool, remoteAddr string) string {
+	if adminOwnsDrain {
+		return "the drain is served by the admin API"
+	}
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if ip := net.ParseIP(host); err != nil || ip == nil || !ip.IsLoopback() {
+		return "the drain answers only loopback callers; elsewhere use the admin API"
+	}
+	return ""
+}
 
 func (p *prometheus) Stop(context.Context) error {
 	if p.srv == nil {
