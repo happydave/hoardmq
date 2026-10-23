@@ -54,12 +54,13 @@ func (r *Replicator) BasisChanged() {
 // should be retried sooner than the interval.
 func (r *Replicator) drive(cause string) bool {
 	r.maps.checked(cause)
-	alive, leaving := r.placementFacts()
+	alive, leaving, below := r.placementFacts()
 	r.gauge("hoardmq_shardmap_leaving", float64(len(leaving)))
+	r.gauge("hoardmq_shardmap_members_below_level", float64(len(below)))
 	if r.o.Core.Status().Role != "leader" {
 		return true
 	}
-	basis := placementBasis(alive, leaving, r.o.Replicas)
+	basis := placementBasis(placeable(alive, below), leaving, r.o.Replicas)
 	if len(basis) == 0 {
 		return false
 	}
@@ -84,9 +85,10 @@ func (r *Replicator) drive(cause string) bool {
 }
 
 // placementFacts are the members the shard map is computed over: this node
-// and every member the lease table says is alive, and those of them a drain's
-// hand-off marked leaving.
-func (r *Replicator) placementFacts() (alive, leaving []string) {
+// and every member the lease table says is alive, those of them a drain's
+// hand-off marked leaving, and the other members whose latest alive record
+// advertises a level below the cluster's.
+func (r *Replicator) placementFacts() (alive, leaving, below []string) {
 	seen := map[string]bool{r.o.Node: true}
 	for _, m := range r.o.Core.Members() {
 		if m.Name != r.o.Node && r.o.Leases.Live(m.Name) {
@@ -98,8 +100,24 @@ func (r *Replicator) placementFacts() (alive, leaving []string) {
 		if r.o.Leases.Leaving(n) {
 			leaving = append(leaving, n)
 		}
+		if n != r.o.Node && r.o.Leases.MemberBelow(n) {
+			below = append(below, n)
+		}
 	}
-	return alive, leaving
+	return alive, leaving, below
+}
+
+// placeable is the alive members less those below the cluster's level. It is
+// pure. A member below the level refuses every frame stamped above its build,
+// so it is left out whatever that does to the copy count.
+func placeable(alive, below []string) []string {
+	var out []string
+	for _, n := range alive {
+		if !contains(below, n) {
+			out = append(out, n)
+		}
+	}
+	return out
 }
 
 // placementBasis is the shard map's basis: the alive members less those
@@ -132,8 +150,8 @@ func sortedCopy(in []string) []string {
 // come from one reading of the marks: a mark applied between two readings
 // would read as marked and kept by the copy count.
 func (r *Replicator) Placement() (willPlace, left, marked bool) {
-	alive, leaving := r.placementFacts()
-	return placementOf(r.o.Node, alive, leaving, r.o.Replicas, r.o.Map.Current(), r.Reconciled())
+	alive, leaving, below := r.placementFacts()
+	return placementOf(r.o.Node, placeable(alive, below), leaving, r.o.Replicas, r.o.Map.Current(), r.Reconciled())
 }
 
 // placementOf is Placement over given facts: alive and leaving as

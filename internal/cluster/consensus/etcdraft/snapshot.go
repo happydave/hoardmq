@@ -93,14 +93,41 @@ func receivedName(index, term uint64, at time.Time) string {
 }
 
 // snapshotFileRemovable decides whether a file in the snapshot directory may
-// be deleted: never the file the stored snapshot names, never one a transfer
-// reads or a build or stage owns; at start every other file goes, partial
-// ones included, and while running only finished snapshot files go.
-func snapshotFileRemovable(name, current string, inUse map[string]bool, starting bool) bool {
-	if name == "" || name == current || inUse[name] {
+// be deleted: nothing while the stored snapshot is in a form this build
+// cannot read, since the directory may hold the files of a build that can;
+// never the file the stored snapshot names, never one a transfer reads or a
+// build or stage owns; at start every other file goes, partial ones
+// included, and while running only finished snapshot files go.
+func snapshotFileRemovable(name string, stored storedFile, inUse map[string]bool, starting bool) bool {
+	if !stored.readable || name == "" || name == stored.name || inUse[name] {
 		return false
 	}
 	return starting || strings.HasSuffix(name, snapExt)
+}
+
+// storedFile is what a stored snapshot says of the snapshot directory: the
+// file it names, if any, and whether this build can read it at all.
+type storedFile struct {
+	name     string
+	readable bool
+}
+
+// storedSnapshotFile reads a stored snapshot's data: empty or the inline
+// format 1 names no file; a format 2 descriptor that decodes names its file;
+// anything else is unreadable here.
+func storedSnapshotFile(empty bool, data []byte) storedFile {
+	if empty {
+		return storedFile{readable: true}
+	}
+	switch snapshotForm(data) {
+	case snapshotFormat:
+		return storedFile{readable: true}
+	case consensus.FileFormat:
+		if d, _, err := decodeDesc(data); err == nil {
+			return storedFile{name: d.Name, readable: true}
+		}
+	}
+	return storedFile{}
 }
 
 // syncDir makes a rename or a removal in dir durable.
@@ -116,17 +143,18 @@ func syncDir(dir string) error {
 	return err
 }
 
+// storedSnapshot reads what the stored snapshot names.
+func (c *Core) storedSnapshot() storedFile {
+	snap, err := c.o.Store.Snapshot()
+	if err != nil {
+		return storedFile{}
+	}
+	return storedSnapshotFile(raft.IsEmptySnap(snap), snap.Data)
+}
+
 // storedSnapshotName is the file the stored snapshot names, or "".
 func (c *Core) storedSnapshotName() string {
-	snap, err := c.o.Store.Snapshot()
-	if err != nil || raft.IsEmptySnap(snap) || snapshotForm(snap.Data) != consensus.FileFormat {
-		return ""
-	}
-	d, _, err := decodeDesc(snap.Data)
-	if err != nil {
-		return ""
-	}
-	return d.Name
+	return c.storedSnapshot().name
 }
 
 // removeSnapshotFiles deletes the files the predicate allows.
@@ -135,11 +163,11 @@ func (c *Core) removeSnapshotFiles(starting bool) {
 	if err != nil {
 		return
 	}
-	current := c.storedSnapshotName()
+	stored := c.storedSnapshot()
 	inUse := c.snapshotFilesInUse()
 	removed := false
 	for _, e := range entries {
-		if e.IsDir() || !snapshotFileRemovable(e.Name(), current, inUse, starting) {
+		if e.IsDir() || !snapshotFileRemovable(e.Name(), stored, inUse, starting) {
 			continue
 		}
 		if err := os.Remove(filepath.Join(c.snapDir, e.Name())); err == nil {

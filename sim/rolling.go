@@ -101,9 +101,15 @@ type rollRecord struct {
 	// last node ready, against the chart runbook's worst rate.
 	Refusals      windowCounts `json:"roll_refusals"`
 	ReferenceRate float64      `json:"reference_rate"`
-	Findings      []string     `json:"findings"`
-	StoreDir      string       `json:"store_dir"`
-	Provenance    Provenance   `json:"provenance"`
+	// ApplyStalls is, per node, how often its consensus core reported itself
+	// behind during the run; a node never behind has no entry.
+	ApplyStalls map[string]uint64 `json:"apply_stalls,omitempty"`
+	// Holds is, per node, how often its consensus core held the log during
+	// the run; a node that never held has no entry.
+	Holds      map[string]uint64 `json:"holds,omitempty"`
+	Findings   []string          `json:"findings"`
+	StoreDir   string            `json:"store_dir"`
+	Provenance Provenance        `json:"provenance"`
 }
 
 // rollStep is one node's drain, stop and restart. Times are seconds after
@@ -324,6 +330,22 @@ func rollFindings(r rollRecord) []string {
 	}
 	if r.Refusals.Rate > r.ReferenceRate {
 		out = append(out, fmt.Sprintf("probe: %.2f%% refused across the roll, above the chart runbook's %.2f%%", 100*r.Refusals.Rate, 100*r.ReferenceRate))
+	}
+	nodes := make([]string, 0, len(r.ApplyStalls))
+	for n := range r.ApplyStalls {
+		nodes = append(nodes, n)
+	}
+	sort.Strings(nodes)
+	for _, n := range nodes {
+		out = append(out, fmt.Sprintf("%s: its consensus core reported itself behind %d times", n, r.ApplyStalls[n]))
+	}
+	held := make([]string, 0, len(r.Holds))
+	for n := range r.Holds {
+		held = append(held, n)
+	}
+	sort.Strings(held)
+	for _, n := range held {
+		out = append(out, fmt.Sprintf("%s: its consensus core held the log %d times", n, r.Holds[n]))
 	}
 	return out
 }

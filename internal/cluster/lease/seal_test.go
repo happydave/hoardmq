@@ -52,9 +52,17 @@ func TestSealEnds(t *testing.T) {
 		{"nothing asked", true, "n1", 9, "", 0, sealKeep},
 		{"no target holds it", true, "n1", 9, "n1", 0, sealKeep},
 	} {
-		if got := sealEnds(tc.lease, tc.owner, "n2", tc.token, tc.asked, tc.heldAt); got != tc.want {
+		if got := sealEnds(false, tc.lease, tc.owner, "n2", tc.token, tc.asked, tc.heldAt); got != tc.want {
 			t.Errorf("%s: sealEnds = %v, want %v", tc.name, got, tc.want)
 		}
+	}
+	// Below the cluster's level the table has stopped learning: no lease is
+	// not evidence, and the copy is kept; a target's evidence still drops it.
+	if got := sealEnds(true, false, "", "n2", 0, "", 0); got != sealKeep {
+		t.Errorf("below the level, no lease: sealEnds = %v, want keep", got)
+	}
+	if got := sealEnds(true, true, "n1", "n2", 9, "n1", 9); got != sealDropHeld {
+		t.Errorf("below the level, a target holds it: sealEnds = %v, want drop", got)
 	}
 }
 

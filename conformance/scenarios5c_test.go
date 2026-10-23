@@ -13,7 +13,7 @@ import (
 )
 
 func TestCapabilityDeclines(t *testing.T) {
-	Statement(t, "MQTT-3.2.2-9", "MQTT-3.2.2-10", "MQTT-3.2.2-12", "MQTT-3.2.2-13", "MQTT-3.8.4-8")
+	Statement(t, Spec5, "MQTT-3.2.2-9", "MQTT-3.2.2-10", "MQTT-3.2.2-12", "MQTT-3.2.2-13", "MQTT-3.8.4-8")
 	n := StartNode(t, func(d *config.Document) {
 		d.MQTT.MaximumQoS = 1
 		d.MQTT.RetainAvailable = false

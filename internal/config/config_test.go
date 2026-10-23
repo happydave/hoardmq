@@ -154,6 +154,7 @@ func TestEachRuleHasAFailingFixture(t *testing.T) {
 		{"maxPacketSize high", `{"version":1,"node":{"dataDir":"d"},"limits":{"maxPacketSize":268435456}}`, "/limits/maxPacketSize", "at most"},
 		{"receiveMaximum high", `{"version":1,"node":{"dataDir":"d"},"limits":{"receiveMaximum":65536}}`, "/limits/receiveMaximum", "at most"},
 		{"maxQueued negative", `{"version":1,"node":{"dataDir":"d"},"limits":{"maxQueuedMessages":-1}}`, "/limits/maxQueuedMessages", "at least 0"},
+		{"maxSubscriptions negative", `{"version":1,"node":{"dataDir":"d"},"limits":{"maxSubscriptions":-1}}`, "/limits/maxSubscriptions", "at least 0"},
 		{"maxTopicAliasBytes negative", `{"version":1,"node":{"dataDir":"d"},"limits":{"maxTopicAliasBytes":-1}}`, "/limits/maxTopicAliasBytes", "at least 0"},
 		{"sessionBinding", `{"version":1,"node":{"dataDir":"d"},"auth":{"sessionBinding":"username"}}`, "/auth/sessionBinding", "one of"},
 		{"integer not float", `{"version":1,"node":{"dataDir":"d"},"limits":{"receiveMaximum":1.5}}`, "/limits/receiveMaximum", "expected integer"},
@@ -448,5 +449,25 @@ func TestSessionBindingDefault(t *testing.T) {
 	d, p = Parse([]byte(`{"version":1,"node":{"dataDir":"d"}}`), nil)
 	if len(p) != 0 || d.Auth.SessionBinding != "principal" {
 		t.Fatalf("absent: %v %q", p, d.Auth.SessionBinding)
+	}
+}
+
+// The per-client subscription limit defaults to 0 (unlimited), accepts a
+// bound, and is put into force by a reload.
+func TestMaxSubscriptions(t *testing.T) {
+	if got := Default().Limits.MaxSubscriptions; got != 0 {
+		t.Fatalf("default %d, want 0", got)
+	}
+	for _, n := range []int{0, 100} {
+		d, p := Parse([]byte(`{"version":1,"node":{"dataDir":"d"},"limits":{"maxSubscriptions":`+strconv.Itoa(n)+`}}`), nil)
+		if len(p) != 0 || d.Limits.MaxSubscriptions != n {
+			t.Fatalf("%d: %v %d", n, p, d.Limits.MaxSubscriptions)
+		}
+	}
+	next := Default()
+	next.Limits.MaxSubscriptions = 100
+	changed, restartOnly := Changes(Default(), next)
+	if len(changed) != 1 || changed[0] != "/limits/maxSubscriptions" || len(restartOnly) != 0 {
+		t.Fatalf("changed %v, restart-only %v", changed, restartOnly)
 	}
 }

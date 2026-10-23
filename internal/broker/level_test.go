@@ -77,7 +77,11 @@ func TestNodeBelowTheClusterLevelDoesNotServe(t *testing.T) {
 	if ack.ReasonCode != packet.UseAnotherServer || ref != "client."+leader+":1883" {
 		t.Fatalf("CONNECT to %s: %s, reference %q; want Use Another Server naming %s", old, ack.ReasonCode, ref, leader)
 	}
-	if !nodes[old].srv.Consensus().Ready() {
+	member := false
+	for _, m := range nodes[leader].srv.Consensus().Members() {
+		member = member || m.Name == old
+	}
+	if !member {
 		t.Fatalf("%s left the consensus group; it must stay a member to receive the log", old)
 	}
 	_, ack = nodes[leader].connect("tcp", packet.V5, &packet.Connect{ClientID: "c-new", CleanStart: true}, false)
@@ -88,13 +92,54 @@ func TestNodeBelowTheClusterLevelDoesNotServe(t *testing.T) {
 	wantMetrics(old, "hoardmq_cluster_feature_level 2", "hoardmq_cluster_feature_level_build 1",
 		`hoardmq_cluster_feature_level_refusals_total{where="connect"} 1`)
 
-	// Upgraded again, it serves.
-	nodes[old].srv.Leases().SetBuildLevel(2)
-	if ready, reason := nodes[old].srv.Readiness(); !ready {
-		t.Fatalf("%s upgraded again is unready (%s)", old, reason)
+	// It holds the log from the first entry after it fell below the level,
+	// for the process's life: only a restart on a build that understands the
+	// level applies what it held. Raising the test's pin is not that.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, held := nodes[old].srv.Consensus().Held(); held {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s below the level does not hold the log", old)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
-	_, ack = nodes[old].connect("tcp", packet.V5, &packet.Connect{ClientID: "c-old", CleanStart: true}, false)
-	if ack.ReasonCode != packet.Success {
-		t.Fatalf("CONNECT to %s upgraded again: %s", old, ack.ReasonCode)
+	wantMetrics(old, "hoardmq_cluster_feature_level_held 1")
+	// A restart on the same build would hold again at the same entry, so
+	// liveness stays up while readiness names the hold.
+	if code, body := scrape(t, nodes[old], "/healthz"); code != 200 {
+		t.Fatalf("%s holding: /healthz %d %q, want 200", old, code, body)
+	}
+	if code, body := scrape(t, nodes[old], "/servingz"); code != 503 || !strings.Contains(body, "not ready: level") {
+		t.Fatalf("%s holding: /servingz %d %q, want 503 not ready: level", old, code, body)
+	}
+	if nodes[old].srv.forwardsServed() {
+		t.Fatalf("%s below the level takes forwarded QoS 1 and 2 deliveries into sessions it may no longer own", old)
+	}
+	for deadline := time.Now().Add(10 * time.Second); !nodes[leader].srv.Leases().Table().MemberBelow(old); {
+		if time.Now().After(deadline) {
+			t.Fatalf("%s's table does not read %s below the level", leader, old)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	for deadline := time.Now().Add(10 * time.Second); ; {
+		_, body := scrape(t, nodes[leader], "/metrics")
+		if strings.Contains(body, "hoardmq_shardmap_members_below_level 1\n") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s's /metrics does not count %s below the level", leader, old)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	for _, n := range (&drainer{s: nodes[leader].srv}).liveOthers() {
+		if n == old {
+			t.Fatalf("a drain on %s would hand clients or leases to %s, below the level", leader, old)
+		}
+	}
+	nodes[old].srv.Leases().SetBuildLevel(2)
+	if ready, reason := nodes[old].srv.Readiness(); ready || reason != "level" {
+		t.Fatalf("%s holding the log: ready=%v reason=%q, want unready for \"level\"", old, ready, reason)
 	}
 }

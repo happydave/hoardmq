@@ -60,7 +60,7 @@ func TestRawStatements(t *testing.T) {
 		{"AUTH outside an exchange", []string{"MQTT-4.12.0-7", "MQTT-4.12.0-6"}, packet.V5, true, []byte{0xF0, 0x00}, packet.ProtocolError, false},
 		// Level 4: the same violations close the connection without a DISCONNECT.
 		{"3.1.1 PUBLISH QoS 3", []string{"MQTT-3.3.1-4"}, packet.V4, true, []byte{0x36, 0x05, 0x00, 0x01, 't', 0x00, 0x01}, 0, true},
-		{"3.1.1 SUBSCRIBE reserved bits", []string{"MQTT-3.8.3-4"}, packet.V4, true, []byte{0x82, 0x06, 0x00, 0x01, 0x00, 0x01, 'a', 0x04}, 0, true},
+		{"3.1.1 SUBSCRIBE reserved bits", nil, packet.V4, true, []byte{0x82, 0x06, 0x00, 0x01, 0x00, 0x01, 'a', 0x04}, 0, true},
 		{"3.1.1 SUBSCRIBE without filters", []string{"MQTT-3.8.3-3"}, packet.V4, true, []byte{0x82, 0x02, 0x00, 0x01}, 0, true},
 		{"3.1.1 UNSUBSCRIBE without filters", []string{"MQTT-3.10.3-2"}, packet.V4, true, []byte{0xA2, 0x02, 0x00, 0x01}, 0, true},
 		{"3.1.1 invalid flags", []string{"MQTT-2.2.2-1", "MQTT-2.2.2-2"}, packet.V4, true, []byte{0xC1, 0x00}, 0, true},
@@ -75,7 +75,7 @@ func TestRawStatements(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			Statement(t, c.ids...)
+			Statement(t, SpecOf(c.v), c.ids...)
 			n := node.For(t)
 			r := n.DialRaw(c.v)
 			if c.after {
@@ -109,49 +109,49 @@ func TestRawConnectRules(t *testing.T) {
 		return append([]byte{0x10, byte(len(body))}, body...)
 	}
 	t.Run("reserved flag closes without CONNACK", func(t *testing.T) {
-		Statement(t, "MQTT-3.1.2-3", "MQTT-3.1.4-1")
+		Statement(t, Spec5, "MQTT-3.1.2-3", "MQTT-3.1.4-1")
 		n := node.For(t)
 		r := n.DialRaw(packet.V5)
 		r.SendBytes(connect("MQTT", 5, 0x03, 0x00, 0x00, 0x00))
 		r.ExpectClosed()
 	})
 	t.Run("will flags without will", func(t *testing.T) {
-		Statement(t, "MQTT-3.1.2-11", "MQTT-3.1.2-13", "MQTT-3.1.2-15")
+		Statement(t, Spec5, "MQTT-3.1.2-11", "MQTT-3.1.2-13", "MQTT-3.1.2-15")
 		n := node.For(t)
 		r := n.DialRaw(packet.V5)
 		r.SendBytes(connect("MQTT", 5, 0x2A, 0x00, 0x00, 0x00))
 		r.ExpectClosed()
 	})
 	t.Run("will QoS 3", func(t *testing.T) {
-		Statement(t, "MQTT-3.1.2-12", "MQTT-3.1.2-14")
+		Statement(t, Spec5, "MQTT-3.1.2-12", "MQTT-3.1.2-14")
 		n := node.For(t)
 		r := n.DialRaw(packet.V5)
 		r.SendBytes(connect("MQTT", 5, 0x1E, 0x00, 0x00, 0x00))
 		r.ExpectClosed()
 	})
 	t.Run("password without username at 3.1.1", func(t *testing.T) {
-		Statement(t, "MQTT-3.1.2-22")
+		Statement(t, Spec311, "MQTT-3.1.2-22")
 		n := node.For(t)
 		r := n.DialRaw(packet.V4)
 		r.SendBytes(connect("MQTT", 4, 0x42, 0x00, 0x00, 0x00, 0x00))
 		r.ExpectClosed()
 	})
 	t.Run("username flag without username", func(t *testing.T) {
-		Statement(t, "MQTT-3.1.2-17", "MQTT-3.1.2-19", "MQTT-3.1.3-1")
+		Statement(t, Spec5, "MQTT-3.1.2-17", "MQTT-3.1.2-19", "MQTT-3.1.3-1")
 		n := node.For(t)
 		r := n.DialRaw(packet.V5)
 		r.SendBytes(connect("MQTT", 5, 0x82, 0x00, 0x00, 0x00))
 		r.ExpectClosed()
 	})
 	t.Run("first packet not CONNECT", func(t *testing.T) {
-		Statement(t, "MQTT-3.1.0-1")
+		Statement(t, Spec5, "MQTT-3.1.0-1")
 		n := node.For(t)
 		r := n.DialRaw(packet.V5)
 		r.Send(&packet.Pingreq{})
 		r.ExpectClosed()
 	})
 	t.Run("unsupported protocol version 5.0-shaped", func(t *testing.T) {
-		Statement(t, "MQTT-3.1.2-2", "MQTT-3.2.2-6", "MQTT-3.2.2-7", "MQTT-4.13.2-1")
+		Statement(t, Spec5, "MQTT-3.1.2-2", "MQTT-3.2.2-6", "MQTT-3.2.2-7", "MQTT-4.13.2-1")
 		n := node.For(t)
 		r := n.DialRaw(packet.V5)
 		r.SendBytes(connect("MQTT", 6, 0x02, 0x00, 0x00, 0x00))
@@ -162,7 +162,7 @@ func TestRawConnectRules(t *testing.T) {
 		r.ExpectClosed()
 	})
 	t.Run("level 3 client identifier rules", func(t *testing.T) {
-		Statement(t, "MQTT-3.1.3-5", "MQTT-3.1.3-9")
+		Statement(t, Spec311, "MQTT-3.1.3-5", "MQTT-3.1.3-9")
 		n := node.For(t)
 		r := n.DialRaw(packet.V3)
 		long := strings.Repeat("a", 24)
@@ -180,7 +180,7 @@ func TestRawConnectRules(t *testing.T) {
 		}
 	})
 	t.Run("client identifier with the base character set", func(t *testing.T) {
-		Statement(t, "MQTT-3.1.3-5", "MQTT-3.1.3-2")
+		Statement(t, Spec5, "MQTT-3.1.3-5", "MQTT-3.1.3-2")
 		n := node.For(t)
 		r := n.DialRaw(packet.V5)
 		id := "0123456789abcdefghijklm"
@@ -189,7 +189,7 @@ func TestRawConnectRules(t *testing.T) {
 		}
 	})
 	t.Run("session state discarded when expiry passed", func(t *testing.T) {
-		Statement(t, "MQTT-4.1.0-1", "MQTT-4.1.0-2")
+		Statement(t, Spec5, "MQTT-4.1.0-1", "MQTT-4.1.0-2")
 		n := node.For(t)
 		r := n.DialRaw(packet.V5)
 		exp := uint32(1)

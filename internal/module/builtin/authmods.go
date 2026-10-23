@@ -208,13 +208,14 @@ func (j *jwtAuth) Authenticate(ctx context.Context, req *extauth.Request) extaut
 
 // x509Config is auth.x509's configuration.
 type x509Config struct {
-	OCSP        *bool    `json:"ocsp"`
-	CRL         *bool    `json:"crl"`
-	OCSPURL     string   `json:"ocspUrl"`
-	CRLURLs     []string `json:"crlUrls"`
-	FailOpen    bool     `json:"failOpen"`
-	FetchWaitMs *int     `json:"fetchWaitMs"`
-	TimeoutMs   *int     `json:"timeoutMs"`
+	OCSP              *bool    `json:"ocsp"`
+	CRL               *bool    `json:"crl"`
+	OCSPURL           string   `json:"ocspUrl"`
+	CRLURLs           []string `json:"crlUrls"`
+	FailOpen          bool     `json:"failOpen"`
+	FetchWaitMs       *int     `json:"fetchWaitMs"`
+	TimeoutMs         *int     `json:"timeoutMs"`
+	OCSPMaxAgeSeconds *int     `json:"ocspMaxAgeSeconds"`
 }
 
 func boolOr(v *bool, def bool) bool {
@@ -246,6 +247,7 @@ func x509Problems(c x509Config) []string {
 	}
 	p = inRange(p, "fetchWaitMs", c.FetchWaitMs, 0, 10000)
 	p = inRange(p, "timeoutMs", c.TimeoutMs, 100, 30000)
+	p = inRange(p, "ocspMaxAgeSeconds", c.OCSPMaxAgeSeconds, 60, 30*24*3600)
 	return p
 }
 
@@ -275,6 +277,7 @@ func (x *x509Auth) Provision(ctx *ext.Context, raw json.RawMessage) error {
 	x.inner = &auth.Revocation{OCSP: boolOr(c.OCSP, true), CRL: boolOr(c.CRL, true), OCSPURL: c.OCSPURL, CRLURLs: c.CRLURLs,
 		FailOpen: c.FailOpen, FetchWait: time.Duration(intOr(c.FetchWaitMs, 2000)) * time.Millisecond,
 		Timeout: time.Duration(intOr(c.TimeoutMs, 5000)) * time.Millisecond, Client: &http.Client{}, Now: time.Now,
+		OCSPMaxAge: time.Duration(intOr(c.OCSPMaxAgeSeconds, int(auth.DefaultOCSPMaxAge/time.Second))) * time.Second,
 		Count: func(name string, labels map[string]string) {
 			if x.metrics != nil {
 				x.metrics.Add(name, labels, 1)

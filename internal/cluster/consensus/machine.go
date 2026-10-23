@@ -56,9 +56,14 @@ func (m *Machine) Register(k Kind, c Component) {
 }
 
 // Apply applies one committed command. The payload's first byte is the kind.
+// While a holder holds it applies nothing and leaves the applied index where
+// it was, returning ErrHeld.
 func (m *Machine) Apply(index uint64, cmd []byte) (any, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if held, why := m.holdsLocked(); held {
+		return nil, fmt.Errorf("%w: %s", ErrHeld, why)
+	}
 	m.applied = index
 	if len(cmd) == 0 {
 		return nil, nil
@@ -68,6 +73,24 @@ func (m *Machine) Apply(index uint64, cmd []byte) (any, error) {
 		return nil, fmt.Errorf("%w: %d", ErrUnknownKind, cmd[0])
 	}
 	return c.Apply(index, cmd[1:])
+}
+
+// Holds asks every component that can hold the machine whether it does.
+func (m *Machine) Holds() (bool, string) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.holdsLocked()
+}
+
+func (m *Machine) holdsLocked() (bool, string) {
+	for _, c := range m.components {
+		if h, ok := c.(Holder); ok {
+			if held, why := h.Holds(); held {
+				return true, why
+			}
+		}
+	}
+	return false, ""
 }
 
 // BeginRecovery puts every Recoverable component into silent mode; nothing

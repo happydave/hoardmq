@@ -34,6 +34,8 @@ type Options struct {
 	StoreAdmission   int
 	DropNewest       bool
 	MaxSessionExpiry uint32 // 0 means no cap
+	// MaxSubscriptions bounds the filters one session holds; 0 means none.
+	MaxSubscriptions int
 	// BindPrincipal refuses a CONNECT whose principal (its identity's
 	// username) differs from the existing session's, resume or clean start.
 	BindPrincipal bool
@@ -282,7 +284,8 @@ func New(opts Options) *Manager {
 		opts.Namespace = "default"
 	}
 	m := &Manager{opts: opts, log: opts.Logger, clock: opts.Clock, router: opts.Router}
-	m.limits.Store(&Limits{MaxQueued: opts.MaxQueued, DropNewest: opts.DropNewest, MaxSessionExpiry: opts.MaxSessionExpiry})
+	m.limits.Store(&Limits{MaxQueued: opts.MaxQueued, DropNewest: opts.DropNewest, MaxSessionExpiry: opts.MaxSessionExpiry,
+		MaxSubscriptions: opts.MaxSubscriptions})
 	n := opts.Shards
 	if n <= 0 {
 		n = defaultShards
@@ -300,12 +303,14 @@ func New(opts Options) *Manager {
 }
 
 // Limits are the per-session limits a running manager can change: the queue
-// bound and what a full queue drops, from the next message queued, and the
-// cap on a session's expiry interval, from the next one a client sets.
+// bound and what a full queue drops, from the next message queued, the cap
+// on a session's expiry interval, from the next one a client sets, and the
+// bound on its filters, from the next SUBSCRIBE.
 type Limits struct {
 	MaxQueued        int
 	DropNewest       bool
 	MaxSessionExpiry uint32 // 0 means no cap
+	MaxSubscriptions int    // 0 means no bound
 }
 
 // SetLimits puts new limits into force. A queue already longer than a

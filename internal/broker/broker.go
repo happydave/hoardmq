@@ -292,13 +292,18 @@ func (s *Server) members() []string {
 // deliveries into its sessions: only once replication is attached, so a
 // delivery is acknowledged on the replicas and not on the local journal
 // alone, and only once the consensus core has recovered, so the lease table
-// says which of the sessions the store loaded are still this node's.
-func forwardsAdmitted(attached, recovering bool) bool { return attached && !recovering }
+// says which of the sessions the store loaded are still this node's. unsure
+// is a core still recovering, or a build below the cluster's level, whose
+// table has stopped learning.
+func forwardsAdmitted(attached, unsure bool) bool { return attached && !unsure }
 
 // forwardsServed is the routing plane's Serving.
 func (s *Server) forwardsServed() bool {
-	rc := s.coreReady.Load()
-	return s.hooks.Defects.ForwardsBeforeServing || forwardsAdmitted(rc != nil, rc != nil && rc.Recovering())
+	rc, svc := s.coreReady.Load(), s.leasesReady.Load()
+	// A node below the cluster's level cannot tell whether a session it holds
+	// is still its own, as a recovering one cannot.
+	unsure := rc != nil && (rc.Recovering() || svc != nil && svc.BelowLevel())
+	return s.hooks.Defects.ForwardsBeforeServing || forwardsAdmitted(rc != nil, unsure)
 }
 
 // ownedSessions bounds the unknown-owner refusal: an owner the replicated
@@ -599,6 +604,7 @@ func (s *Server) openStore() error {
 		MaxQueued:        s.config().Limits.MaxQueuedMessages,
 		DropNewest:       s.config().Limits.QueueDrop == "newest",
 		MaxSessionExpiry: uint32(s.config().Limits.MaxSessionExpiry),
+		MaxSubscriptions: s.config().Limits.MaxSubscriptions,
 		BindPrincipal:    s.config().Auth.SessionBinding != "off",
 		Shards:           s.config().Node.SessionShards,
 		StoreAdmission:   s.config().Node.StoreAdmission,
@@ -952,6 +958,9 @@ func (s *Server) registerCollector() {
 		set("hoardmq_overload_indicator", map[string]string{"name": "heap_bytes"}, float64(ov.Indicators.Heap))
 		set("hoardmq_overload_shed_connections", nil, float64(ov.Shed))
 		set("hoardmq_overload_refused_total", nil, float64(s.admit.refused.Load()))
+		for _, l := range s.listeners {
+			set("hoardmq_max_connections_refused_total", map[string]string{"listener": l.Config.Name}, float64(l.Refused()))
+		}
 		for how := conn.EndedGraceful; how <= conn.EndedAbnormal; how++ {
 			set("hoardmq_connections_ended_total", map[string]string{"how": how.String()}, float64(s.policy.flap.ends[how].Load()))
 		}

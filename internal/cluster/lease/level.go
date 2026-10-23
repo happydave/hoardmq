@@ -76,6 +76,7 @@ func (s *Service) noteLevel() {
 	build, cluster := fmt.Sprint(s.BuildLevel()), fmt.Sprint(s.table.Level())
 	if below {
 		s.log.Error("this build is below the cluster's feature level and serves no client; upgrade it", "build", build, "cluster", cluster)
+		s.enterBelow()
 		s.audit("cluster.level", s.o.Node, "below", map[string]string{"build": build, "cluster": cluster})
 		return
 	}

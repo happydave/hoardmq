@@ -1,6 +1,9 @@
 package consensus
 
-import "testing"
+import (
+	"errors"
+	"testing"
+)
 
 // recorder is a Recoverable component that records what it was told.
 type recorder struct {
@@ -42,5 +45,42 @@ func TestRecoveryTellsComponentsOnceInKindOrder(t *testing.T) {
 	}
 	if string(a.applied) != "x" || m.Applied() != 5 {
 		t.Fatalf("apply during recovery lost: %q applied %d", a.applied, m.Applied())
+	}
+}
+
+// holder holds the machine while hold is set.
+type holder struct {
+	recorder
+	hold bool
+}
+
+func (h *holder) Holds() (bool, string) { return h.hold, "test" }
+
+// TestHolderStopsTheMachine: while a component holds, a command is not
+// applied, the applied index stays, and the error is ErrHeld; a component
+// registered late holds from its registration.
+func TestHolderStopsTheMachine(t *testing.T) {
+	m := NewMachine()
+	a := &recorder{}
+	m.Register(KindReserved+1, a)
+	if _, err := m.Apply(5, []byte{byte(KindReserved + 1), 'x'}); err != nil {
+		t.Fatal(err)
+	}
+	h := &holder{}
+	m.Register(KindReserved+2, h)
+	h.hold = true
+	_, err := m.Apply(6, []byte{byte(KindReserved + 1), 'y'})
+	if !errors.Is(err, ErrHeld) {
+		t.Fatalf("a held machine's apply: %v, want ErrHeld", err)
+	}
+	if string(a.applied) != "x" || m.Applied() != 5 {
+		t.Fatalf("a held machine applied %q, applied index %d; want x and 5", a.applied, m.Applied())
+	}
+	if held, why := m.Holds(); !held || why != "test" {
+		t.Fatalf("Holds = %v %q", held, why)
+	}
+	h.hold = false
+	if _, err := m.Apply(6, []byte{byte(KindReserved + 1), 'y'}); err != nil || string(a.applied) != "xy" || m.Applied() != 6 {
+		t.Fatalf("after the hold: err %v, applied %q at %d", err, a.applied, m.Applied())
 	}
 }

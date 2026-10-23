@@ -140,6 +140,15 @@ func serving(ready bool, readyReason string, ownersKnown bool) (bool, string) {
 	return true, ""
 }
 
+// consensusHeld reports whether the consensus core holds the log.
+func (s *Server) consensusHeld() bool {
+	if s.consensus == nil {
+		return false
+	}
+	_, held := s.consensus.Held()
+	return held
+}
+
 // Readiness reports the readiness signal and, when false, the reason.
 func (s *Server) Readiness() (bool, string) {
 	switch {
@@ -147,14 +156,19 @@ func (s *Server) Readiness() (bool, string) {
 		return false, "draining"
 	case !s.ready.Load():
 		return false, "not-serving"
+	case s.leases != nil && s.leases.BelowLevel(), s.consensusHeld():
+		// Ahead of recovering and behind: a node below the level stays both,
+		// and holds, until it is restarted on a build that understands the
+		// level.
+		return false, "level"
 	case s.consensus != nil && s.consensus.Recovering():
 		return false, "recovering"
+	case s.consensus != nil && s.consensus.Behind():
+		return false, "behind"
 	case s.consensus != nil && !s.consensus.Ready():
 		return false, "consensus"
 	case s.leases != nil && s.leases.Fenced():
 		return false, "fenced"
-	case s.leases != nil && s.leases.BelowLevel():
-		return false, "level"
 	case s.topology != nil && !s.topology.Stable():
 		return false, "topology"
 	}

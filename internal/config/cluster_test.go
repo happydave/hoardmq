@@ -75,7 +75,7 @@ func TestClusterRules(t *testing.T) {
 	peers := `"peers":[{"name":"n2","address":"h2:7000"}]`
 	cases := []struct{ name, cluster, pointer, want string }{
 		{"peers without listen", `{"auth":{"mode":"secret","secretFile":"` + short + `"},` + peers + `}`, "/cluster/listen", "required when peers"},
-		{"peers without auth", `{"listen":"127.0.0.1:1",` + peers + `}`, "/cluster/auth/mode", "required when peers"},
+		{"peers without auth", `{"listen":"127.0.0.1:1",` + peers + `}`, "/cluster/auth/tls", "required for mtls"},
 		{"duplicate peers", `{"listen":"127.0.0.1:1","peers":[{"name":"n2","address":"a:1"},{"name":"n2","address":"b:1"}]}`, "/cluster/peers/1/name", "duplicate"},
 		{"self peer", `{"listen":"127.0.0.1:1","peers":[{"name":"n1","address":"a:1"}]}`, "/cluster/peers/0/name", "cannot be this node"},
 		{"bad peer address", `{"listen":"127.0.0.1:1","peers":[{"name":"n2","address":"nohost"}]}`, "/cluster/peers/0/address", "host:port"},

@@ -105,6 +105,8 @@ func TestRollFindings(t *testing.T) {
 		{"served empty beside no expiry", func(r *rollRecord) {
 			r.Steps[1].Empty = map[string]float64{`hoardmq_sessions_rebuilt_empty_total{reason="no-expiry"}`: 4, `hoardmq_sessions_rebuilt_empty_total{reason="raced"}`: 1}
 		}, "n2: 1 sessions served empty during the step"},
+		{"behind", func(r *rollRecord) { r.ApplyStalls = map[string]uint64{"n2": 2} }, "n2: its consensus core reported itself behind 2 times"},
+		{"held", func(r *rollRecord) { r.Holds = map[string]uint64{"n3": 1} }, "n3: its consensus core held the log 1 times"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -3,14 +3,17 @@
 HoardMQ is an MQTT broker written in Go: full MQTT 5.0 and 3.1.1 (with
 protocol level 3 accepted as an input dialect), clustered from the start, free
 for commercial use, and built to stand against the enterprise tiers of the
-incumbents on scale, cluster resilience and security. It is early: this
-repository currently holds a live single node: listeners over TCP, TLS and
-WebSocket, the wire codec for protocol levels 3, 4 and 5, the per-connection
-state machine with authentication and authorization, sessions with QoS 0 to
-2 and Wills, wildcard subscriptions, retained messages and shared
-subscriptions, a write-ahead log that makes persistent sessions and
-retained messages survive a restart, and the project gates. The design
-lives in the project's ticket repository.
+incumbents on scale, cluster resilience and security. A single node is a
+one-member cluster; there is no separate single-node mode. This repository
+holds the broker: listeners over TCP, TLS and WebSocket; the wire codec for
+protocol levels 3, 4 and 5; sessions with QoS 0 to 2, Wills, retained messages
+and wildcard and shared subscriptions; the cluster (a consensus core, a lease
+per client identifier with takeover between nodes, replication of sessions
+and retained messages, routing between nodes, a drain); a write-ahead log;
+authentication, authorization and the admin API; metrics, traces and an audit
+log; modules on a public extension API, with a Kafka forwarder; a Helm chart;
+and the conformance suite and simulation harness that gate it. No release has
+been tagged yet ([CHANGELOG.md](CHANGELOG.md)). The design lives in the project's ticket repository.
 
 The public repository on GitHub is published from the project's private
 repository as a fresh history: each commit there is a snapshot of the private
@@ -21,6 +24,11 @@ ran on and run to several hundred megabytes. They and the full history stay in
 the private repository, so the paths into `sim/results/` that this README and
 the code's comments cite do not resolve on GitHub, and the test that replays
 published results skips there.
+
+[CHANGELOG.md](CHANGELOG.md) records what each release changes,
+[docs/stability.md](docs/stability.md) what each surface may change between
+releases, and [docs/upgrade.md](docs/upgrade.md) how to move a cluster from one
+release to the next.
 
 ## Command
 
@@ -121,7 +129,7 @@ reports every problem in one run, as `PATH: /json/pointer: message`, sorted.
   "limits": { "maxPacketSize": 1048576, "receiveMaximum": 1024, "maxQueuedMessages": 1000,
               "maxKeepAlive": 0, "connectTimeout": 10, "connectRate": 0, "connectBurst": 0,
               "clientMessageRate": 0, "clientMessageBurst": 0, "clientByteRate": 0, "clientByteBurst": 0,
-              "maxTopicAliasBytes": 1048576 },
+              "maxTopicAliasBytes": 1048576, "maxSubscriptions": 0 },
   "overload": { "queuedMessages": 1000000, "replicationLag": 400000, "memoryBytes": 0 },
   "flapping": { "enabled": true, "windowSeconds": 60, "maxCount": 15, "banSeconds": 300 },
   "auth": { "anonymous": false, "sessionBinding": "principal", "decisionTtlSeconds": 3600, "argon2MemoryBytes": 268435456,
@@ -171,6 +179,7 @@ file and the environment overrides it started with, validates them as
 | a listener's `maxConnections` | the next accepted connection; connections over a lowered bound stay |
 | `limits.maxQueuedMessages`, `limits.queueDrop` | the next message queued; a longer queue is not trimmed |
 | `limits.maxSessionExpiry` | the next expiry a client sets; sessions keep theirs |
+| `limits.maxSubscriptions` | the next SUBSCRIBE; a session over a lowered limit keeps its filters |
 | `overload.*` | the next stress sample |
 | `flapping.*` | the next abnormal end; bans already written stand |
 
@@ -209,6 +218,13 @@ without a CONNACK. A CONNECT one limit refuses takes nothing from the other.
 Refusals are counted by `hoardmq_connect_rate_refused_total{listener,limit}`
 (`limit` is `listener` or `node`). Why the limits are off by default, and how to
 size one, is under "The connect path's cost" below.
+
+`maxConnections` bounds the connections a listener holds at once; one more is
+closed as it is accepted, since MQTT has no way to refuse a connection before
+its CONNECT, and counted in `hoardmq_max_connections_refused_total{listener}`.
+0, the default, is unlimited. The Helm chart sets a connect rate, a connection
+bound and a subscription limit (its README, "Limits"); the broker's own
+defaults stay unlimited.
 
 ### Authentication and authorization
 
@@ -431,7 +447,13 @@ cached until their `nextUpdate` (at most 100,000 answers and 64 lists); a
 CONNECT waits for a fetch at most `fetchWaitMs` (default 2,000) and the fetch
 runs to `timeoutMs` (default 5,000) whoever stops waiting. OCSP is written
 in-house (RFC 6960 with SHA-1 CertIDs and no nonce, RFC 5019); a response may
-be signed by the issuer or by a responder it delegated to. A CRL is cached
+be signed by the issuer or by a responder it delegated to. Since a request
+carries no nonce, an answer without a `nextUpdate` is accepted only while its
+`thisUpdate` is at most `ocspMaxAgeSeconds` old (default 86,400, a day; 60 to
+2,592,000), so an old answer replayed after a revocation is refused as stale;
+an answer with a `nextUpdate` is accepted until then, whatever its age. A
+responder that pre-signs answers without `nextUpdate` needs the setting above
+the age it serves them at. A CRL is cached
 for the issuer it was accepted for.
 
 A CRL with an issuing distribution point (a partitioned list, as public CAs
@@ -460,11 +482,13 @@ final message, which proves the server holds the credential. Users are read
 from a users file in the `auth.file` format; only users stored in the SCRAM
 form can use it — the `$pbkdf2-sha256$` hash is itself the value SCRAM derives
 its client key from, so a stolen file would log in without cracking anything.
-A user the file does not hold is answered with a salt of its own and refused
-at the last step, as a wrong password is. A CONNECT naming the method must
-not carry a password, and a username it carries must be the authenticated
-user. Re-authentication (AUTH 0x19, § 4.12.1) runs the same exchange during
-the session; a failure, or another user, ends it with DISCONNECT 0x87.
+A user the file does not hold is answered with a salt of its own and the
+default iteration count, and refused at the last step, as a wrong password is;
+a user hashed with another count (`-iterations`) is told apart from unknown
+users by it. A CONNECT naming the method must not carry a password, and a
+username it carries must be the authenticated user. Re-authentication (AUTH
+0x19, § 4.12.1) runs the same exchange during the session; a failure, or
+another user, ends it with DISCONNECT 0x87.
 Channel binding (`-PLUS`) and SASLprep are not supported: usernames and
 passwords are compared as the bytes sent. An unknown method is answered
 CONNACK 0x8C.
@@ -735,8 +759,11 @@ told in CONNACK. A Will is published after its Will Delay Interval when a
 connection ends abnormally, at once when the delay is 0, at session end if
 that comes first, never after a normal DISCONNECT, and not at all when a new
 connection to the same client identifier arrives before the delay elapses.
-A second connection with the same client identifier takes the session over
-and the first receives DISCONNECT 0x8E.
+A Will Topic must be a valid topic name: one with `+` or `#`, or an empty one,
+is refused at CONNECT before authentication, with CONNACK 0x90 at MQTT 5.0
+and by closing the connection at 3.1.1 and 3.1. A second connection with the
+same client identifier takes the session over and the first receives
+DISCONNECT 0x8E.
 
 ### Subscriptions, retained messages and shared subscriptions
 
@@ -763,6 +790,15 @@ skipped while any member is online; when all are offline the message queues
 on one member. When a member's session ends, its QoS 1 messages still in
 flight or queued are re-offered to the group; QoS 2 messages in flight are
 never redistributed. Level 3 and 4 clients may use `$share/` filters.
+
+`limits.maxSubscriptions` bounds the topic filters one client's session holds,
+shared ones included; 0, the default, is unlimited. A SUBSCRIBE filter the
+session does not hold, once it holds that many, is refused alone with Quota
+exceeded (0x97) at MQTT 5.0 and 0x80 at 3.1.1 and 3.1; the other filters in
+the packet are handled as usual, a filter the session holds is replaced, and
+the client stays connected. Refusals are counted in
+`hoardmq_subscription_limit_refusals_total{namespace}`. A session that holds
+more, after the limit was lowered, keeps them.
 
 ### Modules
 
@@ -799,7 +835,7 @@ imports only the standard library:
   feed the replication tap (`SetTap`), and one without it is refused;
 - `ext/trace` (experimental) holds the tracer and the exporter a trace module supplies.
 
-The API has its own version, `ext.APIVersion` (0.2.0), which `hoardmq version` prints
+The API has its own version, `ext.APIVersion` (0.3.0), which `hoardmq version` prints
 beside the modules compiled in. [ext/CHANGELOG.md](ext/CHANGELOG.md) states what a
 version may change. Built-in modules reach the broker only through this API, and tests
 hold them to it (`internal/module/seam_test.go`).
@@ -1400,10 +1436,26 @@ never declared silent because its peer's handlers were busy. `cluster.listen` bi
 listener; `cluster.peers` names the other nodes; `node.name` must be set and
 `cluster.id` must agree, or the peer is refused. `cluster.auth.mode` is
 `mtls` (each node presents a certificate issued by the cluster CA in
-`auth.tls.caFile`, and the certificate's common name must be the node's
-name) or `secret` (both sides prove a shared secret from `auth.secretFile`
-with an HMAC over fresh nonces; the connection is authenticated but not
-encrypted, so use mutual TLS anywhere the network is not trusted). The
+`auth.tls.caFile`, the certificate's common name must be the node's
+name and its extended key usages must include both client auth and server
+auth, and every frame travels inside TLS) or `secret` (both sides prove a
+shared secret from `auth.secretFile` with an HMAC over fresh nonces). In
+`secret` mode only the handshake is authenticated: the frames after it carry
+no MAC and are not encrypted, so a host on the path between two nodes can
+read, alter or inject raft, replication, forwarded and admin traffic. Use
+`secret` only on a network you trust; use `mtls` everywhere else. With peers
+or DNS discovery configured and no mode named, the mode is `mtls`; a node
+with neither needs no mode. Each node both dials and accepts, so a
+certificate that lists only one of the two usages, only "any", or none (which
+X.509 reads as any) is refused by its peers: logged at Warn as `cluster peer
+refused` with reason `certificate` ("certificate for … lacks the client and
+server auth extended key usages", or the TLS library's usage error) and
+counted in `hoardmq_cluster_refusals_total{reason="certificate"}`, as is any
+other certificate a peer's TLS check refuses. Issue node certificates with
+both usages (`extendedKeyUsage = serverAuth, clientAuth` in OpenSSL); the Helm
+chart's do. Until a
+peer has authenticated, a node reads no frame larger than the largest hello
+the handshake encodes (131,140 bytes), whatever `cluster.maxFrameBytes` is. The
 framing is versioned; peers negotiate the highest version both support, so
 a rolling upgrade to a newer framing keeps the cluster talking. Framing
 version 2 added an urgent lane beside the ordered stream (heartbeats and
@@ -1432,8 +1484,10 @@ the project's own interface: propose a command and get its result once
 applied, an apply callback in log order, snapshots in a format the project
 owns, membership changes and a leader hint. The replicated state machine
 holds the membership (names, ids, addresses, roles), a cluster-wide
-configuration set and a monotone epoch; the lease table and the shard map
-join it in later work. Its log is `node.dataDir/logs/raft`, on the same
+configuration set and a monotone epoch, and three components: the lease
+table (with the cluster feature level and each node's record), the shard map,
+and the `records` component (client credentials, API keys, bans and
+administered limits). Its log is `node.dataDir/logs/raft`, on the same
 write-ahead log engine as the session state; hard state and entries are
 written and synced before any message leaves the node, which the tests
 show with an instrumented store.
@@ -1500,7 +1554,8 @@ refused. `cluster.discovery.mode` is `static`
 ordinal below `replicas`, this node's ordinal coming from `node.name`, as a
 StatefulSet behind a headless Service provides; a name that does not
 resolve yet is retried, never treated as absence. `/readyz` reports ready
-only when the core is a member that has caught up with the leader. Raft
+only when the core is a member that has caught up with the leader, and not
+while it is behind (see "Drain and readiness"). Raft
 messages arriving from the transport wait a bounded time for the core's
 inbox when the consensus loop is behind — five raft ticks, one sixth of the
 control connection's silence limit — and are then dropped and counted
@@ -1552,8 +1607,9 @@ token seen is answered *superseded*, the session is not given up on its
 account, and its CONNECT is refused (`where="takeover"`, `where="acquire"`).
 
 A node below the cluster's feature level neither adopts a dead owner's
-leases nor raises the level: it serves nobody, so what it adopted nobody
-could reach. A node that replayed a reassignment during recovery — where no
+leases, nor raises the level, nor keeps leadership: it serves nobody, so what
+it adopted nobody could reach, and the leader takes the leases it owns
+(below, "Upgrades and the cluster feature level"). A node that replayed a reassignment during recovery — where no
 adoption is queued, because replay acts on nothing — queues one for every
 offline lease it owns and holds no session for when recovery ends
 (`hoardmq_lease_adoptions_recovered_total`).
@@ -1872,8 +1928,9 @@ judging the record of any owner it can still reach, so every live node gets
 a full ttl to renew with it after an election; an owner whose link is down
 is adopted as soon as its record lapses. The fence has one exception, the
 mirror of that grace: a node whose record has lapsed does not fence while
-it can reach a majority of its peers and the group has no leader, or has
-had one for less than a ttl — with no leader nothing can be adopted or
+it and the voters it can reach are a majority of the consensus voters (a
+learner, or a configured peer that is not a member, counts neither way) and
+the group has no leader, or has had one for less than a ttl — with no leader nothing can be adopted or
 taken over, so no second owner can appear, and fencing would only
 disconnect every client for the length of an election; the deferral is
 counted (`hoardmq_lease_fence_deferred_total`). A node that
@@ -2470,7 +2527,19 @@ ready, which is what keeps traffic off a cluster still settling. The shard
 map is not part of it: a drain or a return moves only the map, and the other
 nodes stay ready. A node whose consensus loop has stopped on an error (a failed
 write or fsync of the consensus log, a snapshot it could not install) is not
-ready either.
+ready either. Nor is a member that has fallen behind and is not catching up: a
+follower's own commit index stops where its log ends, so once an election
+timeout each follower asks its leader for the commit index (a raft read index
+request, answered after one heartbeat round that concurrent requests share).
+A member whose applied index stays below the answer, without advancing, for
+20 election timeouts (at least 10 s; 20 s at the defaults) reports `behind`
+(`/servingz` answers `not ready: behind`) until it advances again; a follower
+that applies more slowly than the leader commits is advancing and stays ready.
+`hoardmq_raft_apply_stalled` is 1 while the node is behind and
+`hoardmq_raft_apply_stalls_total` counts the times it became so, with a warning
+naming its applied index and the leader's commit. This is how a voter whose
+log ends below the leader's compacted log, and which cannot receive the
+snapshot it needs, shows.
 
 Liveness (`/healthz`) fails, answering 503 with the cause, only while the node
 cannot recover without a restart: its consensus loop has stopped on an error
@@ -2501,6 +2570,10 @@ when not degraded) carry the same state, and `GET /api/v1/cluster` carries
 
 ### Upgrades and the cluster feature level
 
+The operator's procedure, on the chart and on hosts without Kubernetes, with
+what a mixed cluster refuses and how to roll back, is
+[docs/upgrade.md](docs/upgrade.md). This section is the mechanism.
+
 Two builds in one cluster must never apply the same replicated operation
 differently, so a change to what a replicated operation *does* — a
 lease-table operation every voter applies, or how a follower applies a
@@ -2514,38 +2587,71 @@ every node switches at the same position in the log, not at the moment its
 own binary was replaced. The level only rises.
 
 During a rolling upgrade the cluster therefore keeps the old semantics until
-the last member is on the new build, then switches once. A node whose build
-is **below** the cluster's level — rolled back, or added from an older image
-— stays a consensus member so it keeps receiving the log, but serves nobody:
-`/readyz` answers `level`, a CONNECT is refused with `0x9C Use Another
-Server` naming the leader (`0x88` when none is known), and it logs the two
-levels at Error. It also refuses replication frames stamped with a level it
-does not understand, so the sessions it is a replica target for fail their
-QoS 1 and 2 barriers until it is upgraded or leaves: adding a node from an
-older image is a partial outage, not a no-op. A cluster's first node is alone
-in the membership when it starts and raises the level to its own at once.
-Such a node still applies the log, with the semantics its build has; what
-that must become is an open design question, and no gated change ships
-before it is answered (`docs/release-checklist.md`).
+the last member is on the new build, then switches once. An alive record
+carries the level the node's build understands now, so a node rolled back
+reads as its older build everywhere, and a raise is a command of its own.
+A cluster's first node is alone in the membership when it starts and raises
+the level to its own at once.
 
-Replication frames carry the level their sender read (`lvl`, absent at
-level 1), because a frame is applied off the log and the receiver's reading
-may differ. A frame of an unknown *kind* is still acknowledged unapplied, as
+A node whose build is **below** the cluster's level — rolled back, or added
+from an older image — **holds the log**: it applies the entry that raised the
+level and nothing after it until the process ends, because it would apply
+those entries with semantics the cluster has left. It stays a consensus
+member: it stores and acknowledges every entry and votes, so the cluster's
+quorum keeps it, but it builds no snapshot and compacts nothing, so its raft
+log grows with every committed entry until it is upgraded or removed. Its
+snapshot on disk is therefore only ever one written by a build that
+understood its level. Restarted on a build that understands the level, it
+restores that snapshot and replays what it held, with the semantics each
+entry was committed under; nothing is discarded or fetched. Restarted on the
+same build, it holds again at the same entry.
+
+While below the level a node serves nobody: `/readyz` and `/servingz` answer
+`level` (ahead of `recovering` and `behind`; a hold is not counted as an
+apply stall), a CONNECT is refused with `0x9C Use Another Server` naming the
+leader (`0x88` when none is known), the clients it had are disconnected, it
+takes no forwarded QoS 1 or 2 delivery into its sessions, and it proposes
+nothing but its alive record. It disarms the Will and expiry timers it had
+armed and starts no adoption, since its table no longer learns that a client
+came back elsewhere. If it is elected leader it hands leadership to a
+caught-up voter at the level. The leader leaves it out of the shard map's
+basis, whatever that does to the copy count (the reduced count shows in
+`hoardmq_replication_sessions_short` and `…_retained_shards_short`), hands
+the leases it owns to itself with the drain's hand-off, adopting them as a
+drain's receiver does, and a drain never picks it as a target. `/healthz`
+stays 200: a restart on the same build would hold again. The hold logs one
+Error with the entry, both levels and the raft log's size, then a Warn each
+minute with its growth; size the volume, and upgrade the node before it
+fills. No command removes a consensus member yet, so upgrading it is the way
+out of a hold.
+
+Replication frames carry the level their sender applied (`lvl`, absent at
+level 1): the cluster's, or its build's when that is lower, because a frame is
+applied off the log and the receiver's reading may differ. A frame of an unknown *kind* is still acknowledged unapplied, as
 before: a kind added later must be safe for a peer that ignores it.
 
 Raft snapshots are files of format 2 (above, "Consensus core"). A build
 before them stored a snapshot inline in the raft log; a newer build still
 reads that, and an older leader's inline snapshot, and writes its first file
 at its next snapshot. An older build meeting format 2 on its own disk, a
-rollback, refuses to start, naming the format.
+rollback, refuses to start, naming the format. So does this build on a disk
+whose stored snapshot is in a format it does not know, and it removes no
+file from the snapshot directory first, so the newer build starts on that
+disk again.
 
 Level 1 is everything that shipped up to the first release tag. Metrics:
 `hoardmq_cluster_feature_level`, `hoardmq_cluster_feature_level_build`
 (this node's build), `hoardmq_cluster_feature_level_min_advertised` (what a
 raise waits for; 0 while a member has no record),
-`hoardmq_cluster_feature_level_raises_total{outcome}` and
-`hoardmq_cluster_feature_level_refusals_total{where}` (`connect`, `frame`).
-Raises and a node falling below the level are audited as `cluster.level`.
+`hoardmq_cluster_feature_level_raises_total{outcome}`,
+`hoardmq_cluster_feature_level_refusals_total{where}` (`connect`, `frame`,
+`propose`), `hoardmq_cluster_feature_level_held` (1 while this node holds),
+`hoardmq_raft_held_entries` (committed entries it holds unapplied),
+`hoardmq_cluster_feature_level_transfers_total{outcome}`,
+`hoardmq_shardmap_members_below_level` and
+`hoardmq_lease_handoffs_below_level_total{outcome}`. Raises, a node falling
+below the level and a held leader's transfer are audited as `cluster.level`,
+a hold as `consensus.held`, the leader's hand-off as `lease.handoff-below`.
 
 **Making a gated change:** raise `lease.BuildLevel` in the same commit, read
 `Table.Level()` where a log-applied operation is applied and the frame's
@@ -2566,8 +2672,9 @@ chart-generated CA reused across upgrades (or cert-manager), a preStop
 follows the hook (`cluster.drain.holdExitMs`), a termination grace period of
 the drain's two timeouts plus a margin, readiness on `/readyz` and liveness on `/healthz`. With `admin.enabled` the
 chart configures the admin API on the pod's loopback with a generated drain
-token and operator token, and the preStop drains through it. No operator and
-no CRD are required. The chart's README covers the values, the N-1
+token and operator token, and the preStop drains through it. The chart sets a
+connect rate, a connection bound per listener and a subscription limit sized to
+its default resources. No operator and no CRD are required. The chart's README covers the values, the N-1
 capacity trade-off and the rolling-restart runbook; `go test ./deploy/...`
 keeps the templates consistent with `values.yaml` without Helm installed.
 
@@ -2796,8 +2903,13 @@ Appendix B (`conformance/statements/mqtt5.json`, 251 statements;
 `go run ./conformance/cmd/coverage` renders
 [conformance/COVERAGE.md](conformance/COVERAGE.md): every statement with
 `pass`, `fail`, `not-covered` or `n/a-client` (client-only statements, each
-with its reason in `statements/scope.json`). A test that names an unknown
-identifier fails the run.
+with its reason in `statements/scope.json`). Every test names the
+specification it observes, the one of the protocol level it connects at, and
+its results count only there: statement numbers recur in the two
+specifications with different meanings. A test that names an identifier its
+specification does not have fails the run. Today MQTT 5.0 has 146 of 251
+statements passing, 0 failing, 90 not covered and 15 client-only; MQTT 3.1.1
+has 77 of 139 passing, 0 failing, 52 not covered and 10 client-only.
 
 ```
 go test ./conformance -conformance.results=$PWD/conformance/results.json
@@ -3004,7 +3116,7 @@ count starting again after a restart, counted by
 
 ## Building and testing
 
-Go 1.26 or later; no Makefile, the Go tool is the build system.
+Go 1.26.4 or later (`go.mod`); no Makefile, the Go tool is the build system.
 
 ```
 go test -timeout 30m ./...                                              # the sim package alone runs for about ten minutes, which is Go's default: without this the gate panics or passes by luck
@@ -3033,6 +3145,12 @@ package that showed it, and in a negative control whose subject is a race
 the conformance
 suite imports the two Paho Go clients (EPL-2.0, test only, pinned) and what
 they bring in, none of which reaches the binary.
+
+## Security
+
+Report a vulnerability privately through the repository's Security tab
+(**Report a vulnerability**), not in a public issue. [SECURITY.md](SECURITY.md)
+gives the scope, the supported versions and what to expect.
 
 ## License
 

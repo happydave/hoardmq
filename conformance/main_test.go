@@ -26,14 +26,16 @@ func TestMain(m *testing.M) {
 			names = append(names, id)
 		}
 		sort.Strings(names)
-		fmt.Fprintf(os.Stderr, "conformance: %d annotated statement identifiers are not in the statements files: %s\n", len(names), strings.Join(names, ", "))
+		fmt.Fprintf(os.Stderr, "conformance: %d annotated statement identifiers are not in their specification's statements file: %s\n", len(names), strings.Join(names, ", "))
 		if code == 0 {
 			code = 1
 		}
 	}
 	if *resultsPath != "" {
-		for _, r := range results {
-			sort.Strings(r.Tests)
+		for _, byID := range results {
+			for _, r := range byID {
+				sort.Strings(r.Tests)
+			}
 		}
 		data, err := json.MarshalIndent(results, "", "  ")
 		if err == nil {

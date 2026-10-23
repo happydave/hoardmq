@@ -18,7 +18,7 @@ helm install hoardmq deploy/helm/hoardmq --namespace hoardmq --create-namespace 
 | Service `<release>-headless` | `publishNotReadyAddresses: true`; peers resolve `<release>-<i>.<release>-headless` before they are ready |
 | Service `<release>` | the client-facing MQTT port(s) |
 | ConfigMap `<release>` | the broker's JSON configuration; the pod's name becomes `node.name` and its headless DNS name the advertised client address, and `metrics.prometheus` serves the probes, `/metrics` and `/drain` (to loopback callers only, the preStop among them; closed with `admin.enabled`, which adds the admin API on the pod's loopback) |
-| Secret `<release>-cluster-tls` | the cluster CA and one certificate per ordinal, each with the node name as its common name (`tls.mode: generated`, kept across upgrades), or one cert-manager `Certificate` per ordinal (`tls.mode: certManager`) |
+| Secrets `<release>-cluster-tls`, `<release>-cluster-ca` | one certificate per ordinal, each with the node name as its common name, and the CA with its key, which no pod mounts (`tls.mode: generated`, both kept across upgrades), or one cert-manager `Certificate` per ordinal from a private CA or a named issuer (`tls.mode: certManager`); see "TLS between nodes" |
 | Secret `<release>-admin` | with `admin.enabled` only: the admin API's `drain.token` (the preStop's) and `operator.token`, generated once and kept across upgrades and uninstall |
 | PodDisruptionBudget | `maxUnavailable: 1` |
 
@@ -52,10 +52,89 @@ handed off to be confirmed held by the pod that received it; the
 termination grace period is both timeouts plus the margin (75 s by
 default), so the kubelet does not kill a pod whose drain is still waiting.
 
+## Scaling
+
+`cluster.maxReplicas` (default 7) is the most pods the cluster can grow to
+without a rolling restart. Every node dials every ordinal below it, retrying
+the names of pods that do not run, so changing `replicaCount` up to it
+changes neither the configuration nor the pod template: `helm upgrade --set
+replicaCount=4` starts `<release>-3`, which the running pods are already
+dialing, and restarts nothing. Lowering it stops the highest pods the same
+way; a stopped pod stays a member of the consensus core, counted in its
+quorum, until it is removed.
+
+An ordinal below the maximum that no pod runs costs its redial on each pod
+(every 5 s once the backoff has grown), a `dial failed` line at Debug, and an
+entry among the peers of the admin API's overload view. It is not a member:
+readiness and the shard map count only the consensus members, and the
+self-fence's quorum only its voters. A one-pod release waits the join window
+(`cluster.raft.joinTimeoutMs`, 30 s by default) before it starts its cluster,
+as several pods already do on a first start.
+
+Growing past the maximum is two upgrades: first raise `cluster.maxReplicas`
+alone, which changes the configuration and rolls the pods one at a time, as
+any configuration change does; then raise `replicaCount`. The chart refuses
+a `replicaCount` above `cluster.maxReplicas`. Both in one upgrade would start
+the new pods before the running ones dial them, and the rollout would wait
+on a pod that cannot join.
+
+With `tls.mode: certManager` the chart makes a Certificate for every ordinal
+below the maximum, and each pod waits for all of them to be issued; see "TLS
+between nodes".
+
+## Limits
+
+The broker's own connect-rate, connection and subscription limits are off by
+default; the chart sets them, per pod:
+
+| Value | Default | Past it |
+|---|---|---|
+| `limits.connectRate`, `limits.connectBurst` | 2,000 CONNECTs a second across the pod's listeners; burst 0, twice the rate | the CONNECT is refused before its credentials are read: CONNACK 0x9F at MQTT 5.0, a close at 3.1.1 and 3.1; `hoardmq_connect_rate_refused_total{listener,limit="node"}` |
+| `listeners.mqtt.maxConnections`, `listeners.mqtts.maxConnections` | 20,000 connections on each listener | the connection is closed as it is accepted; `hoardmq_max_connections_refused_total{listener}` |
+| `limits.maxSubscriptions` | 100 topic filters a client's session holds | the filter is refused in the SUBACK, 0x97 at 5.0 and 0x80 below, and the client stays connected; a filter the session holds is replaced as usual; `hoardmq_subscription_limit_refusals_total{namespace}` |
+
+Each is reloadable without a restart, and 0 turns it off; the chart's pods
+restart on any configuration change anyway. Values in `extraConfig.limits`
+and `extraConfig.listeners` replace these.
+
+Why these values:
+
+- **The connection bound fits the default memory limit.** At 250,000 clients
+  the three brokers held about 11 GiB (hoardmq
+  `sim/results/sweep-above-100k-2026-09-15/`, an earlier build), about 45 KiB
+  a client with its replicas, so a pod with the default 1 GiB holds about
+  23,000. A rolling restart of three pods leaves the last about three quarters
+  of all clients (see "What a rolling restart refuses"), so the defaults hold
+  about 26,000 clients through a roll and 40,000 through a node loss. For more,
+  raise `resources.limits.memory` and both `maxConnections` together: the
+  100,000-client figures below need about 75,000 a pod for a roll. With both
+  listeners enabled a pod may hold their sum; split the bound between them.
+- **The connect rate does not hold back a failover at the measured scale.**
+  When a node of three serving 100,000 clients is lost, the two survivors take
+  about 16,700 clients each, at most 12,017–16,438 a second across the cluster
+  (hoardmq `sim/results/connectrate-2026-09-26/`). A bucket of 4,000 refilled at
+  2,000 a second admits a survivor's share within about 6.4 s of the first,
+  against about 3 s unlimited, while every client was back 31–33 s after the
+  crash; at the chart's own capacity a survivor's share fits the burst. This is
+  arithmetic, not a measurement, and a refused client's own reconnect backoff
+  adds to it. A rolling restart at 100,000 clients redirects about 1,500 a
+  second to each pod, under the rate. What the limit holds back is a reconnect
+  flood or a misbehaving fleet: whatever arrives, a pod starts session work for
+  at most 2,000 a second. A limit low enough to bound password derivation
+  costs more than it saves (the broker's README, "The connect path's cost"); the
+  cache and `maxHandshakes` bound that instead.
+- **The subscription limit bounds one client's share** of the routing table,
+  its session's journal and its replicas. A client that needs many topics
+  reaches them through wildcards; 100 distinct filters is a judgement, not a
+  measurement. Raise it for clients that hold more by design.
+
+The chart sets no per-client message or byte rate.
+
 ## Readiness and the rolling restart
 
-`/readyz` is true only when the node is a caught-up member, its leases are
-not fenced, it is not draining, and the membership and alive set have been
+`/readyz` is true only when the node is a caught-up member (not one whose
+applied index has stopped short of its leader's commit for 20 s, which reads
+`behind`), its leases are not fenced, it is not draining, and the membership and alive set have been
 unchanged for `cluster.readiness.stableSeconds`. The shard map is not part of
 it, so the other pods stay ready while a restarting pod leaves the map and
 returns to it; the restarted pod becomes ready once its own view has been
@@ -166,22 +245,62 @@ with `peer` the restarting pod, and a `replication barrier failed` warning per
 publish. Either stops when the rollout does. Refusals that continue after the rollout has
 settled are not this trade: see the runbook's step 4.
 
+## Upgrading
+
+```sh
+helm upgrade hoardmq deploy/helm/hoardmq -n hoardmq --reuse-values --set image.tag=<new>
+kubectl -n hoardmq rollout status statefulset/hoardmq --timeout=30m
+```
+
+The StatefulSet replaces one pod at a time, highest ordinal first, each
+drained by its preStop and waited for until Ready, so an upgrade refuses what
+a rolling restart refuses (above). `helm rollback hoardmq <revision> -n
+hoardmq` goes back the same way, before the cluster has raised its feature
+level. What a cluster running two builds refuses, how the level is raised and
+what cannot be rolled back are in [docs/upgrade.md](../../../docs/upgrade.md).
+
 ## TLS between nodes
 
 - `generated` (default): the chart makes a CA and one certificate per
-  ordinal, valid for `tls.generatedValidityDays`, stores them in a Secret
-  annotated `helm.sh/resource-policy: keep`, and reuses that Secret on every
-  upgrade (the template looks it up). Rotate by deleting the Secret and
-  upgrading.
-- `certManager`: an Issuer (self-signed unless `tls.certManager.issuerRef`
-  names one) and one Certificate per ordinal; cert-manager rotates.
+  ordinal, valid for `tls.generatedValidityDays`. The certificates are kept in
+  the Secret `<release>-cluster-tls` and the CA, with its key, in
+  `<release>-cluster-ca`; both are annotated `helm.sh/resource-policy: keep`
+  and reused on every upgrade (the templates look them up). An upgrade that
+  raises `replicaCount` signs each new ordinal's certificate with the stored
+  CA and keeps the others'.
+- `certManager`: one cert-manager Certificate per ordinal below
+  `cluster.maxReplicas`, whether or not a pod runs it: every pod's volume
+  names all of their Secrets, and a pod waits to start until they are issued.
+  With `tls.certManager.issuerRef` empty the chart makes a private CA (a
+  self-signed Issuer, a CA Certificate in `<release>-cluster-ca`, and a CA
+  Issuer that signs the nodes'); otherwise the named issuer signs them and
+  must put its CA in each Secret's `ca.crt`. cert-manager renews them; a pod
+  reads its certificate at start, so a renewal is in force from its next
+  restart.
 
 A peer accepts a connection only when the certificate's common name is the
-node name the peer claims, so the certificates are per-node, not per-release:
-each pod is pointed at its own through `HOARDMQ_CLUSTER_AUTH_TLS_CERT_FILE`,
-built from the pod's name. A Secret kept from an earlier release therefore
-has certificates only for the ordinals that existed when it was created;
-raising `replicaCount` means deleting the Secret and upgrading.
+node name the peer claims and the certificate carries both the client auth
+and server auth usages, which the chart's certificates do (cert-manager adds
+them only when asked, and the chart asks). An issuer that drops requested
+usages yields certificates the peers refuse.
+
+**Each container sees only its own key.** The broker container mounts its
+own certificate, key and the CA out of the volume by `subPathExpr` on the
+pod's name; no pod mounts `<release>-cluster-ca`. The pod's volume itself, on
+the node's kubelet, still holds every ordinal's certificate and key: a pod
+template is shared by every ordinal and cannot name one ordinal's Secret.
+Keys that never leave their own pod need cert-manager's CSI driver
+(`csi-driver`, not set up by this chart).
+
+**An old Secret.** A `<release>-cluster-tls` Secret made by an earlier chart
+has no stored CA key. It is kept as it is, but an upgrade that needs a
+certificate for an ordinal it lacks fails, naming the Secret: delete
+`<release>-cluster-tls`, upgrade, then restart every pod (`kubectl rollout
+restart statefulset/<release>`), since the running pods hold the old CA. The
+same applies when the two Secrets hold different CAs.
+
+**Rotation** (`generated`): delete both Secrets, upgrade, and restart every
+pod.
 
 The nodes verify each other's chain against the CA; the cluster port is
 never exposed outside the headless Service.
@@ -480,8 +599,8 @@ sixteen runs of `c2da075` and `3897466`, all messages delivered in each
 
 ### Cleanup
 
-`helm uninstall hoardmq -n hoardmq` keeps the TLS Secret and the volumes;
-delete them by hand if the data is not wanted. Because the Secret is kept,
+`helm uninstall hoardmq -n hoardmq` keeps the TLS Secrets and the volumes;
+delete them by hand if the data is not wanted. Because the Secrets are kept,
 reinstalling after a chart change reuses the old certificates — delete the
 namespace for a clean run. On an ephemeral cluster, `kind delete cluster
 --name hoardmq`.

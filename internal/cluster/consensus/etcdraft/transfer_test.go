@@ -130,6 +130,19 @@ func (w *warnLog) Handle(ctx context.Context, r slog.Record) error {
 func (w *warnLog) WithAttrs(as []slog.Attr) slog.Handler { return w }
 func (w *warnLog) WithGroup(string) slog.Handler         { return w }
 
+// matching is every warning or error whose message starts with prefix.
+func (w *warnLog) matching(prefix string) []map[string]string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	var out []map[string]string
+	for _, r := range w.recs {
+		if strings.HasPrefix(r["msg"], prefix) {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
 // count is how many warnings carry msg and, when given, reason.
 func (w *warnLog) count(msg, reason string) int {
 	w.mu.Lock()

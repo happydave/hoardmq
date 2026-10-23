@@ -45,6 +45,9 @@ type Leases interface {
 	// Leaving is whether a drain's hand-off has marked the node leaving since
 	// its last alive record.
 	Leaving(node string) bool
+	// MemberBelow is whether the node's latest alive record advertises a
+	// feature level below the cluster's.
+	MemberBelow(node string) bool
 }
 
 // Tokens is the node's record of the highest grant token seen per client
@@ -1387,12 +1390,14 @@ func sortedKeys(m map[string]bool) []string {
 	return out
 }
 
-// level is the cluster feature level this node stamps on its frames.
+// level is the cluster feature level this node stamps on its frames: the
+// semantics it applies, which on a build below the cluster's level are the
+// build's.
 func (r *Replicator) level() uint64 {
 	if r.o.Level == nil {
 		return 1
 	}
-	return r.o.Level()
+	return min(r.o.Level(), r.buildLevel())
 }
 
 // buildLevel is the highest feature level this build understands.

@@ -108,6 +108,29 @@ func TestMaxConnections(t *testing.T) {
 	if _, err := c2.Read(make([]byte, 1)); err == nil {
 		t.Fatal("surplus connection stayed open")
 	}
+	for deadline := time.Now().Add(2 * time.Second); l.Refused() < 1 && time.Now().Before(deadline); {
+		time.Sleep(time.Millisecond)
+	}
+	if n, active := l.Refused(), l.Active(); n != 1 || active != 1 {
+		t.Fatalf("refused %d, active %d; want 1 and 1", n, active)
+	}
+}
+
+// With no bound nothing is refused or counted.
+func TestNoMaxConnectionsCountsNothing(t *testing.T) {
+	l := open(t, config.Listener{Type: "tcp"})
+	for i := 0; i < 2; i++ {
+		c, err := net.Dial("tcp", l.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = c.Close() }()
+		s := accept(t, l)
+		defer func() { _ = s.Close() }()
+	}
+	if n, active := l.Refused(), l.Active(); n != 0 || active != 2 {
+		t.Fatalf("refused %d, active %d; want 0 and 2", n, active)
+	}
 }
 
 func TestAcceptAfterClose(t *testing.T) {

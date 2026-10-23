@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -39,6 +40,31 @@ func valuesKeys(t *testing.T) map[string]bool {
 		keys[strings.Join(stack, ".")] = true
 	}
 	return keys
+}
+
+// valuesScalars returns each dotted key path in values.yaml that holds a
+// scalar, with its value as written.
+func valuesScalars(t *testing.T) map[string]string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(chartDir, "values.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := map[string]string{}
+	var stack []string
+	for _, line := range strings.Split(string(data), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, "- ") {
+			continue
+		}
+		indent := (len(line) - len(strings.TrimLeft(line, " "))) / 2
+		name, value, _ := strings.Cut(trimmed, ":")
+		stack = append(stack[:min(indent, len(stack))], name)
+		if value = strings.TrimSpace(value); value != "" {
+			out[strings.Join(stack, ".")] = value
+		}
+	}
+	return out
 }
 
 func templates(t *testing.T) map[string]string {
@@ -106,6 +132,8 @@ func TestDesignedDeploymentProperties(t *testing.T) {
 	tpl := templates(t)
 	checks := []struct{ file, want string }{
 		{"statefulset.yaml", "podManagementPolicy: Parallel"},
+		// An upgrade replaces one pod at a time, each drained by its preStop.
+		{"statefulset.yaml", "updateStrategy:\n    type: RollingUpdate"},
 		{"statefulset.yaml", "terminationGracePeriodSeconds:"},
 		{"statefulset.yaml", "preStop:"},
 		{"statefulset.yaml", "- drain"},
@@ -120,8 +148,7 @@ func TestDesignedDeploymentProperties(t *testing.T) {
 		{"statefulset.yaml", "HOARDMQ_CLUSTER_ADVERTISE"},
 		// Each pod presents the certificate whose common name is its own node
 		// name; a shared one cannot authenticate a cluster.
-		{"statefulset.yaml", "HOARDMQ_CLUSTER_AUTH_TLS_CERT_FILE"},
-		{"statefulset.yaml", "$(HOARDMQ_NODE_NAME).crt"},
+		{"statefulset.yaml", "subPathExpr: $(HOARDMQ_NODE_NAME).crt"},
 		// Kubernetes' Service links would land in the broker's HOARDMQ_
 		// environment-override namespace and be rejected as unknown.
 		{"statefulset.yaml", "enableServiceLinks: false"},
@@ -287,5 +314,172 @@ func TestObservabilityDrainIsLoopbackOnly(t *testing.T) {
 	}
 	if strings.Contains(readme, "Restrict it with a NetworkPolicy") {
 		t.Error("the chart README still offers a NetworkPolicy as the protection for /drain")
+	}
+}
+
+// TestChartSetsTheLimits: the broker's own connect-rate, connection and
+// subscription limits are unlimited by default, so the chart sets each to a
+// positive number, carries it into the configuration document, and says in
+// its README why each value is what it is.
+func TestChartSetsTheLimits(t *testing.T) {
+	values := valuesScalars(t)
+	for _, key := range []string{"limits.connectRate", "limits.maxSubscriptions", "listeners.mqtt.maxConnections", "listeners.mqtts.maxConnections"} {
+		if n, err := strconv.Atoi(values[key]); err != nil || n <= 0 {
+			t.Errorf("values.yaml sets %s to %q, want a positive number", key, values[key])
+		}
+	}
+	cm := templates(t)["configmap.yaml"]
+	for _, want := range []string{
+		`"limits" (dict "connectRate" (int .Values.limits.connectRate) "connectBurst" (int .Values.limits.connectBurst) "maxSubscriptions" (int .Values.limits.maxSubscriptions))`,
+		`"maxConnections" (int .Values.listeners.mqtt.maxConnections)`,
+		`"maxConnections" (int .Values.listeners.mqtts.maxConnections)`,
+	} {
+		if !strings.Contains(cm, want) {
+			t.Errorf("configmap.yaml lacks %q", want)
+		}
+	}
+	data, err := os.ReadFile(filepath.Join(chartDir, "README.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	readme := string(data)
+	for _, want := range []string{"## Limits", "`limits.connectRate`", "`limits.maxSubscriptions`", "`listeners.mqtt.maxConnections`"} {
+		if !strings.Contains(readme, want) {
+			t.Errorf("the chart README lacks %q", want)
+		}
+	}
+}
+
+// TestClusterTLSPerPodAndScalable: the broker container mounts only its own
+// certificate, key and the CA, in both modes; the CA's key lives in a Secret
+// no pod mounts, so a later upgrade can sign a new ordinal's certificate and
+// fails, naming the Secret, when none is stored; cert-manager issues from one
+// CA, with both auth usages a peer requires.
+func TestClusterTLSPerPodAndScalable(t *testing.T) {
+	tpl := templates(t)
+	sts := tpl["statefulset.yaml"]
+	mounts := regexp.MustCompile(`(?m)^ +- name: cluster-tls\n +mountPath: (\S+)\n +(subPath|subPathExpr): (\S+)$`).FindAllStringSubmatch(sts, -1)
+	want := map[string]string{
+		"/etc/hoardmq-tls/tls.crt": "$(HOARDMQ_NODE_NAME).crt",
+		"/etc/hoardmq-tls/tls.key": "$(HOARDMQ_NODE_NAME).key",
+		"/etc/hoardmq-tls/ca.crt":  "ca.crt",
+		"/etc/hoardmq-tls":         "$(HOARDMQ_NODE_NAME)",
+	}
+	if len(mounts) != len(want) {
+		t.Fatalf("cluster-tls mounts %q, want one per path of %v", mounts, want)
+	}
+	for _, m := range mounts {
+		if want[m[1]] != m[3] {
+			t.Errorf("cluster-tls at %s selects %q, want %q", m[1], m[3], want[m[1]])
+		}
+	}
+	if n := len(regexp.MustCompile(`- name: cluster-tls\n +mountPath:`).FindAllString(sts, -1)); n != len(want) {
+		t.Errorf("cluster-tls is mounted %d times, %d of them selecting the pod's files", n, len(want))
+	}
+	if strings.Contains(sts, "tlsCASecret") || strings.Contains(sts, "cluster-ca") {
+		t.Error("the StatefulSet references the CA Secret")
+	}
+	for _, f := range []string{`"certFile" "/etc/hoardmq-tls/tls.crt"`, `"keyFile" "/etc/hoardmq-tls/tls.key"`, `"caFile" "/etc/hoardmq-tls/ca.crt"`} {
+		if !strings.Contains(tpl["configmap.yaml"], f) {
+			t.Errorf("configmap.yaml lacks %s", f)
+		}
+	}
+	secret := tpl["secret-tls.yaml"]
+	for _, want := range []string{
+		`lookup "v1" "Secret" .Release.Namespace $caName`,
+		`buildCustomCert (index $existingCA.data "ca.crt") (index $existingCA.data "ca.key")`,
+		`if not (hasKey $data (printf "%s.crt" $pod))`,
+		`has no certificate for %s and no CA key is stored to sign one: delete Secret %s and upgrade`,
+		`holds certificates from another CA than Secret %s`,
+	} {
+		if !strings.Contains(secret, want) {
+			t.Errorf("secret-tls.yaml lacks %q", want)
+		}
+	}
+	nodeSecret, caSecret, ok := strings.Cut(secret, "---")
+	if !ok || strings.Contains(nodeSecret, "ca.key:") || !strings.Contains(caSecret, "ca.key:") || !strings.Contains(caSecret, "name: {{ $caName }}") {
+		t.Error("the CA key is not in the CA Secret alone")
+	}
+	cert := tpl["certificate.yaml"]
+	for _, want := range []string{"selfSigned: {}", "isCA: true", "ca:\n    secretName: {{ include \"hoardmq.tlsCASecret\" . }}", "    - server auth\n    - client auth"} {
+		if !strings.Contains(cert, want) {
+			t.Errorf("certificate.yaml lacks %q", want)
+		}
+	}
+	data, err := os.ReadFile(filepath.Join(chartDir, "README.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	readme := strings.Join(strings.Fields(string(data)), " ")
+	for _, want := range []string{"subPathExpr", "csi-driver", "<release>-cluster-ca"} {
+		if !strings.Contains(readme, want) {
+			t.Errorf("the chart README lacks %q", want)
+		}
+	}
+}
+
+// TestScaleWithinTheMaximumRestartsNothing: the peer list comes from
+// cluster.maxReplicas, so changing replicaCount up to it changes neither the
+// configuration document nor the pod template, and the StatefulSet replaces
+// no running pod (a rolling update would start the new pod first, which the
+// running pods, on the old list, would never dial). Only the pod count and
+// the generated node Secret follow replicaCount; cert-manager's Certificates
+// cover every ordinal below the maximum, and a replicaCount above it is
+// refused at render.
+func TestScaleWithinTheMaximumRestartsNothing(t *testing.T) {
+	tpl := templates(t)
+	if n, err := strconv.Atoi(valuesScalars(t)["cluster.maxReplicas"]); err != nil || n < 3 {
+		t.Fatalf("values.yaml sets cluster.maxReplicas to %q, want at least the default replicaCount", valuesScalars(t)["cluster.maxReplicas"])
+	}
+	if !strings.Contains(tpl["configmap.yaml"], `"replicas" (int .Values.cluster.maxReplicas) "port"`) {
+		t.Error("the configuration's discovery count is not cluster.maxReplicas")
+	}
+	allowed := map[string][]string{
+		"statefulset.yaml": {"replicas: {{ .Values.replicaCount }}"},
+		"secret-tls.yaml":  {"{{- range $i := until (int .Values.replicaCount) }}"},
+		"NOTES.txt":        {"with {{ .Values.replicaCount }} pods"},
+		"configmap.yaml":   {"if gt (int .Values.replicaCount) (int .Values.cluster.maxReplicas)", "(int .Values.replicaCount) (int .Values.cluster.maxReplicas)) }}"},
+	}
+	for name, body := range tpl {
+		for _, line := range strings.Split(body, "\n") {
+			if !strings.Contains(line, ".Values.replicaCount") {
+				continue
+			}
+			ok := false
+			for _, a := range allowed[name] {
+				ok = ok || strings.Contains(line, a)
+			}
+			if !ok {
+				t.Errorf("%s reads replicaCount outside the pod count, the generated Secret and the refusal: %s", name, strings.TrimSpace(line))
+			}
+		}
+	}
+	sts := tpl["statefulset.yaml"]
+	if !regexp.MustCompile(`range \$i := until \(int \.Values\.cluster\.maxReplicas\) \}\}\n.*\n +- secret:\n +name: [^\n]+\n +items:`).MatchString(sts) {
+		t.Error("certManager's projected volume does not list every ordinal below the maximum")
+	}
+	// An optional source lets a pod start before its own Secret is issued,
+	// on an empty directory the Secret never fills.
+	if strings.Contains(sts, "optional: true") {
+		t.Error("certManager's projected sources are optional")
+	}
+	if !strings.Contains(tpl["certificate.yaml"], "{{- range $i := until (int .Values.cluster.maxReplicas) }}") {
+		t.Error("certManager's Certificates do not cover every ordinal below the maximum")
+	}
+	if !regexp.MustCompile(`if gt \(int \.Values\.replicaCount\) \(int \.Values\.cluster\.maxReplicas\) \}\}\n\{\{- fail `).MatchString(tpl["configmap.yaml"]) {
+		t.Error("configmap.yaml does not refuse a replicaCount above cluster.maxReplicas")
+	}
+	data, err := os.ReadFile(filepath.Join(chartDir, "README.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	readme := strings.Join(strings.Fields(string(data)), " ")
+	for _, want := range []string{"## Scaling", "`cluster.maxReplicas`", "first raise `cluster.maxReplicas` alone", "restarts nothing", "30 s by default"} {
+		if !strings.Contains(readme, want) {
+			t.Errorf("the chart README lacks %q", want)
+		}
+	}
+	if strings.Contains(readme, "needs a hand step") {
+		t.Error("the chart README still asks for a hand step on scale-up")
 	}
 }

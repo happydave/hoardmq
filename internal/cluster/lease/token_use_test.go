@@ -158,8 +158,10 @@ func belowLevelLeader(t *testing.T) *Service {
 		{Kind: OpAlive, Node: "me", Now: old, Level: 3},
 		{Kind: OpAlive, Node: "n9", Now: old, Level: 3},
 		{Kind: OpAcquire, Namespace: "default", ClientID: "c", Node: "n9", Now: old},
-		{Kind: OpSetLevel, Level: 2, Now: old},
 	})); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.table.Apply(6, Encode([]Op{{Kind: OpSetLevel, Level: 2, Now: old}})); err != nil {
 		t.Fatal(err)
 	}
 	unheardFor(s, "n9", time.Hour)

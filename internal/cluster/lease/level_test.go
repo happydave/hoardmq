@@ -1,6 +1,7 @@
 package lease
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -102,11 +103,11 @@ func TestNodesAdvertiseTheLevelTheyUnderstand(t *testing.T) {
 	if _, known := tb.MinAdvertisedLevel([]string{"n1", "n4"}); known {
 		t.Fatal("a member with no record read as known; absence is not a level")
 	}
-	// A node's advertisement only rises: an alive from an older build in
-	// flight behind a newer one does not take the level back.
-	applyOps(t, tb, Op{Kind: OpAlive, Node: "n1", Now: now.Add(time.Second)})
-	if min, _ := tb.MinAdvertisedLevel([]string{"n1"}); min != 2 {
-		t.Fatalf("n1's advertised level fell to %d", min)
+	// A node's advertisement is its latest: a node put back on an older build
+	// reads as that build.
+	applyOps(t, tb, Op{Kind: OpAlive, Node: "n1", Now: now.Add(time.Second), Level: 1})
+	if min, _ := tb.MinAdvertisedLevel([]string{"n1"}); min != 1 {
+		t.Fatalf("n1's advertised level stayed %d after an alive at 1", min)
 	}
 }
 
@@ -221,9 +222,9 @@ var gatedJournalBuildLevel = false
 // TestMixedVersionClusterAppliesIdenticallyOrRefuses is the criterion the
 // mechanism exists for. One member understands only level 1 and the others
 // level 2. While the table is at 1 every node applies every operation the
-// old way. Once it is at 2 every node — the old build included, since it
-// applies the same log — switches at the same log position, and the old
-// build refuses to serve rather than act on semantics it does not have.
+// old way. Once it is at 2 the members that understand it switch at the same
+// log position, and the old build applies nothing more: it holds, and
+// refuses to serve rather than act on semantics it does not have.
 func TestMixedVersionClusterAppliesIdenticallyOrRefuses(t *testing.T) {
 	builds := map[string]uint64{"n1": 2, "n2": 2, "n3": 1}
 	var bmu sync.Mutex
@@ -279,18 +280,23 @@ func TestMixedVersionClusterAppliesIdenticallyOrRefuses(t *testing.T) {
 		}
 		return true
 	})
+	moveLeadOff(t, c, "n3")
 	c.nodes["n3"].svc.SetBuildLevel(1)
 
 	connect(5, 10)
-	waitFor(t, "ten acquires applied on every node", 10*time.Second, journaled(10))
+	waitFor(t, "ten acquires applied on n1 and n2", 10*time.Second, func() bool { return len(j.of("n1")) >= 10 && len(j.of("n2")) >= 10 })
 
 	// Divergence first: it is the property. The span check after it only
 	// says the comparison covered both sides of the raise.
 	want := j.of("n1")
-	for _, name := range []string{"n2", "n3"} {
-		if got := j.of(name); !reflect.DeepEqual(got, want) {
-			t.Fatalf("%s applied the same log differently from n1:\n n1 %v\n %s %v", name, want, name, got)
-		}
+	if got := j.of("n2"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("n2 applied the same log differently from n1:\n n1 %v\n n2 %v", want, got)
+	}
+	if got := j.of("n3"); !reflect.DeepEqual(got, want[:5]) {
+		t.Fatalf("n3, below the level, applied past the raise:\n n1 %v\n n3 %v", want, got)
+	}
+	if _, held := c.nodes["n3"].core.Held(); !held {
+		t.Fatal("n3 understands level 1, the table is at 2, and it does not hold")
 	}
 	olds, news := 0, 0
 	for _, line := range want {
@@ -356,4 +362,26 @@ func TestARaiseIsCountedByHowItEnded(t *testing.T) {
 			t.Errorf("a raise that ended %s still reads as in flight", c.outcome)
 		}
 	}
+}
+
+// moveLeadOff makes sure the named node does not lead, transferring
+// leadership to another voter when it does, so a test can put it below the
+// level without first waiting out its hand-over.
+func moveLeadOff(t *testing.T, c *tcluster, name string) {
+	t.Helper()
+	n := c.nodes[name]
+	waitFor(t, name+" not leading", 10*time.Second, func() bool {
+		if n.core.Status().Role != "leader" {
+			return true
+		}
+		for _, o := range c.names {
+			if o != name {
+				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+				_ = n.core.TransferLeadership(ctx, o)
+				cancel()
+				break
+			}
+		}
+		return false
+	})
 }

@@ -185,6 +185,8 @@ func TestRollingRestart(t *testing.T) {
 	rec.Population = rollPopulation{OnlineAtEnd: s.Online, Target: clients - failed, SessionLost: sum.SessionLost,
 		SessionLostClients: sum.SessionLostClients, SubRefusals: sum.SubRefusals, SubDowngraded: sum.SubDowngraded,
 		Drops: sum.Drops, Refusals: sum.Refusals}
+	rec.ApplyStalls = c.ApplyStalls()
+	rec.Holds = c.ConsensusHolds()
 	rec.Findings = rollFindings(rec)
 	prov.TreeAtEnd = checkTree(".", prov.Tree)
 	rec.Provenance = prov

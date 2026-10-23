@@ -189,6 +189,106 @@ type Cluster struct {
 	// derive from it (the replica-resend exception).
 	AckTimeout      time.Duration
 	TakeoverTimeout time.Duration
+
+	// stalls sums, per node, how often each run of it reported its consensus
+	// core behind, taken when the run stops.
+	stallsMu sync.Mutex
+	stalls   map[string]uint64
+	// holds sums, per node, how often each run of it held the log, under
+	// stallsMu. Every node the harness starts runs this build at the cluster's
+	// level, so any hold is a failure.
+	holds map[string]uint64
+}
+
+// stallCounter is the consensus core's count of entries into the behind
+// state.
+type stallCounter interface{ Stalls() uint64 }
+
+// stallsOf is how often a server's consensus core has reported itself behind.
+func stallsOf(srv *broker.Server) uint64 {
+	if sc, ok := srv.Consensus().(stallCounter); ok {
+		return sc.Stalls()
+	}
+	return 0
+}
+
+// holdCounter is the consensus core's count of entries into the held state.
+type holdCounter interface{ Holds() uint64 }
+
+// holdsOf is how often a server's consensus core has held the log.
+func holdsOf(srv *broker.Server) uint64 {
+	if hc, ok := srv.Consensus().(holdCounter); ok {
+		return hc.Holds()
+	}
+	return 0
+}
+
+// addStalls adds a stopped run's stalls and holds to its node's totals.
+func (c *Cluster) addStalls(n *Node, srv *broker.Server) {
+	c.addStallCount(n.Name, stallsOf(srv))
+	c.addHoldCount(n.Name, holdsOf(srv))
+}
+
+func (c *Cluster) addHoldCount(name string, v uint64) {
+	c.stallsMu.Lock()
+	defer c.stallsMu.Unlock()
+	if c.holds == nil {
+		c.holds = map[string]uint64{}
+	}
+	c.holds[name] += v
+}
+
+// ConsensusHolds is, per node, how often its consensus core has held the log
+// over every run so far, the running ones included. A node that never held
+// has no entry.
+func (c *Cluster) ConsensusHolds() map[string]uint64 {
+	c.stallsMu.Lock()
+	out := map[string]uint64{}
+	for k, v := range c.holds {
+		if v > 0 {
+			out[k] = v
+		}
+	}
+	c.stallsMu.Unlock()
+	for _, n := range c.Nodes {
+		if srv := n.Server(); srv != nil {
+			if v := holdsOf(srv); v > 0 {
+				out[n.Name] += v
+			}
+		}
+	}
+	return out
+}
+
+func (c *Cluster) addStallCount(name string, v uint64) {
+	c.stallsMu.Lock()
+	defer c.stallsMu.Unlock()
+	if c.stalls == nil {
+		c.stalls = map[string]uint64{}
+	}
+	c.stalls[name] += v
+}
+
+// ApplyStalls is, per node, how often its consensus core has reported itself
+// behind over every run so far, the running ones included. A node never
+// behind has no entry.
+func (c *Cluster) ApplyStalls() map[string]uint64 {
+	c.stallsMu.Lock()
+	out := map[string]uint64{}
+	for k, v := range c.stalls {
+		if v > 0 {
+			out[k] = v
+		}
+	}
+	c.stallsMu.Unlock()
+	for _, n := range c.Nodes {
+		if srv := n.Server(); srv != nil {
+			if v := stallsOf(srv); v > 0 {
+				out[n.Name] += v
+			}
+		}
+	}
+	return out
 }
 
 // Dir is the root every node's store is under. It is published in the
@@ -277,7 +377,14 @@ func New(t testing.TB, o Options) *Cluster {
 				_ = srv.Shutdown(ctx)
 				cancel()
 				n.running.Store(false)
+				c.addStalls(n, srv)
 			}
+		}
+		if stalls := c.ApplyStalls(); len(stalls) > 0 {
+			t.Logf("consensus apply stalls by node: %v", stalls)
+		}
+		if holds := c.ConsensusHolds(); len(holds) > 0 {
+			t.Errorf("consensus holds by node: %v; a node at the cluster's feature level held the log", holds)
 		}
 	})
 	c.WaitServing(tm.settleBudget())
@@ -553,6 +660,7 @@ func (c *Cluster) Crash(n *Node) {
 	n.mu.Unlock()
 	srv.Crash()
 	n.running.Store(false)
+	c.addStalls(n, srv)
 }
 
 // Stop shuts a node down gracefully (no drain).
@@ -571,6 +679,7 @@ func (c *Cluster) StopWithin(n *Node, d time.Duration) {
 	defer cancel()
 	_ = srv.Shutdown(ctx)
 	n.running.Store(false)
+	c.addStalls(n, srv)
 }
 
 // Drain runs a node's graceful leave and waits for it, then stops it.

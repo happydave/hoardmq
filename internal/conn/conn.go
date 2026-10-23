@@ -418,6 +418,10 @@ func (c *Conn) handshake() bool {
 		mech, c.authMethod = m, *p.AuthenticationMethod
 	}
 	if w := connect.Will; w != nil {
+		if why := topic.ValidateName(w.Topic); why != "" {
+			c.refuseWillTopic(connect.ClientID, why)
+			return false
+		}
 		// A Will beyond the declared capabilities is refused at CONNECT.
 		if w.Retain && !c.opts.Capabilities.RetainAvailable {
 			c.refuse(packet.RetainNotSupported)
@@ -652,6 +656,20 @@ func (c *Conn) refuseRate(clientID, limit string) {
 	}
 	c.countRefusal(reason)
 	c.auditFailure(reason, "rate: "+limit)
+}
+
+// refuseWillTopic answers a CONNECT whose Will Topic is not a valid topic
+// name: CONNACK 0x90 at level 5; at levels 3 and 4, which have no return code
+// for it, the connection is closed without a CONNACK.
+func (c *Conn) refuseWillTopic(clientID, why string) {
+	reason := packet.TopicNameInvalid
+	if c.version == packet.V5 {
+		c.writeDirect(&packet.Connack{ReasonCode: reason})
+	}
+	c.clientID = clientID
+	c.log.Debug("connect refused", "reason", reason.String(), "will", why, "client", clientID)
+	c.countRefusal(reason)
+	c.auditFailure(reason, "will: "+why)
 }
 
 // LimitOverload is the connect gate's limit while the cluster sheds load.

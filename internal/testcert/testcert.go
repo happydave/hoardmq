@@ -64,6 +64,10 @@ type Options struct {
 	OCSPServer            []string
 	CRLDistributionPoints []string
 	OCSPSigning           bool
+	// ExtKeyUsage replaces the leaf's server and client auth usages;
+	// NoExtKeyUsage issues it without the extension.
+	ExtKeyUsage   []x509.ExtKeyUsage
+	NoExtKeyUsage bool
 }
 
 // Issue creates a leaf for a common name, valid for localhost and 127.0.0.1,
@@ -92,6 +96,12 @@ func (ca *CA) IssueWith(cn string, serial int64, o Options) (*Leaf, error) {
 	}
 	if o.OCSPSigning {
 		tmpl.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageOCSPSigning}
+	}
+	if o.ExtKeyUsage != nil {
+		tmpl.ExtKeyUsage = o.ExtKeyUsage
+	}
+	if o.NoExtKeyUsage {
+		tmpl.ExtKeyUsage = nil
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca.Cert, &key.PublicKey, ca.Key)
 	if err != nil {

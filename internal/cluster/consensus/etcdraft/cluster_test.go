@@ -48,8 +48,12 @@ type tnode struct {
 	// one peer the only one that answers at all.
 	dropAccepts     atomic.Bool
 	dropJoinAnswers atomic.Bool
-	mu              sync.Mutex
-	sends           []sendRecord // what left this node and how durable the store was
+	// refuseBulkTo, when set, fails this node's sends to that peer of every
+	// class but consensus: a snapshot then never reaches it, while appends,
+	// heartbeats and join answers do.
+	refuseBulkTo atomic.Pointer[string]
+	mu           sync.Mutex
+	sends        []sendRecord // what left this node and how durable the store was
 	// observe, when set, sees every send's class, size and error.
 	observe atomic.Pointer[func(peer string, cl transport.Class, size int, err error)]
 }
@@ -156,6 +160,9 @@ func (r *recordingTransport) Send(ctx context.Context, peer string, cl transport
 		if r.n.dropAccepts.Load() && json.Unmarshal(payload[1:], &resp) == nil && resp.Accepted {
 			return nil
 		}
+	}
+	if to := r.n.refuseBulkTo.Load(); to != nil && *to == peer && cl != transport.Consensus {
+		return fmt.Errorf("test: %s to %s refused", cl, peer)
 	}
 	if r.n.store != nil {
 		rec := sendRecord{seq: r.n.store.LastDurable().Seq()}

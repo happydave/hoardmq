@@ -49,6 +49,23 @@ type Recoverable interface {
 	Recovered()
 }
 
+// Holder is implemented by a component that knows whether this build may
+// apply the log: a command committed at a cluster feature level above the
+// build's has semantics the build does not have. While any holder holds, the
+// machine applies no command, so nothing is applied wrongly and every held
+// command is still in the log for a newer build to replay.
+type Holder interface {
+	// Holds reports whether the machine must apply nothing more, and why.
+	Holds() (bool, string)
+}
+
+// Hold is what a core that stopped applying reports: the first entry it did
+// not apply and the reason its holder gave.
+type Hold struct {
+	Index  uint64
+	Reason string
+}
+
 // Role of a member.
 type Role string
 
@@ -110,6 +127,12 @@ type Core interface {
 	// Recovering reports whether the machine is replaying committed history
 	// or rebuilding from a snapshot; components act on nothing until it ends.
 	Recovering() bool
+	// Held reports whether this node has stopped applying the log because a
+	// holder held, from which entry and why; it lasts for the process's life.
+	Held() (Hold, bool)
+	// TransferLeadership asks the group to move leadership from this node to
+	// the named voter.
+	TransferLeadership(ctx context.Context, to string) error
 	// Stop ends the node loop and closes the store.
 	Stop()
 }
@@ -136,6 +159,9 @@ var (
 	ErrIDCollision  = errors.New("consensus: node id collides with an existing member")
 	ErrNotMember    = errors.New("consensus: no such member")
 	ErrAlreadyVoter = errors.New("consensus: member is already a voter")
+	// ErrHeld is a command this node did not apply, or a proposal it did not
+	// make, because a holder holds the machine.
+	ErrHeld = errors.New("consensus: this node holds the log: its build is below the cluster's feature level")
 )
 
 // NodeID derives a node's Raft id from its name.

@@ -545,9 +545,9 @@ func (d *drainer) targets() []string {
 	return out
 }
 
-// liveOthers lists the other members the lease table says are alive and not
-// leaving, sorted by name: a node that is leaving takes neither clients nor
-// leases from a drain.
+// liveOthers lists the other members the lease table says are alive, not
+// leaving and not below the cluster's level, sorted by name: a node that is
+// leaving, or serves no client, takes neither clients nor leases from a drain.
 func (d *drainer) liveOthers() []string {
 	s := d.s
 	var names []string
@@ -555,7 +555,7 @@ func (d *drainer) liveOthers() []string {
 		names = append(names, m.Name)
 	}
 	t := s.leases.Table()
-	return liveAmong(names, s.config().Node.Name, func(n string) bool { return t.Live(n) && !t.Leaving(n) })
+	return liveAmong(names, s.config().Node.Name, func(n string) bool { return t.Live(n) && !t.Leaving(n) && !t.MemberBelow(n) })
 }
 
 // liveAmong is the members other than self that live reports alive, sorted.

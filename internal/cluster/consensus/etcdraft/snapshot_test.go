@@ -256,8 +256,38 @@ func TestSnapshotFileRemovable(t *testing.T) {
 		{"", true, false},
 	}
 	for _, tc := range cases {
-		if got := snapshotFileRemovable(tc.name, "current.snap", inUse, tc.starting); got != tc.want {
+		if got := snapshotFileRemovable(tc.name, storedFile{name: "current.snap", readable: true}, inUse, tc.starting); got != tc.want {
 			t.Errorf("removable(%q, starting %v) = %v, want %v", tc.name, tc.starting, got, tc.want)
+		}
+		if snapshotFileRemovable(tc.name, storedFile{}, nil, tc.starting) {
+			t.Errorf("removable(%q, starting %v) under an unreadable stored snapshot", tc.name, tc.starting)
+		}
+	}
+}
+
+// TestStoredSnapshotFile: what each form of stored snapshot says of the
+// snapshot directory.
+func TestStoredSnapshotFile(t *testing.T) {
+	d := snapDesc{Index: 7, Term: 2, Size: 99, Name: builtName(7, 2)}
+	desc := d.encode()
+	newer := append([]byte(nil), desc...)
+	newer[4] = consensus.FileFormat + 1
+	cases := []struct {
+		name  string
+		empty bool
+		data  []byte
+		want  storedFile
+	}{
+		{"empty", true, nil, storedFile{readable: true}},
+		{"format 2 descriptor", false, desc, storedFile{name: d.Name, readable: true}},
+		{"format 1 inline", false, wrapSnapshot(7, 2, []byte("{}")), storedFile{readable: true}},
+		{"a newer format", false, newer, storedFile{}},
+		{"a truncated descriptor", false, desc[:descHeader-1], storedFile{}},
+		{"no magic", false, append([]byte("XXXX"), desc[4:]...), storedFile{}},
+	}
+	for _, tc := range cases {
+		if got := storedSnapshotFile(tc.empty, tc.data); got != tc.want {
+			t.Errorf("%s: %+v, want %+v", tc.name, got, tc.want)
 		}
 	}
 }

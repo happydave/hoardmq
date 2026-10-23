@@ -4,23 +4,30 @@ metadata:
   name: {{ include "hoardmq.fullname" . }}
   labels:
     {{- include "hoardmq.labels" . | nindent 4 }}
+{{- if lt (int .Values.cluster.maxReplicas) 1 }}
+{{- fail "cluster.maxReplicas must be at least 1" }}
+{{- end }}
+{{- if gt (int .Values.replicaCount) (int .Values.cluster.maxReplicas) }}
+{{- fail (printf "replicaCount %d is above cluster.maxReplicas %d: raise cluster.maxReplicas first (a rolling restart), then replicaCount" (int .Values.replicaCount) (int .Values.cluster.maxReplicas)) }}
+{{- end }}
 data:
-  # The node name, the advertised address and the node's own certificate
-  # arrive through environment overrides from the pod's own name (see the
-  # StatefulSet): one document serves every ordinal, but each node presents
-  # its own certificate.
+  # The node name and the advertised address arrive through environment
+  # overrides from the pod's own name, and each pod's own certificate is
+  # mounted at the same paths (see the StatefulSet): one document serves every
+  # ordinal, but each node presents its own certificate.
   config.json: |-
     {{- $base := dict
       "version" 1
       "node" (dict "dataDir" "/var/lib/hoardmq")
-      "listeners" (list (dict "name" "mqtt" "type" "tcp" "address" (printf ":%d" (int .Values.listeners.mqtt.port))))
+      "listeners" (list (dict "name" "mqtt" "type" "tcp" "address" (printf ":%d" (int .Values.listeners.mqtt.port)) "maxConnections" (int .Values.listeners.mqtt.maxConnections)))
+      "limits" (dict "connectRate" (int .Values.limits.connectRate) "connectBurst" (int .Values.limits.connectBurst) "maxSubscriptions" (int .Values.limits.maxSubscriptions))
       "cluster" (dict
         "id" .Values.cluster.id
         "replicas" (int .Values.cluster.replicas)
         "shards" (int .Values.cluster.shards)
         "listen" (printf ":%d" (int .Values.cluster.port))
-        "auth" (dict "mode" "mtls" "tls" (dict "caFile" "/etc/hoardmq/tls/ca.crt"))
-        "discovery" (dict "mode" "dns" "dns" (dict "service" (include "hoardmq.headless" .) "name" (include "hoardmq.fullname" .) "replicas" (int .Values.replicaCount) "port" (int .Values.cluster.port)))
+        "auth" (dict "mode" "mtls" "tls" (dict "certFile" "/etc/hoardmq-tls/tls.crt" "keyFile" "/etc/hoardmq-tls/tls.key" "caFile" "/etc/hoardmq-tls/ca.crt"))
+        "discovery" (dict "mode" "dns" "dns" (dict "service" (include "hoardmq.headless" .) "name" (include "hoardmq.fullname" .) "replicas" (int .Values.cluster.maxReplicas) "port" (int .Values.cluster.port)))
         "drain" (dict "ratePerSecond" (int .Values.cluster.drain.ratePerSecond) "timeoutMs" (mul 1000 (int .Values.cluster.drain.timeoutSeconds)) "confirmTimeoutMs" (mul 1000 (int .Values.cluster.drain.confirmTimeoutSeconds)) "holdExitMs" (mul 1000 (int .Values.cluster.drain.holdExitSeconds)))
         "readiness" (dict "stableMs" (mul 1000 (int .Values.cluster.readiness.stableSeconds))))
       "auth" (dict "anonymous" .Values.auth.anonymous)
@@ -29,7 +36,7 @@ data:
       "modules" (dict "metrics.prometheus" (dict))
     -}}
     {{- if .Values.listeners.mqtts.enabled }}
-    {{- $_ := set $base "listeners" (append (get $base "listeners") (dict "name" "mqtts" "type" "tls" "address" (printf ":%d" (int .Values.listeners.mqtts.port)) "tls" (dict "certFile" "/etc/hoardmq/client-tls/tls.crt" "keyFile" "/etc/hoardmq/client-tls/tls.key"))) }}
+    {{- $_ := set $base "listeners" (append (get $base "listeners") (dict "name" "mqtts" "type" "tls" "address" (printf ":%d" (int .Values.listeners.mqtts.port)) "maxConnections" (int .Values.listeners.mqtts.maxConnections) "tls" (dict "certFile" "/etc/hoardmq/client-tls/tls.crt" "keyFile" "/etc/hoardmq/client-tls/tls.key"))) }}
     {{- end }}
     {{- if and (not .Values.admin.enabled) (hasKey .Values.extraConfig "admin") }}
     {{- fail "extraConfig.admin configures the admin API, which closes the observability listener's /drain the preStop posts to: set admin.enabled so the preStop drains through the API" }}

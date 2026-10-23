@@ -144,6 +144,15 @@ type Table struct {
 	// operation with the log index and the level it is applied under — what
 	// a gated semantic would read. Called with mu held.
 	levelProbe func(index, level uint64, op Op)
+	// build is the highest level this node's build understands; the table
+	// holds the machine while the cluster's level is above it. Nil never
+	// holds.
+	build func() uint64
+	// gated, when a test sets it before the core starts, is a semantic keyed
+	// to the level: it is called for every acquire that changes a lease, with
+	// the level the table is at, and may change the lease it stores. Called
+	// with mu held.
+	gated func(level uint64, l *Lease)
 	// hooked is the log index of the last command whose change hooks have
 	// returned. It trails the applied state on purpose: a reader pairing it
 	// with what the hooks produce — the adoptions a reassignment queues —
@@ -214,6 +223,13 @@ func (t *Table) Apply(index uint64, payload []byte) (any, error) {
 		if t.levelProbe != nil {
 			t.levelProbe(index, t.Level(), op)
 		}
+		if op.Kind == OpSetLevel && len(ops) > 1 {
+			// Operations after a raise in the same command would apply at the
+			// new level on a build that holds before the next command, not
+			// within this one.
+			results[i] = Result{Reason: notAlone, Index: index}
+			continue
+		}
 		results[i], cs = t.applyOne(op)
 		results[i].Index = index
 		changes = append(changes, cs...)
@@ -258,6 +274,19 @@ func (t *Table) Apply(index uint64, payload []byte) (any, error) {
 		t.hooked.Store(index)
 	}
 	return results, nil
+}
+
+// Holds implements consensus.Holder: a command applied past a raise to a
+// level this build does not understand would be applied with semantics the
+// cluster has left, so the machine applies nothing more.
+func (t *Table) Holds() (bool, string) {
+	if t.build == nil {
+		return false, ""
+	}
+	if b, l := t.build(), t.Level(); b < l {
+		return true, fmt.Sprintf("the cluster's feature level is %d and this build understands %d", l, b)
+	}
+	return false, ""
 }
 
 // HookedIndex is the log index of the last command this node has applied
@@ -337,6 +366,9 @@ func (t *Table) applyOne(op Op) (Result, []change) {
 				return Result{Reason: doubleGrant}, nil
 			}
 			n := &Lease{Namespace: op.Namespace, ClientID: op.ClientID, Owner: op.Node, Epoch: t.token(0), Online: true, ExpiryInterval: op.ExpiryInterval, Will: op.Will}
+			if t.gated != nil {
+				t.gated(t.Level(), n)
+			}
 			t.leases[k] = n
 			return Result{OK: true, Epoch: n.Epoch}, []change{{nil, clone(n)}}
 		}
@@ -363,6 +395,9 @@ func (t *Table) applyOne(op Op) (Result, []change) {
 		}
 		l.Online, l.ExpiresAt, l.DisconnectedAt = true, time.Time{}, time.Time{}
 		l.ExpiryInterval, l.Will = op.ExpiryInterval, op.Will
+		if t.gated != nil {
+			t.gated(t.Level(), l)
+		}
 		t.leases[k] = l
 		return Result{OK: true, Epoch: l.Epoch, PrevOwner: prev, PrevAlive: prevAlive}, []change{{before, clone(l)}}
 	case OpDisconnected:
@@ -409,9 +444,9 @@ func (t *Table) applyOne(op Op) (Result, []change) {
 		if op.Advertise != "" {
 			n.Advertise = op.Advertise
 		}
-		if op.Level > n.Level {
-			n.Level = op.Level
-		}
+		// The latest advertisement, not the highest: a node put back on an
+		// older build must read as below the level everywhere.
+		n.Level = op.Level
 		n.AliveIndex, n.DeadAt, n.LeavingAt = t.applying, 0, 0
 		t.heard = append(t.heard, op.Node)
 		return Result{OK: true}, nil
@@ -509,6 +544,9 @@ func (t *Table) applyOne(op Op) (Result, []change) {
 	}
 	return Result{Reason: "unknown operation"}, nil
 }
+
+// notAlone refuses a raise that shares its command with other operations.
+const notAlone = "not alone"
 
 // ownerAlive refuses a reassignment of, or a conditional acquire from, a node
 // the log says is alive.

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/happydave/hoardmq/internal/module"
 )
@@ -82,6 +83,10 @@ func TestAuthModuleConfiguration(t *testing.T) {
 		{"timeoutMs 99", `{"timeoutMs":99}`, "timeoutMs must be 100 to 30000"},
 		{"timeoutMs 30000", `{"timeoutMs":30000}`, ""},
 		{"wait 10001", `{"fetchWaitMs":10001}`, "fetchWaitMs must be 0 to 10000"},
+		{"ocspMaxAgeSeconds 59", `{"ocspMaxAgeSeconds":59}`, "ocspMaxAgeSeconds must be 60 to 2592000"},
+		{"ocspMaxAgeSeconds 60", `{"ocspMaxAgeSeconds":60}`, ""},
+		{"ocspMaxAgeSeconds 2592000", `{"ocspMaxAgeSeconds":2592000}`, ""},
+		{"ocspMaxAgeSeconds 2592001", `{"ocspMaxAgeSeconds":2592001}`, "ocspMaxAgeSeconds must be 60 to 2592000"},
 		{"an unknown member", `{"failClosed":true}`, "unknown field"},
 	} {
 		err := provision(t, &x509Auth{}, c.doc)
@@ -109,5 +114,18 @@ func TestJWTOpaqueOptionsProvisioned(t *testing.T) {
 	}
 	if !j.inner.OpaqueTokens || j.inner.OpaquePrefix != "opq_" {
 		t.Fatalf("provisioned opaqueTokens %v, prefix %q", j.inner.OpaqueTokens, j.inner.OpaquePrefix)
+	}
+}
+
+// ocspMaxAgeSeconds reaches the authenticator, and its absence is a day.
+func TestX509OCSPMaxAgeProvisioned(t *testing.T) {
+	for doc, want := range map[string]time.Duration{`{}`: 24 * time.Hour, `{"ocspMaxAgeSeconds":3600}`: time.Hour} {
+		x := &x509Auth{}
+		if err := provision(t, x, doc); err != nil {
+			t.Fatal(err)
+		}
+		if x.inner.OCSPMaxAge != want {
+			t.Errorf("%s: OCSPMaxAge %v, want %v", doc, x.inner.OCSPMaxAge, want)
+		}
 	}
 }

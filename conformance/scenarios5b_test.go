@@ -18,7 +18,7 @@ import (
 )
 
 func TestUserProperties(t *testing.T) {
-	Statement(t, "MQTT-3.3.2-17", "MQTT-3.3.2-18")
+	Statement(t, Spec5, "MQTT-3.3.2-17", "MQTT-3.3.2-18")
 	n := StartNode(t, nil)
 	a, _ := n.Must5(Connect5{ClientID: "myclientid", CleanStart: true})
 	a.Sub(topics[0], 2)
@@ -39,7 +39,7 @@ func TestUserProperties(t *testing.T) {
 }
 
 func TestPayloadFormat(t *testing.T) {
-	Statement(t, "MQTT-3.3.2-4", "MQTT-3.3.2-20")
+	Statement(t, Spec5, "MQTT-3.3.2-4", "MQTT-3.3.2-20")
 	n := StartNode(t, nil)
 	a, _ := n.Must5(Connect5{ClientID: "myclientid", CleanStart: true})
 	a.Sub(topics[0], 2)
@@ -56,7 +56,7 @@ func TestPayloadFormat(t *testing.T) {
 }
 
 func TestPublicationExpiry(t *testing.T) {
-	Statement(t, "MQTT-3.3.2-5", "MQTT-3.3.2-6", "MQTT-3.1.2-23")
+	Statement(t, Spec5, "MQTT-3.3.2-5", "MQTT-3.3.2-6", "MQTT-3.1.2-23")
 	n := StartNode(t, nil)
 	b, _ := n.Must5(Connect5{ClientID: "myclientid2", CleanStart: true, SessionExpiry: u32(99999)})
 	b.Sub(topics[0], 2)
@@ -84,7 +84,7 @@ func TestPublicationExpiry(t *testing.T) {
 }
 
 func TestSubscribeOptions(t *testing.T) {
-	Statement(t, "MQTT-3.8.3-3", "MQTT-3.3.1-12", "MQTT-3.3.1-13", "MQTT-3.3.1-9", "MQTT-3.3.1-10", "MQTT-3.3.1-11", "MQTT-3.8.4-4")
+	Statement(t, Spec5, "MQTT-3.8.3-3", "MQTT-3.3.1-12", "MQTT-3.3.1-13", "MQTT-3.3.1-9", "MQTT-3.3.1-10", "MQTT-3.3.1-11", "MQTT-3.8.4-4")
 	n := StartNode(t, nil)
 	// No Local.
 	a, _ := n.Must5(Connect5{ClientID: "myclientid", CleanStart: true})
@@ -142,7 +142,7 @@ func TestSubscribeOptions(t *testing.T) {
 }
 
 func TestAssignedClientID(t *testing.T) {
-	Statement(t, "MQTT-3.1.3-6", "MQTT-3.1.3-7", "MQTT-3.2.2-16")
+	Statement(t, Spec5, "MQTT-3.1.3-6", "MQTT-3.1.3-7", "MQTT-3.2.2-16")
 	n := StartNode(t, nil)
 	c, ack, err := n.Dial5(Connect5{ClientID: "", CleanStart: true})
 	if err != nil || ack.Properties == nil || ack.Properties.AssignedClientID == "" {
@@ -152,7 +152,7 @@ func TestAssignedClientID(t *testing.T) {
 }
 
 func TestSubscriptionIdentifiers(t *testing.T) {
-	Statement(t, "MQTT-3.3.4-3", "MQTT-3.3.4-4", "MQTT-3.3.4-5", "MQTT-3.8.4-6")
+	Statement(t, Spec5, "MQTT-3.3.4-3", "MQTT-3.3.4-4", "MQTT-3.3.4-5", "MQTT-3.8.4-6")
 	n := StartNode(t, nil)
 	a, _ := n.Must5(Connect5{ClientID: "myclientid", CleanStart: true})
 	a.Subscribe(&paho.SubscribeProperties{SubscriptionIdentifier: intp(456789)}, paho.SubscribeOptions{Topic: topics[0], QoS: 2})
@@ -188,7 +188,7 @@ func TestSubscriptionIdentifiers(t *testing.T) {
 }
 
 func TestRequestResponse(t *testing.T) {
-	Statement(t, "MQTT-3.3.2-13", "MQTT-3.3.2-15", "MQTT-3.3.2-16")
+	Statement(t, Spec5, "MQTT-3.3.2-13", "MQTT-3.3.2-15", "MQTT-3.3.2-16")
 	n := StartNode(t, nil)
 	a, _ := n.Must5(Connect5{ClientID: "myclientid", CleanStart: true})
 	b, _ := n.Must5(Connect5{ClientID: "myclientid2", CleanStart: true})
@@ -209,7 +209,7 @@ func TestRequestResponse(t *testing.T) {
 }
 
 func TestClientTopicAlias(t *testing.T) {
-	Statement(t, "MQTT-3.3.2-8", "MQTT-3.3.2-9", "MQTT-3.3.2-10", "MQTT-3.3.2-11", "MQTT-3.3.2-12", "MQTT-3.2.2-17")
+	Statement(t, Spec5, "MQTT-3.3.2-8", "MQTT-3.3.2-9", "MQTT-3.3.2-10", "MQTT-3.3.2-11", "MQTT-3.3.2-12", "MQTT-3.2.2-17")
 	n := StartNode(t, nil)
 	// Topic alias 0 is a protocol error answered with 0x94.
 	r := n.DialRaw(packet.V5)
@@ -274,7 +274,7 @@ func TestClientTopicAlias(t *testing.T) {
 }
 
 func TestServerTopicAlias(t *testing.T) {
-	Statement(t, "MQTT-3.3.2-8", "MQTT-3.3.2-12", "MQTT-3.1.2-26", "MQTT-3.1.2-27")
+	Statement(t, Spec5, "MQTT-3.3.2-8", "MQTT-3.3.2-12", "MQTT-3.1.2-26", "MQTT-3.1.2-27")
 	n := StartNode(t, nil)
 	run := func(max *uint16, wantAlias bool) {
 		r := n.DialRaw(packet.V5)
@@ -325,7 +325,7 @@ func TestServerTopicAlias(t *testing.T) {
 }
 
 func TestMaximumPacketSize(t *testing.T) {
-	Statement(t, "MQTT-3.1.2-24", "MQTT-3.1.2-25", "MQTT-3.2.2-15", "MQTT-3.3.2-19")
+	Statement(t, Spec5, "MQTT-3.1.2-24", "MQTT-3.1.2-25", "MQTT-3.2.2-15", "MQTT-3.3.2-19")
 	// Server maximum: a small limit so an oversize publish is refused.
 	n := StartNode(t, func(d *config.Document) { d.Limits.MaxPacketSize = 200 })
 	r := n.DialRaw(packet.V5)
@@ -350,7 +350,7 @@ func TestMaximumPacketSize(t *testing.T) {
 }
 
 func TestServerKeepAlive(t *testing.T) {
-	Statement(t, "MQTT-3.1.2-21", "MQTT-3.2.2-21", "MQTT-3.2.2-22")
+	Statement(t, Spec5, "MQTT-3.1.2-21", "MQTT-3.2.2-21", "MQTT-3.2.2-22")
 	n := StartNode(t, func(d *config.Document) { d.Limits.MaxKeepAlive = 60 })
 	a, ack := n.Must5(Connect5{ClientID: "myclientid", CleanStart: true, KeepAlive: 120})
 	if ack.Properties == nil || ack.Properties.ServerKeepAlive == nil || *ack.Properties.ServerKeepAlive != 60 {
@@ -360,7 +360,7 @@ func TestServerKeepAlive(t *testing.T) {
 }
 
 func TestFlowControl1(t *testing.T) {
-	Statement(t, "MQTT-4.9.0-1", "MQTT-4.9.0-2", "MQTT-3.3.4-9")
+	Statement(t, Spec5, "MQTT-4.9.0-1", "MQTT-4.9.0-2", "MQTT-3.3.4-9")
 	n := StartNode(t, nil)
 	// The client's Receive Maximum is 2 and it does not acknowledge.
 	c, ack := n.Must5(Connect5{ClientID: "myclientid", CleanStart: true, ReceiveMax: u16(2), SessionExpiry: u32(0), ManualAck: true})
@@ -379,7 +379,7 @@ func TestFlowControl1(t *testing.T) {
 }
 
 func TestFlowControl2(t *testing.T) {
-	Statement(t, "MQTT-3.3.4-7", "MQTT-3.3.4-8")
+	Statement(t, Spec5, "MQTT-3.3.4-7", "MQTT-3.3.4-8")
 	n := StartNode(t, func(d *config.Document) { d.Limits.ReceiveMaximum = 5 })
 	r := n.DialRaw(packet.V5)
 	ack := r.Connect(&packet.Connect{ClientID: "myclientid", CleanStart: true})
@@ -406,7 +406,7 @@ func TestFlowControl2(t *testing.T) {
 }
 
 func TestWillDelay(t *testing.T) {
-	Statement(t, "MQTT-3.1.3-9", "MQTT-3.1.2-8", "MQTT-3.1.2-9", "MQTT-3.1.2-10")
+	Statement(t, Spec5, "MQTT-3.1.3-9", "MQTT-3.1.2-8", "MQTT-3.1.2-9", "MQTT-3.1.2-10")
 	n := StartNode(t, nil)
 	run := func(delay, expiry uint32, want time.Duration, tolerance time.Duration) {
 		t.Helper()
@@ -434,7 +434,7 @@ func TestWillDelay(t *testing.T) {
 }
 
 func TestSharedSubscriptions(t *testing.T) {
-	Statement(t, "MQTT-4.8.2-1", "MQTT-4.8.2-3", "MQTT-4.8.2-4", "MQTT-4.8.2-6")
+	Statement(t, Spec5, "MQTT-4.8.2-1", "MQTT-4.8.2-3", "MQTT-4.8.2-4", "MQTT-4.8.2-6")
 	n := StartNode(t, nil)
 	shared := "$share/sharename/TopicA/x"
 	pubTopic := "TopicA/x"

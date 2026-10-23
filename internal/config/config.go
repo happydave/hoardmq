@@ -373,8 +373,10 @@ type Peer struct {
 }
 
 // ClusterAuth says how peers authenticate each other: "mtls" (certificates
-// from the cluster CA) or "secret" (a shared secret proved by HMAC; the
-// connection is authenticated but not encrypted).
+// from the cluster CA, every frame inside TLS) or "secret" (a shared secret
+// proved by HMAC in the handshake only; later frames carry no MAC and are not
+// encrypted, so it is for trusted networks). Empty with peers or DNS
+// discovery is read as mtls.
 type ClusterAuth struct {
 	Mode       string      `json:"mode,omitempty"`
 	TLS        *ClusterTLS `json:"tls,omitempty"`
@@ -400,6 +402,9 @@ type Limits struct {
 	// MaxTopicAliasBytes bounds the topic bytes one connection's inbound
 	// topic aliases hold; 0 is unlimited.
 	MaxTopicAliasBytes int `json:"maxTopicAliasBytes"`
+	// MaxSubscriptions bounds the topic filters one client's session holds;
+	// a SUBSCRIBE filter past it is refused. 0 is unlimited.
+	MaxSubscriptions int `json:"maxSubscriptions"`
 	// ConnectRate and ConnectBurst are the node's connect-rate limit across
 	// every listener, as Listener's are for one.
 	ConnectRate  int `json:"connectRate"`
@@ -634,11 +639,21 @@ func Parse(data []byte, environ []string) (Document, []Problem) {
 			return Document{}, sorted(problems)
 		}
 	}
+	doc.defaultClusterAuth()
 	problems = append(problems, doc.semantic()...)
 	if len(problems) > 0 {
 		return Document{}, sorted(problems)
 	}
 	return doc, nil
+}
+
+// defaultClusterAuth reads an empty cluster.auth.mode as mtls when the node
+// has peers to authenticate (configured or discovered by DNS). A node with
+// neither keeps no mode, so a single node needs no certificates.
+func (d *Document) defaultClusterAuth() {
+	if d.Cluster.Auth.Mode == "" && (len(d.Cluster.Peers) > 0 || d.Cluster.Discovery.Mode == "dns") {
+		d.Cluster.Auth.Mode = "mtls"
+	}
 }
 
 func decodeStrict(data []byte, doc *Document) error {

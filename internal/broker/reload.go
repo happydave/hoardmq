@@ -117,7 +117,7 @@ func (s *Server) putIntoForce(doc config.Document) {
 	s.policy.reconfigure()
 	s.policy.flap.cfg.Store(&doc.Flapping)
 	s.sessions.SetLimits(session.Limits{MaxQueued: doc.Limits.MaxQueuedMessages, DropNewest: doc.Limits.QueueDrop == "newest",
-		MaxSessionExpiry: uint32(doc.Limits.MaxSessionExpiry)})
+		MaxSessionExpiry: uint32(doc.Limits.MaxSessionExpiry), MaxSubscriptions: doc.Limits.MaxSubscriptions})
 	s.overload.setLimits(doc.Overload)
 	for i, l := range s.listeners {
 		l.SetMaxConnections(doc.Listeners[i].MaxConnections)

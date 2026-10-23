@@ -80,7 +80,11 @@ func (c *fakeCore) Members() []consensus.Member {
 func (c *fakeCore) Status() consensus.Status { return consensus.Status{Role: c.role} }
 func (c *fakeCore) Ready() bool              { return true }
 func (c *fakeCore) Recovering() bool         { return false }
-func (c *fakeCore) Stop()                    {}
+func (c *fakeCore) Held() (consensus.Hold, bool) {
+	return consensus.Hold{}, false
+}
+func (c *fakeCore) TransferLeadership(context.Context, string) error { return nil }
+func (c *fakeCore) Stop()                                            {}
 
 // fakeLeases is one node's view of the lease table.
 type fakeLeases struct {
@@ -89,6 +93,7 @@ type fakeLeases struct {
 	mu        sync.Mutex
 	leases    map[string]lease.Lease
 	nodes     map[string]lease.NodeInfo
+	below     map[string]bool // MemberBelow's answers; nil reads false
 }
 
 func (l *fakeLeases) Lookup(ns, id string) (lease.Lease, bool) {
@@ -119,6 +124,11 @@ func (l *fakeLeases) Leaving(name string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.nodes[name].LeavingAt != 0
+}
+func (l *fakeLeases) MemberBelow(name string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.below[name]
 }
 func (l *fakeLeases) set(ns, id, owner string, epoch uint64) {
 	l.setState(ns, id, owner, epoch, true)

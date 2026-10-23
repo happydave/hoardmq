@@ -13,7 +13,7 @@ import (
 )
 
 func TestBasic311(t *testing.T) {
-	Statement(t, "MQTT-3.1.4-4", "MQTT-3.2.0-1", "MQTT-3.3.4-1", "MQTT-3.12.4-1", "MQTT-3.1.0-2", "MQTT-3.8.4-1", "MQTT-3.8.4-2", "MQTT-3.8.4-5", "MQTT-2.3.1-7")
+	Statement(t, Spec311, "MQTT-3.1.4-4", "MQTT-3.2.0-1", "MQTT-3.3.4-1", "MQTT-3.12.4-1", "MQTT-3.1.0-2", "MQTT-3.8.4-1", "MQTT-3.8.4-2", "MQTT-3.8.4-5", "MQTT-2.3.1-7")
 	n := StartNode(t, nil)
 	a := n.Must4(Connect4{ClientID: "myclientid", Clean: true})
 	a.Disconnect()
@@ -47,7 +47,7 @@ func TestBasic311(t *testing.T) {
 }
 
 func TestUnsupportedProtocolLevel311(t *testing.T) {
-	Statement(t, "MQTT-3.1.2-2", "MQTT-3.2.2-4", "MQTT-3.2.2-5", "MQTT-3.1.4-1")
+	Statement(t, Spec311, "MQTT-3.1.2-2", "MQTT-3.2.2-4", "MQTT-3.2.2-5", "MQTT-3.1.4-1")
 	n := StartNode(t, nil)
 	r := n.DialRaw(packet.V4)
 	// An unsupported 3.x-shaped protocol level (2) is answered with return
@@ -65,7 +65,7 @@ func TestUnsupportedProtocolLevel311(t *testing.T) {
 }
 
 func TestRetainedMessage311(t *testing.T) {
-	Statement(t, "MQTT-3.3.1-5", "MQTT-3.3.1-6", "MQTT-3.3.1-7", "MQTT-3.3.1-8", "MQTT-3.3.1-9", "MQTT-3.3.1-10", "MQTT-3.3.1-11", "MQTT-3.3.1-12", "MQTT-3.1.2-7")
+	Statement(t, Spec311, "MQTT-3.3.1-5", "MQTT-3.3.1-6", "MQTT-3.3.1-7", "MQTT-3.3.1-8", "MQTT-3.3.1-9", "MQTT-3.3.1-10", "MQTT-3.3.1-11", "MQTT-3.3.1-12")
 	n := StartNode(t, nil)
 	a := n.Must4(Connect4{ClientID: "myclientid", Clean: true})
 	a.Pub(topics[1], 0, true, "qos 0")
@@ -107,7 +107,7 @@ func TestRetainedMessage311(t *testing.T) {
 }
 
 func TestWillMessage311(t *testing.T) {
-	Statement(t, "MQTT-3.1.2-8", "MQTT-3.1.2-9", "MQTT-3.1.2-10", "MQTT-3.1.2-12", "MQTT-3.1.2-16", "MQTT-3.1.2-24", "MQTT-3.14.4-3")
+	Statement(t, Spec311, "MQTT-3.1.2-8", "MQTT-3.1.2-9", "MQTT-3.1.2-10", "MQTT-3.1.2-12", "MQTT-3.1.2-16", "MQTT-3.1.2-24", "MQTT-3.14.4-3")
 	n := StartNode(t, nil)
 	b := n.Must4(Connect4{ClientID: "myclientid2", Clean: true})
 	b.Sub(topics[2], 2)
@@ -133,7 +133,7 @@ func TestWillMessage311(t *testing.T) {
 }
 
 func TestOfflineQueueingAndSessionPresent311(t *testing.T) {
-	Statement(t, "MQTT-3.1.2-4", "MQTT-3.1.2-5", "MQTT-3.1.2-6", "MQTT-3.2.2-1", "MQTT-3.2.2-2", "MQTT-3.2.2-3", "MQTT-4.1.0-1")
+	Statement(t, Spec311, "MQTT-3.1.2-4", "MQTT-3.1.2-5", "MQTT-3.1.2-6", "MQTT-3.2.2-1", "MQTT-3.2.2-2", "MQTT-3.2.2-3", "MQTT-4.1.0-1")
 	n := StartNode(t, nil)
 	a := n.Must4(Connect4{ClientID: "myclientid", Clean: false})
 	if a.SessionPresent() {
@@ -169,7 +169,7 @@ func TestOfflineQueueingAndSessionPresent311(t *testing.T) {
 }
 
 func TestOverlappingSubscriptions311(t *testing.T) {
-	Statement(t, "MQTT-3.3.5-1", "MQTT-3.8.4-3", "MQTT-3.8.4-6", "MQTT-3.3.2-3")
+	Statement(t, Spec311, "MQTT-3.3.5-1", "MQTT-3.8.4-3", "MQTT-3.8.4-6", "MQTT-3.3.2-3")
 	n := StartNode(t, nil)
 	a := n.Must4(Connect4{ClientID: "myclientid", Clean: true})
 	a.Sub(wildtopics[6], 2)
@@ -190,7 +190,7 @@ func TestOverlappingSubscriptions311(t *testing.T) {
 }
 
 func TestRedeliveryOnReconnect311(t *testing.T) {
-	Statement(t, "MQTT-4.4.0-1", "MQTT-3.3.1-1", "MQTT-3.3.1-3", "MQTT-2.3.1-4", "MQTT-4.3.2-1", "MQTT-4.3.3-1")
+	Statement(t, Spec311, "MQTT-4.4.0-1", "MQTT-3.3.1-1", "MQTT-3.3.1-3", "MQTT-2.3.1-4", "MQTT-4.3.2-1", "MQTT-4.3.3-1")
 	n := StartNode(t, nil)
 	// A raw subscriber that never acknowledges.
 	r := n.DialRaw(packet.V4)
@@ -238,7 +238,7 @@ func TestRedeliveryOnReconnect311(t *testing.T) {
 }
 
 func TestUnsubscribe311(t *testing.T) {
-	Statement(t, "MQTT-3.10.4-1", "MQTT-3.10.4-2", "MQTT-3.10.4-4", "MQTT-3.10.4-5", "MQTT-3.10.4-6")
+	Statement(t, Spec311, "MQTT-3.10.4-1", "MQTT-3.10.4-2", "MQTT-3.10.4-4", "MQTT-3.10.4-5", "MQTT-3.10.4-6")
 	n := StartNode(t, nil)
 	b := n.Must4(Connect4{ClientID: "myclientid2", Clean: true})
 	b.Sub(topics[0], 2)
@@ -261,7 +261,7 @@ func TestUnsubscribe311(t *testing.T) {
 }
 
 func TestDollarTopics311(t *testing.T) {
-	Statement(t, "MQTT-4.7.2-1")
+	Statement(t, Spec311, "MQTT-4.7.2-1")
 	n := StartNode(t, nil)
 	b := n.Must4(Connect4{ClientID: "myclientid2", Clean: true})
 	b.Sub(wildtopics[5], 2)
@@ -271,7 +271,7 @@ func TestDollarTopics311(t *testing.T) {
 }
 
 func TestZeroLengthClientID311(t *testing.T) {
-	Statement(t, "MQTT-3.1.3-6", "MQTT-3.1.3-8", "MQTT-3.1.3-9")
+	Statement(t, Spec311, "MQTT-3.1.3-6", "MQTT-3.1.3-8", "MQTT-3.1.3-9")
 	n := StartNode(t, nil)
 	r := n.DialRaw(packet.V4)
 	if ack := r.Connect(&packet.Connect{ClientID: "", CleanStart: true}); ack.ReasonCode != packet.Success {
@@ -287,7 +287,7 @@ func TestZeroLengthClientID311(t *testing.T) {
 }
 
 func TestSubscribeFailure311(t *testing.T) {
-	Statement(t, "MQTT-3.8.4-5", "MQTT-3.9.3-1", "MQTT-3.9.3-2", "MQTT-3.3.5-2")
+	Statement(t, Spec311, "MQTT-3.8.4-5", "MQTT-3.9.3-1", "MQTT-3.9.3-2", "MQTT-3.3.5-2")
 	n := StartNode(t, nil)
 	r := n.DialRaw(packet.V4)
 	r.Connect(&packet.Connect{ClientID: "myclientid", CleanStart: true})

@@ -231,7 +231,7 @@ func New(o Options) (*Transport, error) {
 			// handshake; addresses are operator-chosen and may be IPs.
 			InsecureSkipVerify: true, //nolint:gosec // chain is verified below
 			VerifyPeerCertificate: func(raw [][]byte, _ [][]*x509.Certificate) error {
-				return verifyChain(raw, o.Auth.CA)
+				return verifyChain(raw, o.Auth.CA, x509.ExtKeyUsageServerAuth)
 			},
 		}
 	case "secret":
@@ -258,10 +258,10 @@ func New(o Options) (*Transport, error) {
 	return t, nil
 }
 
-// verifyChain checks the peer's certificate chains to the cluster CA without
-// a hostname check; identity is the certificate's common name, matched to
-// the claimed node name during the handshake.
-func verifyChain(raw [][]byte, ca *x509.CertPool) error {
+// verifyChain checks that the peer's certificate chains to the cluster CA for
+// usage, without a hostname check; the common name and the full set of usages
+// are checked after the hello.
+func verifyChain(raw [][]byte, ca *x509.CertPool, usage x509.ExtKeyUsage) error {
 	if len(raw) == 0 {
 		return errors.New("no peer certificate")
 	}
@@ -275,8 +275,32 @@ func verifyChain(raw [][]byte, ca *x509.CertPool) error {
 			inter.AddCert(c)
 		}
 	}
-	_, err = leaf.Verify(x509.VerifyOptions{Roots: ca, Intermediates: inter, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageAny}})
+	_, err = leaf.Verify(x509.VerifyOptions{Roots: ca, Intermediates: inter, KeyUsages: []x509.ExtKeyUsage{usage}})
 	return err
+}
+
+// peerUsagesOK reports whether a peer's leaf names both the client and the
+// server auth usages: each node dials and accepts. A leaf without the
+// extension, which x509 reads as any usage, does not.
+func peerUsagesOK(leaf *x509.Certificate) bool {
+	var client, server bool
+	for _, u := range leaf.ExtKeyUsage {
+		client = client || u == x509.ExtKeyUsageClientAuth
+		server = server || u == x509.ExtKeyUsageServerAuth
+	}
+	return client && server
+}
+
+// tlsRefusal names a failed TLS handshake: one that failed on the peer's
+// certificate is a certificate refusal, the rest tls.
+func tlsRefusal(err error) string {
+	var invalid x509.CertificateInvalidError
+	var unknown x509.UnknownAuthorityError
+	var verify *tls.CertificateVerificationError
+	if errors.As(err, &invalid) || errors.As(err, &unknown) || errors.As(err, &verify) {
+		return "certificate"
+	}
+	return "tls"
 }
 
 // Start binds the listener (when configured) and starts dialing the peers
@@ -657,7 +681,7 @@ func (t *Transport) dial(p *peer, role Role) (*link, error) {
 		cancel()
 		if err != nil {
 			_ = c.Close()
-			t.refused(c, refuse("tls", err))
+			t.refused(c, refuse(tlsRefusal(err), err))
 			return nil, err
 		}
 		c = tc
@@ -731,7 +755,7 @@ func (t *Transport) accept(c net.Conn) {
 		cancel()
 		if err != nil {
 			_ = c.Close()
-			t.refused(c, refuse("tls", err))
+			t.refused(c, refuse(tlsRefusal(err), err))
 			return
 		}
 		c = tc

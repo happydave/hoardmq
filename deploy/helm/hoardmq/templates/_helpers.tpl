@@ -31,10 +31,19 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 
 {{/*
-The Secret holding the cluster CA and node certificate.
+The Secret holding the node certificates (with tls.mode certManager, the
+prefix of one Secret per ordinal).
 */}}
 {{- define "hoardmq.tlsSecret" -}}
 {{- printf "%s-cluster-tls" (include "hoardmq.fullname" .) -}}
+{{- end -}}
+
+{{/*
+The Secret holding the cluster CA; with tls.mode generated, its key too. No
+pod mounts it.
+*/}}
+{{- define "hoardmq.tlsCASecret" -}}
+{{- printf "%s-cluster-ca" (include "hoardmq.fullname" .) -}}
 {{- end -}}
 
 {{/*

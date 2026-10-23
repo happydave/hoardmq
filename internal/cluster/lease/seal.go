@@ -97,9 +97,13 @@ const (
 // session at (zero for none). While the lease is this node's the copy waits
 // for the adoption or CONNECT here that will take it. No time ends a seal: a
 // new owner alive by the log may not have fetched it, and this copy can be
-// the only one.
-func sealEnds(lease bool, owner, self string, token uint64, asked string, heldAt uint64) sealVerdict {
+// the only one. below is whether this node's build is below the cluster's
+// level: its table has stopped learning, so its "no lease" may be one it has
+// not applied, and the copy is kept.
+func sealEnds(below, lease bool, owner, self string, token uint64, asked string, heldAt uint64) sealVerdict {
 	switch {
+	case !lease && below:
+		return sealKeep
 	case !lease:
 		return sealDropLeaseGone
 	case owner == self:
@@ -243,7 +247,7 @@ func (s *Service) sealBound(k key, token uint64) {
 		// The lease may have moved while its owner's targets were asked.
 		l, ok = s.table.Lookup(k.ns, k.id)
 	}
-	verdict := sealEnds(ok, l.Owner, s.o.Node, l.Epoch, asked, heldAt)
+	verdict := sealEnds(s.BelowLevel(), ok, l.Owner, s.o.Node, l.Epoch, asked, heldAt)
 	if verdict == sealKeep {
 		s.log.Debug("sealed session kept at the bound: nothing shows it held elsewhere", "client", k.id, "token", token, "owner", l.Owner, "heldAt", heldAt)
 		s.armSeal(k, token)

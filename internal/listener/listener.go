@@ -56,6 +56,7 @@ type Listener struct {
 	failedNanos   atomic.Int64
 	prebuffered   atomic.Int64 // CONNECTs already in the socket at the first read
 	abandoned     atomic.Int64 // CONNECTs whose client had closed before the lease was acquired
+	refused       atomic.Int64 // connections closed at accept for maxConnections
 }
 
 // Open binds the listener. Nothing is accepted until Accept is called; for
@@ -139,6 +140,7 @@ func (l *Listener) Accept() (net.Conn, error) {
 			}
 		}
 		if max := l.maxConns.Load(); max > 0 && int64(l.active.Load()) >= max {
+			l.refused.Add(1)
 			_ = c.Close()
 			<-l.slots
 			continue
@@ -154,6 +156,9 @@ func (l *Listener) SetMaxConnections(n int) { l.maxConns.Store(int64(n)) }
 
 // MaxConnections is the connection bound in force; 0 is none.
 func (l *Listener) MaxConnections() int { return int(l.maxConns.Load()) }
+
+// Refused is the number of connections closed at accept for the bound.
+func (l *Listener) Refused() int64 { return l.refused.Load() }
 
 // Active is the number of connections accepted and not yet closed.
 func (l *Listener) Active() int { return int(l.active.Load()) }

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/happydave/hoardmq/internal/cluster/consensus"
@@ -72,7 +73,9 @@ func (c *Core) run() {
 				return
 			}
 			last = now
+			c.warnHeld(now)
 			c.maybePromote(n)
+			c.trackCatchUp(n, now)
 		case rd := <-n.Ready():
 			if err := c.handleReady(n, rd); err != nil {
 				c.log.Error("consensus loop stopping", "err", err)
@@ -209,6 +212,62 @@ func (c *Core) TickStats() (delivered, owed, dropped, maxRun uint64) {
 	return c.ticks.Load(), c.ticksOwed.Load(), c.ticksDropped.Load(), c.ticksMaxRun.Load()
 }
 
+// catchUpContext tags the read index requests trackCatchUp makes.
+var catchUpContext = []byte("hoardmq-catch-up/")
+
+// trackCatchUp runs on each tick: it marks the applied index's progress and,
+// once an election timeout of wall time, asks the leader for its commit index
+// with a read index request.
+func (c *Core) trackCatchUp(n raft.Node, now time.Time) {
+	c.markProgress(now)
+	if now.Sub(c.readAt) < time.Duration(c.o.ElectionTicks)*c.o.Tick {
+		return
+	}
+	c.readAt = now
+	if lead := c.leadID.Load(); lead == 0 || lead == c.id {
+		return
+	}
+	c.readSeq++
+	ctx, cancel := context.WithTimeout(context.Background(), c.o.Tick)
+	defer cancel()
+	if err := n.ReadIndex(ctx, binary.BigEndian.AppendUint64(append([]byte(nil), catchUpContext...), c.readSeq)); err != nil {
+		c.log.Debug("read index request not taken", "err", err)
+	}
+}
+
+// markProgress moves the applied mark when the applied index changed or
+// reached the target, and logs and counts a change of the behind state.
+func (c *Core) markProgress(now time.Time) {
+	applied, target := c.machine.Applied(), c.catchUpTarget.Load()
+	if m := c.mark.Load(); m == nil || applied != m.applied || applied >= target {
+		c.mark.Store(&applyMark{applied: applied, at: now})
+	}
+	behind := c.behindAt(now)
+	if behind == c.behind.Load() {
+		return
+	}
+	c.behind.Store(behind)
+	if !behind {
+		c.set("hoardmq_raft_apply_stalled", nil, 0)
+		c.log.Info("applied index advancing toward the leader's commit again", "applied", applied, "leaderCommit", target)
+		return
+	}
+	c.stalls.Add(1)
+	c.count("hoardmq_raft_apply_stalls_total", nil, 1)
+	c.set("hoardmq_raft_apply_stalled", nil, 1)
+	c.log.Warn("applied index not advancing toward the leader's commit", "applied", applied, "leaderCommit", target, "since", now.Sub(c.mark.Load().at).Round(time.Millisecond))
+}
+
+// raiseTo raises a to v if v is higher.
+func raiseTo(a *atomic.Uint64, v uint64) {
+	for {
+		cur := a.Load()
+		if v <= cur || a.CompareAndSwap(cur, v) {
+			return
+		}
+	}
+}
+
 func (c *Core) isRemoved() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -245,13 +304,22 @@ func (c *Core) propose(n raft.Node, p proposal) {
 // handleReady performs one Ready batch in the order the library requires:
 // save, send (with the token the save returned), apply, advance.
 func (c *Core) handleReady(n raft.Node, rd raft.Ready) error {
+	if c.o.ReadyGate != nil {
+		c.o.ReadyGate()
+	}
 	if rd.SoftState != nil {
 		c.mu.Lock()
 		wasLeader := c.state == raft.StateLeader
 		c.lead, c.state = rd.Lead, rd.RaftState
 		c.mu.Unlock()
+		c.leadID.Store(rd.Lead)
 		if wasLeader && rd.RaftState != raft.StateLeader {
 			c.cancelOut(reasonCancelled, func(*outTransfer) bool { return false })
+		}
+	}
+	for _, rs := range rd.ReadStates {
+		if bytes.HasPrefix(rs.RequestCtx, catchUpContext) {
+			raiseTo(&c.catchUpTarget, rs.Index)
 		}
 	}
 	if rd.HardState != nil && !raft.IsEmptyHardState(rd.HardState) {
@@ -284,6 +352,7 @@ func (c *Core) handleReady(n raft.Node, rd raft.Ready) error {
 	}
 	c.releaseReceived(c.machine.Applied())
 	c.dropStaged(c.machine.Applied())
+	c.noteHeldEntries()
 	c.checkRecovered()
 	n.Advance()
 	c.proposeDeferred(n)
@@ -428,6 +497,11 @@ func (c *Core) installSnapshot(snap *pb.Snapshot) error {
 func (c *Core) apply(n raft.Node, e *pb.Entry) {
 	switch e.GetType() {
 	case pb.EntryNormal:
+		if c.hold.Load() != nil {
+			// Held: the entry stays in the log for a build that can apply it,
+			// and the applied index stays below it.
+			return
+		}
 		data := e.GetData()
 		if len(data) < 9 {
 			c.machine.SetApplied(e.GetIndex())
@@ -435,6 +509,10 @@ func (c *Core) apply(n raft.Node, e *pb.Entry) {
 		}
 		id := binary.BigEndian.Uint64(data[:8])
 		value, err := c.machine.Apply(e.GetIndex(), data[8:])
+		if errors.Is(err, consensus.ErrHeld) {
+			c.enterHold(e.GetIndex(), err)
+			return
+		}
 		c.mu.Lock()
 		w := c.waiters[id]
 		c.mu.Unlock()
@@ -463,7 +541,12 @@ func (c *Core) apply(n raft.Node, e *pb.Entry) {
 			c.members.Upsert(meta)
 		}
 		cs := n.ApplyConfChange(cc)
-		c.machine.SetApplied(e.GetIndex())
+		if c.hold.Load() == nil {
+			// While held the library and the membership follow the group, but
+			// the applied index stays below the first command not applied, so
+			// a restart replays from there.
+			c.machine.SetApplied(e.GetIndex())
+		}
 		c.applyConfState(cs)
 		c.mu.Lock()
 		c.pendingCC = false
@@ -788,7 +871,9 @@ func (c *Core) maybePromote(n raft.Node) {
 // the stored snapshot and no build is running. The build writes a file off
 // the loop; finishBuild records it and compacts the log.
 func (c *Core) maybeSnapshot() error {
-	if c.building {
+	// A held node's own snapshot is only ever one a build that understood its
+	// level wrote.
+	if c.building || c.hold.Load() != nil {
 		return nil
 	}
 	applied := c.machine.Applied()

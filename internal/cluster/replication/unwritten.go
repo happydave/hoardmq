@@ -250,7 +250,7 @@ func (r *Replicator) Unfed(ns, id string) []string {
 	if m.Version == 0 {
 		return nil
 	}
-	alive, leaving := r.placementFacts()
+	alive, leaving, _ := r.placementFacts()
 	return unfedOf(alive, leaving, r.o.Node, m.Targets(r.o.Map.ShardOf(ns, id), r.o.Node))
 }
 

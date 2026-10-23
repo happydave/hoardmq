@@ -28,6 +28,9 @@ type Revocation struct {
 	OCSPURL  string
 	CRLURLs  []string
 	FailOpen bool
+	// OCSPMaxAge is how old an OCSP answer without a nextUpdate may be;
+	// zero is DefaultOCSPMaxAge.
+	OCSPMaxAge time.Duration
 	// FetchWait bounds how long a CONNECT waits for a fetch; Timeout bounds
 	// the fetch.
 	FetchWait time.Duration
@@ -50,6 +53,9 @@ type flight struct {
 	crl  *CRL
 	err  error
 }
+
+// DefaultOCSPMaxAge is OCSPMaxAge's default.
+const DefaultOCSPMaxAge = 24 * time.Hour
 
 // Cache bounds.
 const (
@@ -347,7 +353,11 @@ func (r *Revocation) fetchOCSP(url string, leaf, issuer *x509.Certificate) (OCSP
 	if err != nil {
 		return OCSPAnswer{}, err
 	}
-	return AcceptOCSP(data, leaf, issuer, r.now())
+	maxAge := r.OCSPMaxAge
+	if maxAge == 0 {
+		maxAge = DefaultOCSPMaxAge
+	}
+	return AcceptOCSP(data, leaf, issuer, r.now(), maxAge)
 }
 
 func (r *Revocation) fetchCRL(url string, issuer *x509.Certificate) (*CRL, error) {

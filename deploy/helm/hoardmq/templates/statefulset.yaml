@@ -84,21 +84,6 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
-            # Each node presents its own certificate: peers refuse a hello
-            # whose name is not the certificate's common name.
-            {{- if eq .Values.tls.mode "generated" }}
-            - name: HOARDMQ_CLUSTER_AUTH_TLS_CERT_FILE
-              value: /etc/hoardmq/tls/$(HOARDMQ_NODE_NAME).crt
-            - name: HOARDMQ_CLUSTER_AUTH_TLS_KEY_FILE
-              value: /etc/hoardmq/tls/$(HOARDMQ_NODE_NAME).key
-            {{- else }}
-            - name: HOARDMQ_CLUSTER_AUTH_TLS_CERT_FILE
-              value: /etc/hoardmq/tls/$(HOARDMQ_NODE_NAME)/tls.crt
-            - name: HOARDMQ_CLUSTER_AUTH_TLS_KEY_FILE
-              value: /etc/hoardmq/tls/$(HOARDMQ_NODE_NAME)/tls.key
-            - name: HOARDMQ_CLUSTER_AUTH_TLS_CA_FILE
-              value: /etc/hoardmq/tls/$(HOARDMQ_NODE_NAME)/ca.crt
-            {{- end }}
             # Clients redirected during a drain are sent here.
             - name: HOARDMQ_CLUSTER_ADVERTISE
               {{- if .Values.service.advertiseHost }}
@@ -162,16 +147,30 @@ spec:
             - name: config
               mountPath: /etc/hoardmq
               readOnly: true
+            # Each node presents its own certificate (peers refuse a hello
+            # whose name is not the certificate's common name), and the
+            # container sees only its own key: the mounts select the pod's
+            # files out of a volume holding every ordinal's. They sit outside
+            # /etc/hoardmq: a file mounted inside that read-only ConfigMap
+            # mount fails to start the container.
             {{- if eq .Values.tls.mode "generated" }}
             - name: cluster-tls
-              mountPath: /etc/hoardmq/tls
+              mountPath: /etc/hoardmq-tls/tls.crt
+              subPathExpr: $(HOARDMQ_NODE_NAME).crt
+              readOnly: true
+            - name: cluster-tls
+              mountPath: /etc/hoardmq-tls/tls.key
+              subPathExpr: $(HOARDMQ_NODE_NAME).key
+              readOnly: true
+            - name: cluster-tls
+              mountPath: /etc/hoardmq-tls/ca.crt
+              subPath: ca.crt
               readOnly: true
             {{- else }}
-            {{- range $i := until (int .Values.replicaCount) }}
-            - name: cluster-tls-{{ $i }}
-              mountPath: /etc/hoardmq/tls/{{ include "hoardmq.fullname" $ }}-{{ $i }}
+            - name: cluster-tls
+              mountPath: /etc/hoardmq-tls
+              subPathExpr: $(HOARDMQ_NODE_NAME)
               readOnly: true
-            {{- end }}
             {{- end }}
             {{- if .Values.listeners.mqtts.enabled }}
             - name: client-tls
@@ -197,11 +196,25 @@ spec:
           secret:
             secretName: {{ include "hoardmq.tlsSecret" . }}
         {{- else }}
-        {{- range $i := until (int .Values.replicaCount) }}
-        - name: cluster-tls-{{ $i }}
-          secret:
-            secretName: {{ include "hoardmq.tlsSecret" $ }}-{{ $i }}
-        {{- end }}
+        - name: cluster-tls
+          projected:
+            sources:
+              {{- /* Every ordinal below the maximum, so the template does not
+                     change with replicaCount. Not optional: a pod whose own
+                     Secret was left out would start on an empty directory
+                     the Secret never fills, so it waits for all of them. */}}
+              {{- range $i := until (int .Values.cluster.maxReplicas) }}
+              {{- $pod := printf "%s-%d" (include "hoardmq.fullname" $) $i }}
+              - secret:
+                  name: {{ include "hoardmq.tlsSecret" $ }}-{{ $i }}
+                  items:
+                    - key: tls.crt
+                      path: {{ $pod }}/tls.crt
+                    - key: tls.key
+                      path: {{ $pod }}/tls.key
+                    - key: ca.crt
+                      path: {{ $pod }}/ca.crt
+              {{- end }}
         {{- end }}
         {{- if .Values.listeners.mqtts.enabled }}
         - name: client-tls

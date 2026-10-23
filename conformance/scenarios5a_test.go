@@ -29,7 +29,7 @@ func qosSet(ms []*paho.Publish) map[byte]bool {
 }
 
 func TestBasic(t *testing.T) {
-	Statement(t, "MQTT-3.1.4-1", "MQTT-3.1.4-5", "MQTT-3.2.0-1", "MQTT-3.3.4-1", "MQTT-3.12.4-1", "MQTT-3.14.4-1", "MQTT-3.1.0-2", "MQTT-3.1.2-1", "MQTT-3.2.2-8")
+	Statement(t, Spec5, "MQTT-3.1.4-1", "MQTT-3.1.4-5", "MQTT-3.2.0-1", "MQTT-3.3.4-1", "MQTT-3.12.4-1", "MQTT-3.14.4-1", "MQTT-3.1.0-2", "MQTT-3.1.2-1", "MQTT-3.2.2-8")
 	n := StartNode(t, nil)
 	a, _ := n.Must5(Connect5{ClientID: "myclientid", CleanStart: true})
 	a.Disconnect(nil)
@@ -64,7 +64,7 @@ func TestBasic(t *testing.T) {
 }
 
 func TestRetainedMessage(t *testing.T) {
-	Statement(t, "MQTT-3.3.1-5", "MQTT-3.3.1-6", "MQTT-3.3.1-8", "MQTT-3.3.1-9", "MQTT-3.3.2-17", "MQTT-3.3.2-18", "MQTT-3.8.4-4")
+	Statement(t, Spec5, "MQTT-3.3.1-5", "MQTT-3.3.1-6", "MQTT-3.3.1-8", "MQTT-3.3.1-9", "MQTT-3.3.2-17", "MQTT-3.3.2-18", "MQTT-3.8.4-4")
 	n := StartNode(t, nil)
 	props := &paho.PublishProperties{User: paho.UserProperties{{Key: "a", Value: "2"}, {Key: "c", Value: "3"}}}
 	a, _ := n.Must5(Connect5{ClientID: "myclientid", CleanStart: true})
@@ -97,7 +97,7 @@ func TestRetainedMessage(t *testing.T) {
 }
 
 func TestWillMessage(t *testing.T) {
-	Statement(t, "MQTT-3.1.2-8", "MQTT-3.1.2-9", "MQTT-3.1.2-10", "MQTT-3.1.2-22", "MQTT-3.1.3-11")
+	Statement(t, Spec5, "MQTT-3.1.2-8", "MQTT-3.1.2-9", "MQTT-3.1.2-10", "MQTT-3.1.2-22", "MQTT-3.1.3-11")
 	n := StartNode(t, nil)
 	delay := uint32(0)
 	// The Will publisher pings never: a raw connection with keep alive 1.
@@ -118,7 +118,7 @@ func TestWillMessage(t *testing.T) {
 }
 
 func TestZeroLengthClientID(t *testing.T) {
-	Statement(t, "MQTT-3.1.3-6", "MQTT-3.1.3-7", "MQTT-3.1.3-5")
+	Statement(t, Spec5, "MQTT-3.1.3-6", "MQTT-3.1.3-7", "MQTT-3.1.3-5")
 	n := StartNode(t, nil)
 	c, ack, err := n.Dial5(Connect5{ClientID: "", CleanStart: false})
 	if err != nil {
@@ -136,7 +136,7 @@ func TestZeroLengthClientID(t *testing.T) {
 }
 
 func TestOfflineMessageQueueing(t *testing.T) {
-	Statement(t, "MQTT-3.1.2-5", "MQTT-3.1.2-23", "MQTT-3.2.2-2", "MQTT-4.4.0-1", "MQTT-3.3.1-3")
+	Statement(t, Spec5, "MQTT-3.1.2-5", "MQTT-3.1.2-23", "MQTT-3.2.2-2", "MQTT-4.4.0-1", "MQTT-3.3.1-3")
 	n := StartNode(t, nil)
 	a, _ := n.Must5(Connect5{ClientID: "myclientid", CleanStart: true, SessionExpiry: u32(99999)})
 	a.Sub(wildtopics[5], 2)
@@ -160,7 +160,7 @@ func TestOfflineMessageQueueing(t *testing.T) {
 }
 
 func TestOverlappingSubscriptions(t *testing.T) {
-	Statement(t, "MQTT-3.3.4-2", "MQTT-3.8.4-3", "MQTT-3.8.4-6")
+	Statement(t, Spec5, "MQTT-3.3.4-2", "MQTT-3.8.4-3", "MQTT-3.8.4-6")
 	n := StartNode(t, nil)
 	a, _ := n.Must5(Connect5{ClientID: "myclientid", CleanStart: true})
 	a.Subscribe(nil, paho.SubscribeOptions{Topic: wildtopics[6], QoS: 2}, paho.SubscribeOptions{Topic: wildtopics[0], QoS: 1})
@@ -174,7 +174,7 @@ func TestOverlappingSubscriptions(t *testing.T) {
 }
 
 func TestKeepalive(t *testing.T) {
-	Statement(t, "MQTT-3.1.2-22", "MQTT-3.1.2-8")
+	Statement(t, Spec5, "MQTT-3.1.2-22", "MQTT-3.1.2-8")
 	n := StartNode(t, nil)
 	r := n.DialRaw(packet.V5)
 	r.Connect(&packet.Connect{ClientID: "myclientid", CleanStart: true, KeepAlive: 1, Will: &packet.Will{Topic: topics[4], Payload: []byte("keepalive expiry")}})
@@ -196,7 +196,7 @@ func TestKeepalive(t *testing.T) {
 }
 
 func TestRedeliveryOnReconnect(t *testing.T) {
-	Statement(t, "MQTT-4.4.0-1", "MQTT-3.3.1-1", "MQTT-3.1.2-5", "MQTT-4.3.2-2", "MQTT-4.3.3-3")
+	Statement(t, Spec5, "MQTT-4.4.0-1", "MQTT-3.3.1-1", "MQTT-3.1.2-5", "MQTT-4.3.2-2", "MQTT-4.3.3-3")
 	n := StartNode(t, nil)
 	// The client does not acknowledge; the server must resend on resumption.
 	b, _ := n.Must5(Connect5{ClientID: "myclientid2", CleanStart: false, SessionExpiry: u32(99999), ManualAck: true})
@@ -222,7 +222,7 @@ func TestRedeliveryOnReconnect(t *testing.T) {
 }
 
 func TestSubscribeFailure(t *testing.T) {
-	Statement(t, "MQTT-3.8.4-3", "MQTT-3.8.4-7", "MQTT-3.9.3-2")
+	Statement(t, Spec5, "MQTT-3.8.4-3", "MQTT-3.8.4-7", "MQTT-3.9.3-2")
 	n := StartNode(t, nil)
 	a, _ := n.Must5(Connect5{ClientID: "myclientid", CleanStart: true})
 	ack := a.Sub(nosubscribeTopic, 2)
@@ -236,7 +236,7 @@ func TestSubscribeFailure(t *testing.T) {
 }
 
 func TestDollarTopics(t *testing.T) {
-	Statement(t, "MQTT-4.7.2-1")
+	Statement(t, Spec5, "MQTT-4.7.2-1")
 	n := StartNode(t, nil)
 	b, _ := n.Must5(Connect5{ClientID: "myclientid2", CleanStart: true})
 	b.Sub(wildtopics[5], 2)
@@ -251,7 +251,7 @@ func TestDollarTopics(t *testing.T) {
 }
 
 func TestUnsubscribe(t *testing.T) {
-	Statement(t, "MQTT-3.10.4-1", "MQTT-3.10.4-2", "MQTT-3.10.4-4", "MQTT-3.11.3-1", "MQTT-3.11.3-2")
+	Statement(t, Spec5, "MQTT-3.10.4-1", "MQTT-3.10.4-2", "MQTT-3.10.4-4", "MQTT-3.11.3-1", "MQTT-3.11.3-2")
 	n := StartNode(t, nil)
 	b, _ := n.Must5(Connect5{ClientID: "myclientid2", CleanStart: true})
 	b.Sub(topics[0], 2)
@@ -280,7 +280,7 @@ func TestUnsubscribe(t *testing.T) {
 }
 
 func TestSessionExpiry(t *testing.T) {
-	Statement(t, "MQTT-3.1.2-23", "MQTT-3.1.2-4", "MQTT-3.1.2-5", "MQTT-3.1.2-6", "MQTT-3.2.2-1", "MQTT-3.2.2-2", "MQTT-3.2.2-3", "MQTT-3.14.2-2", "MQTT-3.14.4-3")
+	Statement(t, Spec5, "MQTT-3.1.2-23", "MQTT-3.1.2-4", "MQTT-3.1.2-5", "MQTT-3.1.2-6", "MQTT-3.2.2-1", "MQTT-3.2.2-2", "MQTT-3.2.2-3", "MQTT-3.14.2-2", "MQTT-3.14.4-3")
 	n := StartNode(t, nil)
 	connect := func(clean bool, expiry uint32) (*Client5, *paho.Connack) {
 		return n.Must5(Connect5{ClientID: "myclientid", CleanStart: clean, SessionExpiry: u32(expiry)})

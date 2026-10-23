@@ -561,8 +561,15 @@ func (m *Manager) Subscribe(c Connection, p *packet.Subscribe) []packet.ReasonCo
 	}
 	w := m.ackWriter()
 	var changes []filterChange
+	limit := m.CurrentLimits().MaxSubscriptions
 	s.mu.Lock()
 	for i, ps := range p.Subscriptions {
+		if _, holds := s.subs[ps.Filter]; !subscriptionFits(len(s.subs), limit, holds) {
+			codes[i] = packet.QuotaExceeded
+			m.count("hoardmq_subscription_limit_refusals_total", map[string]string{"namespace": s.key.ns}, 1)
+			s.log.Debug("subscription refused: the session holds its limit of filters", "filter", ps.Filter, "limit", limit)
+			continue
+		}
 		sub := Subscription{Filter: ps.Filter, QoS: ps.QoS, NoLocal: ps.NoLocal, RetainAsPublished: ps.RetainAsPublished, RetainHandling: ps.RetainHandling, Identifier: id}
 		if s.version != packet.V5 {
 			// The 3.x SUBSCRIBE carries only the QoS.
@@ -596,6 +603,13 @@ func (m *Manager) Subscribe(c Connection, p *packet.Subscribe) []packet.ReasonCo
 		m.putBack(s, c, changes, true)
 	}
 	return codes
+}
+
+// subscriptionFits reports whether a session holding held filters may take
+// one more under limit (0 is none); a filter it already holds is replaced,
+// not added.
+func subscriptionFits(held, limit int, holds bool) bool {
+	return holds || limit == 0 || held < limit
 }
 
 // filterChange is one filter a SUBSCRIBE or UNSUBSCRIBE changed in a

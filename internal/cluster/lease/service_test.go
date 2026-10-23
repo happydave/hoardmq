@@ -358,6 +358,10 @@ type tcluster struct {
 	// kept is the copy a former holder kept, and that holder, every node's
 	// fallback reports beside its answer; nil unless a test set fixtureKept.
 	kept func(ns, id string) (*store.SessionState, string)
+	// absent are configured peers no node runs as, as a StatefulSet's
+	// ordinals above its running pods are: every node's transport and core
+	// list them, and nothing answers at their addresses.
+	absent []string
 }
 
 // fixtureFallback is handed to the next cluster built. A test that sets it
@@ -398,6 +402,11 @@ var fixtureOptions func(o *Options)
 // probe, under the same rule as fixtureFallback.
 var fixtureProbe func(node string) func(index, level uint64, op Op)
 
+// fixtureSnapshotEntries is every core's snapshot interval in the next
+// cluster built, under the same rule as fixtureFallback; zero is the core's
+// default.
+var fixtureSnapshotEntries uint64
+
 // fixtureClock gives each node of the next cluster built its wall clock,
 // under the same rule as fixtureFallback; the steady clock stays the real one.
 var fixtureClock func(node string) func() time.Time
@@ -419,7 +428,18 @@ func newCluster(t *testing.T, names []string, ttl time.Duration, advertise func(
 // newClusterWith is newCluster with a hook on each node's transport options.
 func newClusterWith(t *testing.T, names []string, ttl time.Duration, advertise func(name string) string, tweak func(name string, o *transport.Options)) *tcluster {
 	t.Helper()
-	c := &tcluster{t: t, dir: t.TempDir(), names: names, nodes: map[string]*tnode{}, addrs: map[string]string{}, ttl: ttl, fallback: fixtureFallback, down: fixtureDown, kept: fixtureKept}
+	return buildCluster(t, names, nil, ttl, advertise, tweak)
+}
+
+// newClusterBeside is newCluster with configured peers that never run.
+func newClusterBeside(t *testing.T, names, absent []string, ttl time.Duration) *tcluster {
+	t.Helper()
+	return buildCluster(t, names, absent, ttl, nil, nil)
+}
+
+func buildCluster(t *testing.T, names, absent []string, ttl time.Duration, advertise func(name string) string, tweak func(name string, o *transport.Options)) *tcluster {
+	t.Helper()
+	c := &tcluster{t: t, dir: t.TempDir(), names: names, nodes: map[string]*tnode{}, addrs: map[string]string{}, ttl: ttl, fallback: fixtureFallback, down: fixtureDown, kept: fixtureKept, absent: absent}
 	for _, name := range names {
 		var ps []config.Peer
 		for _, o := range names {
@@ -427,6 +447,7 @@ func newClusterWith(t *testing.T, names []string, ttl time.Duration, advertise f
 				ps = append(ps, config.Peer{Name: o, Address: "127.0.0.1:1"})
 			}
 		}
+		ps = append(ps, c.absentPeers()...)
 		o := transport.Options{Node: name, ClusterID: "t", Listen: "127.0.0.1:0", Peers: ps, Auth: transport.Auth{Mode: "secret", Secret: []byte(secret)},
 			Heartbeat: 50 * time.Millisecond, HeartbeatMisses: 4, HandshakeTimeout: 2 * time.Second, Logger: quiet}
 		if tweak != nil {
@@ -476,6 +497,15 @@ func (c *tcluster) peersFor(name string) []config.Peer {
 			ps = append(ps, config.Peer{Name: o, Address: c.addrs[o]})
 		}
 	}
+	return append(ps, c.absentPeers()...)
+}
+
+// absentPeers are the absent names at addresses that never resolve.
+func (c *tcluster) absentPeers() []config.Peer {
+	var ps []config.Peer
+	for _, a := range c.absent {
+		ps = append(ps, config.Peer{Name: a, Address: a + ".absent.invalid:7000"})
+	}
 	return ps
 }
 
@@ -483,13 +513,21 @@ func (c *tcluster) peersFor(name string) []config.Peer {
 // core, and starts them; the fake sessions object survives restarts.
 func (c *tcluster) startNode(n *tnode, advertise string) {
 	c.t.Helper()
+	c.startNodeWith(n, advertise, nil, nil)
+}
+
+// startNodeWith is startNode with a hook on the node's options and one on its
+// service before it starts, after the fixture's own.
+func (c *tcluster) startNodeWith(n *tnode, advertise string, opts func(o *Options), svcHook func(s *Service)) {
+	c.t.Helper()
 	st, err := raftlog.Open(n.dir, "raft", wal.Options{Logger: quiet})
 	if err != nil {
 		c.t.Fatal(err)
 	}
 	machine := consensus.NewMachine()
 	core, err := etcdraft.New(etcdraft.Options{Node: n.name, Peers: c.peersFor(n.name), Store: st, Transport: n.tr, Machine: machine,
-		Tick: 10 * time.Millisecond, ElectionTicks: 10, HeartbeatTicks: 2, PromoteLag: 50, JoinTimeout: 500 * time.Millisecond, Logger: quiet})
+		Tick: 10 * time.Millisecond, ElectionTicks: 10, HeartbeatTicks: 2, PromoteLag: 50, JoinTimeout: 500 * time.Millisecond, Logger: quiet,
+		SnapshotEntries: fixtureSnapshotEntries, SnapshotTrailing: fixtureSnapshotEntries / 2})
 	if err != nil {
 		c.t.Fatal(err)
 	}
@@ -500,6 +538,9 @@ func (c *tcluster) startNode(n *tnode, advertise string) {
 	if fixtureOptions != nil {
 		fixtureOptions(&o)
 	}
+	if opts != nil {
+		opts(&o)
+	}
 	svc, err := New(o)
 	if err != nil {
 		c.t.Fatal(err)
@@ -509,6 +550,9 @@ func (c *tcluster) startNode(n *tnode, advertise string) {
 	}
 	if fixtureService != nil {
 		fixtureService(n.name, svc)
+	}
+	if svcHook != nil {
+		svcHook(svc)
 	}
 	if err := core.Start(); err != nil {
 		c.t.Fatal(err)
@@ -525,6 +569,26 @@ func (c *tcluster) stopNode(n *tnode) {
 	n.svc.Stop()
 	n.core.Stop()
 	n.tr.Stop()
+}
+
+// restartNode stops a node and starts it again over its store, on a new
+// transport listening where the old one did, with the hooks of startNodeWith:
+// the same node on another build.
+func (c *tcluster) restartNode(n *tnode, opts func(o *Options), svcHook func(s *Service)) {
+	c.t.Helper()
+	c.stopNode(n)
+	o := transport.Options{Node: n.name, ClusterID: "t", Listen: c.addrs[n.name], Peers: c.peersFor(n.name), Auth: transport.Auth{Mode: "secret", Secret: []byte(secret)},
+		Heartbeat: 50 * time.Millisecond, HeartbeatMisses: 4, HandshakeTimeout: 2 * time.Second, Logger: quiet}
+	tr, err := transport.New(o)
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	if err := tr.Start(); err != nil {
+		c.t.Fatal(err)
+	}
+	c.t.Cleanup(tr.Stop)
+	n.tr = tr
+	c.startNodeWith(n, "", opts, svcHook)
 }
 
 func waitFor(t *testing.T, what string, d time.Duration, cond func() bool) {
@@ -949,6 +1013,9 @@ type fakeCore struct {
 	recovering    atomic.Bool
 	concurrent    atomic.Int32
 	maxConcurrent atomic.Int32
+	held          atomic.Pointer[consensus.Hold]
+	mu            sync.Mutex
+	transfers     []string // TransferLeadership's targets, in order
 }
 
 func (f *fakeCore) Propose(ctx context.Context, _ consensus.Kind, _ []byte) (any, error) {
@@ -991,7 +1058,19 @@ func (f *fakeCore) Status() consensus.Status {
 }
 func (f *fakeCore) Ready() bool      { return true }
 func (f *fakeCore) Recovering() bool { return f.recovering.Load() }
-func (f *fakeCore) Stop()            {}
+func (f *fakeCore) Held() (consensus.Hold, bool) {
+	if h := f.held.Load(); h != nil {
+		return *h, true
+	}
+	return consensus.Hold{}, false
+}
+func (f *fakeCore) TransferLeadership(_ context.Context, to string) error {
+	f.mu.Lock()
+	f.transfers = append(f.transfers, to)
+	f.mu.Unlock()
+	return nil
+}
+func (f *fakeCore) Stop() {}
 
 // TestConnectPathRenewalsAreSingleFlight: a fenced node's connect path
 // calls alive() from every handshake at once; they must share one attempt,
@@ -1168,6 +1247,55 @@ func TestNoFenceWhileLeaderless(t *testing.T) {
 		t.Fatal("the lease was lost while leaderless")
 	}
 	// One core returns: a leader is elected, keep renews.
+	c.startNode(stopped, "")
+	before := keep.svc.LivenessStats().RenewOK
+	waitFor(t, "renewals after the election", 20*time.Second, func() bool { return keep.svc.LivenessStats().RenewOK > before && !keep.svc.Fenced() })
+	if keep.sessions.fenceCount() != 0 {
+		t.Fatalf("fenced after the election: %+v", keep.svc.LivenessStats())
+	}
+}
+
+// TestNoFenceWhileLeaderlessBesideAbsentPeers: the leaderless scenario
+// above, with every node also configured with four peers that never run, as
+// a StatefulSet's ordinals above its running pods are. They are not voters,
+// so the survivor still sees a reachable quorum and defers; counted as
+// peers, three of seven is no majority and it would fence.
+func TestNoFenceWhileLeaderlessBesideAbsentPeers(t *testing.T) {
+	ttl := 1500 * time.Millisecond
+	c := newClusterBeside(t, []string{"n1", "n2", "n3"}, []string{"n4", "n5", "n6", "n7"}, ttl)
+	lead := c.settled()
+	var others []*tnode
+	for _, name := range c.names {
+		if n := c.nodes[name]; n != lead {
+			others = append(others, n)
+		}
+	}
+	keep, stopped := others[0], others[1]
+	listed := 0
+	for _, p := range keep.tr.Peers() {
+		if strings.HasSuffix(p.Address, ".absent.invalid:7000") {
+			listed++
+		}
+	}
+	if listed != 4 {
+		t.Fatalf("the transport lists %d absent peers, want 4: %+v", listed, keep.tr.Peers())
+	}
+	if _, err := acquire(t, keep, "x", nil, 60, true); err != nil {
+		t.Fatal(err)
+	}
+	lead.svc.Stop()
+	lead.core.Stop()
+	stopped.svc.Stop()
+	stopped.core.Stop()
+	waitFor(t, "a deferral", 2*ttl+2*time.Second, func() bool { return keep.svc.LivenessStats().FencesDeferred > 0 })
+	time.Sleep(ttl)
+	if keep.sessions.fenceCount() != 0 {
+		t.Fatalf("fenced while the group had no leader and a reachable quorum of voters: %+v", keep.svc.FenceEvidence())
+	}
+	ev := keep.svc.FenceEvidence()
+	if len(ev.Records) == 0 || len(ev.Records[0].Voters) != 3 || len(ev.Records[0].Peers) != 6 {
+		t.Fatalf("the deferral's record does not show three voters among six peers: %+v", ev.Records)
+	}
 	c.startNode(stopped, "")
 	before := keep.svc.LivenessStats().RenewOK
 	waitFor(t, "renewals after the election", 20*time.Second, func() bool { return keep.svc.LivenessStats().RenewOK > before && !keep.svc.Fenced() })

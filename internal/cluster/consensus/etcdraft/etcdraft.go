@@ -68,6 +68,14 @@ type Options struct {
 	// BuildGate, when set, is called by a snapshot build before it writes,
 	// so a test can hold the build. Nil in the product.
 	BuildGate func()
+	// StallTimeout is how long a member's applied index may stay below a
+	// commit index its leader has answered it with, without advancing,
+	// before it reports itself behind. Default 20 election timeouts, and at
+	// least 10 s.
+	StallTimeout time.Duration
+	// ReadyGate, when set, is called before the loop handles each Ready, so
+	// a test can slow or hold a node's applies. Nil in the product.
+	ReadyGate func()
 
 	transferHooks *transferHooks
 }
@@ -181,6 +189,35 @@ type Core struct {
 	closing    bool // Stop is waiting for bg
 	reports    chan snapReport
 	floorFreed chan struct{}
+
+	// A follower's own commit index is clamped to its log, so a member whose
+	// log ends below the leader's first index reads as caught up. The leader's
+	// answers to read index requests give the commit it cannot see:
+	// catchUpTarget is the highest. mark is the applied index the loop last saw
+	// change or reach the target, and when. leadID mirrors lead for lock-free
+	// reads; behind is the state the loop last logged, stalls how often it
+	// entered it.
+	catchUpTarget atomic.Uint64
+	mark          atomic.Pointer[applyMark]
+	leadID        atomic.Uint64
+	behind        atomic.Bool
+	stalls        atomic.Uint64
+	readAt        time.Time // loop only
+	readSeq       uint64    // loop only
+
+	// hold is set once, on the loop, at the first command the machine refused
+	// because a holder held; holds counts it. heldWarnAt and heldWarnBytes are
+	// the loop's last held warning and the log's size then.
+	hold          atomic.Pointer[consensus.Hold]
+	holds         atomic.Uint64
+	heldWarnAt    time.Time // loop only
+	heldWarnBytes uint64    // loop only
+}
+
+// applyMark is an applied index and when the loop saw it.
+type applyMark struct {
+	applied uint64
+	at      time.Time
 }
 
 // Failed is the error the consensus loop stopped on, nil unless it stopped on
@@ -238,6 +275,9 @@ func New(o Options) (*Core, error) {
 	}
 	if o.JoinWarnEvery == 0 {
 		o.JoinWarnEvery = 30 * time.Second
+	}
+	if o.StallTimeout == 0 {
+		o.StallTimeout = max(20*time.Duration(o.ElectionTicks)*o.Tick, 10*time.Second)
 	}
 	if o.Logger == nil {
 		o.Logger = slog.Default()
@@ -602,6 +642,11 @@ func (c *Core) receive(peer string, payload []byte) {
 
 // Propose implements consensus.Core.
 func (c *Core) Propose(ctx context.Context, kind consensus.Kind, payload []byte) (any, error) {
+	if c.hold.Load() != nil {
+		// A held node applies nothing, and a proposal answers only once
+		// applied here.
+		return nil, consensus.ErrHeld
+	}
 	if err := c.leaderCheck(); err != nil {
 		return nil, err
 	}
@@ -829,7 +874,7 @@ func (c *Core) Ready() bool {
 }
 
 func (c *Core) readyLocked() bool {
-	if c.node == nil || c.removed || c.stopped || c.lead == 0 || c.Failed() != nil {
+	if c.node == nil || c.removed || c.stopped || c.lead == 0 || c.Failed() != nil || c.hold.Load() != nil || c.Behind() {
 		return false
 	}
 	if !c.members.Has(c.id) {
@@ -837,6 +882,29 @@ func (c *Core) readyLocked() bool {
 	}
 	return c.machine.Applied()+c.o.PromoteLag >= c.commit
 }
+
+// Behind reports whether this node is a member, with a leader it does not
+// lead, past its recovery, whose applied index has stayed below a commit index
+// the leader answered it with, without advancing, for the stall timeout.
+func (c *Core) Behind() bool { return c.behindAt(time.Now()) }
+
+func (c *Core) behindAt(now time.Time) bool {
+	m := c.mark.Load()
+	lead := c.leadID.Load()
+	// A hold is a named reason for not applying, reported as itself.
+	if m == nil || lead == 0 || lead == c.id || c.machine.Recovering() || c.hold.Load() != nil || !c.members.Has(c.id) {
+		return false
+	}
+	return applyStalled(c.machine.Applied(), c.catchUpTarget.Load(), m.applied, m.at, now, c.o.StallTimeout)
+}
+
+// applyStalled decides whether an applied index is stalled behind a target.
+func applyStalled(applied, target, markApplied uint64, markAt, now time.Time, bound time.Duration) bool {
+	return applied < target && applied <= markApplied && now.Sub(markAt) >= bound
+}
+
+// Stalls is how many times this node has entered the behind state. Lock-free.
+func (c *Core) Stalls() uint64 { return c.stalls.Load() }
 
 // Stop implements consensus.Core.
 func (c *Core) Stop() {

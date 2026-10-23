@@ -23,6 +23,7 @@ var reloadable = map[string]bool{
 	"/limits/maxQueuedMessages":  true,
 	"/limits/queueDrop":          true,
 	"/limits/maxSessionExpiry":   true,
+	"/limits/maxSubscriptions":   true,
 	"/overload/queuedMessages":   true,
 	"/overload/replicationLag":   true,
 	"/overload/memoryBytes":      true,

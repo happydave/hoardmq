@@ -14,6 +14,12 @@ replicaCount: 3
 cluster:
   # Cluster identifier all nodes must share.
   id: hoardmq
+  # The most pods the cluster can grow to without a rolling restart: every
+  # node dials every ordinal below it, retrying the ones not running, so a
+  # change of replicaCount up to it leaves the configuration and the pods as
+  # they are. Raising it rolls the StatefulSet; replicaCount above it is
+  # refused.
+  maxReplicas: 7
   # Copies of every session and retained message (owner plus followers).
   replicas: 2
   # Virtual shards; fixed for the life of the cluster.
@@ -64,12 +70,30 @@ tls:
 listeners:
   mqtt:
     port: 1883
+    # Connections this listener holds at once on each pod; one more is
+    # closed at accept. Sized to the default memory limit (see the chart
+    # README, "Limits"); raise the two together. 0 is unlimited.
+    maxConnections: 20000
   # Optional TLS listener for clients; set enabled and a Secret holding
   # tls.crt and tls.key.
   mqtts:
     enabled: false
     port: 8883
     secretName: ""
+    # As for mqtt; with both listeners a pod may hold the sum.
+    maxConnections: 20000
+
+# Each pod's limits (see the chart README, "Limits", for the values'
+# reasons). The broker's own defaults are unlimited; 0 turns one off.
+limits:
+  # CONNECTs a second the pod admits across its listeners; one over it is
+  # refused before its credentials are read.
+  connectRate: 2000
+  # How many it admits at once; 0 is twice connectRate.
+  connectBurst: 0
+  # Topic filters one client's session may hold; a SUBSCRIBE filter past it
+  # is refused and the client stays connected.
+  maxSubscriptions: 100
 
 service:
   type: ClusterIP

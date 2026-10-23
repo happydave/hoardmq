@@ -61,7 +61,8 @@ func TestCapturedViewIsUnchangedByLaterApplies(t *testing.T) {
 		Op{Kind: OpAcquire, ClientID: "gone", Node: "n3", Now: now},
 	)
 	applyAt(t, tb, 11, Op{Kind: OpRelease, ClientID: "gone", Node: "n3", Epoch: 10})
-	applyAt(t, tb, 12, Op{Kind: OpSetLevel, Level: 2}, Op{Kind: OpServed, Node: "n1", Served: 11, Routes: 4})
+	applyAt(t, tb, 12, Op{Kind: OpSetLevel, Level: 2})
+	applyAt(t, tb, 13, Op{Kind: OpServed, Node: "n1", Served: 11, Routes: 4})
 	before, err := tb.Snapshot()
 	if err != nil {
 		t.Fatal(err)
@@ -81,15 +82,15 @@ func TestCapturedViewIsUnchangedByLaterApplies(t *testing.T) {
 		Op{Kind: OpWillDone, ClientID: "e", Node: "n2", Epoch: 10},
 		Op{Kind: OpRelease, ClientID: "c", Node: "n2", Epoch: 10},
 		Op{Kind: OpAlive, Node: "n1", Now: later, Advertise: "a1b", Level: 3},
-		Op{Kind: OpSetLevel, Level: 3},
 		Op{Kind: OpServed, Node: "n2", Served: 19, Routes: 7, Cover: 18, CoverRoutes: 6},
 	)
+	r = append(r, applyAt(t, tb, 21, Op{Kind: OpSetLevel, Level: 3})...)
 	for i, res := range r {
 		if !res.OK {
 			t.Fatalf("operation %d refused: %+v", i, res)
 		}
 	}
-	r = applyAt(t, tb, 21,
+	r = applyAt(t, tb, 22,
 		Op{Kind: OpReassign, Node: "n2", To: "n3", SeenAliveIndex: 10, Now: later},
 		Op{Kind: OpHandoff, Node: "n1", To: "n3", Now: later},
 	)

@@ -90,11 +90,13 @@ func (e *scramExchange) Step(data []byte) Step {
 }
 
 // stand is the credential an unknown user is answered with: a salt keyed to
-// the username, so two exchanges for one name see one salt.
+// the username, so two exchanges for one name see one salt. Its salt length
+// and iteration count are the defaults credentials are hashed with, since the
+// server-first message shows both to the client.
 func (s *SCRAMServer) stand(user string) SCRAMCredential {
 	m := hmac.New(sha256.New, s.fakeKey)
 	m.Write([]byte("salt:" + user))
-	return SCRAMCredential{Salt: m.Sum(nil)[:16], Iterations: MinSCRAMIterations, StoredKey: make([]byte, sha256.Size), ServerKey: make([]byte, sha256.Size)}
+	return SCRAMCredential{Salt: m.Sum(nil)[:saltLen], Iterations: DefaultSCRAMIterations, StoredKey: make([]byte, sha256.Size), ServerKey: make([]byte, sha256.Size)}
 }
 
 // clientFirst is a parsed client-first message.

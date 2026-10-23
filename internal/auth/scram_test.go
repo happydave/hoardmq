@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"encoding/base64"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -197,5 +198,75 @@ func TestSCRAMFinalRefusesUnknownWhateverTheProof(t *testing.T) {
 	}
 	if _, reason := verifyClientFinal(first, rfcServerFirst, rfcCredential(t), false, rfcClientFinal); reason != "unknown user" {
 		t.Fatalf("unknown with a verifying proof: %q", reason)
+	}
+}
+
+// serverFirstFields splits a server-first message into its attribute names,
+// in order, and their values.
+func serverFirstFields(t *testing.T, msg string) ([]string, map[string]string) {
+	t.Helper()
+	var names []string
+	values := map[string]string{}
+	for _, f := range strings.Split(msg, ",") {
+		name, value, ok := strings.Cut(f, "=")
+		if !ok {
+			t.Fatalf("malformed attribute %q in %q", f, msg)
+		}
+		names = append(names, name)
+		values[name] = value
+	}
+	return names, values
+}
+
+// A user the file does not hold, and one stored in the pbkdf2 form, are
+// answered with a server-first message of the same shape as a SCRAM user's
+// at the defaults: the same attributes, iteration count, salt length and
+// nonce length.
+func TestSCRAMUnknownUserShapeMatchesKnown(t *testing.T) {
+	known, err := HashSCRAM([]byte("pencil"), DefaultSCRAMIterations)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := write(t, "users.json", `{"users":[`+
+		`{"username":"alice","password":"`+known+`"},`+
+		`{"username":"old","password":"`+mustPBKDF2(t)+`"}]}`)
+	f, err := LoadUsersFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := NewSCRAMServer(f.SCRAM)
+	first := func(user string) string {
+		a := s.Begin(t0ctx, SCRAMMethod, &Request{}).Step([]byte("n,,n=" + user + ",r=abc"))
+		if a.Kind != Continue {
+			t.Fatalf("%s: refused at the first step: %+v", user, a)
+		}
+		return string(a.Data)
+	}
+	wantNames, want := serverFirstFields(t, first("alice"))
+	if got := want["i"]; got != strconv.Itoa(DefaultSCRAMIterations) {
+		t.Fatalf("alice: i=%s, want the default %d", got, DefaultSCRAMIterations)
+	}
+	wantSalt, err := base64.StdEncoding.DecodeString(want["s"])
+	if err != nil {
+		t.Fatalf("alice: salt %q: %v", want["s"], err)
+	}
+	for _, user := range []string{"ghost", "old"} {
+		names, got := serverFirstFields(t, first(user))
+		if strings.Join(names, ",") != strings.Join(wantNames, ",") {
+			t.Errorf("%s: attributes %v, a known user's %v", user, names, wantNames)
+		}
+		if got["i"] != want["i"] {
+			t.Errorf("%s: i=%s, a known user's i=%s", user, got["i"], want["i"])
+		}
+		salt, err := base64.StdEncoding.DecodeString(got["s"])
+		if err != nil {
+			t.Fatalf("%s: salt %q: %v", user, got["s"], err)
+		}
+		if len(salt) != len(wantSalt) {
+			t.Errorf("%s: a %d-byte salt, a known user's %d", user, len(salt), len(wantSalt))
+		}
+		if len(got["r"]) != len(want["r"]) {
+			t.Errorf("%s: a %d-byte nonce, a known user's %d", user, len(got["r"]), len(want["r"]))
+		}
 	}
 }

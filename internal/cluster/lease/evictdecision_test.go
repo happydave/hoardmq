@@ -30,7 +30,7 @@ func TestShouldEvict(t *testing.T) {
 		{"lease released, client here", false, true, true, 0, evictDefer},
 		{"lease released, client here, at the bound", false, true, true, evictDeferBound, evictNow},
 	} {
-		if got := shouldEvict(tc.owns, tc.gone, tc.here, tc.deferred); got != tc.want {
+		if got := shouldEvict(false, tc.owns, tc.gone, tc.here, tc.deferred); got != tc.want {
 			t.Errorf("%s: shouldEvict(%v,%v,%v,%d) = %v, want %v", tc.name, tc.owns, tc.gone, tc.here, tc.deferred, got, tc.want)
 		}
 	}
@@ -40,11 +40,23 @@ func TestShouldEvict(t *testing.T) {
 	// while another node holds the lease, evicted once no lease exists.
 	// Without this the fix could be "stop reclaiming".
 	for d := 0; d <= evictDeferBound+2; d++ {
-		if got := shouldEvict(false, false, false, d); got != evictSeal {
+		if got := shouldEvict(false, false, false, false, d); got != evictSeal {
 			t.Errorf("lease elsewhere, no client here at deferred=%d: %v, want evictSeal", d, got)
 		}
-		if got := shouldEvict(false, true, false, d); got != evictNow {
+		if got := shouldEvict(false, false, true, false, d); got != evictNow {
 			t.Errorf("lease released, no client here at deferred=%d: %v, want evictNow", d, got)
+		}
+	}
+
+	// Below the cluster's level the table has stopped learning: a lease it
+	// shows gone is kept, never evicted on its word; one it shows elsewhere is
+	// sealed, which deletes nothing.
+	for d := 0; d <= evictDeferBound+2; d++ {
+		if got := shouldEvict(true, false, true, false, d); got != evictKeep {
+			t.Errorf("below the level, lease gone at deferred=%d: %v, want evictKeep", d, got)
+		}
+		if got := shouldEvict(true, false, false, false, d); got != evictSeal {
+			t.Errorf("below the level, lease elsewhere at deferred=%d: %v, want evictSeal", d, got)
 		}
 	}
 }

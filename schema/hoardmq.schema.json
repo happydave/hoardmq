@@ -342,7 +342,7 @@
       }
     },
     "clusterAuth": {
-      "description": "How peers authenticate each other. mtls uses certificates from the cluster CA; secret proves a shared secret with an HMAC and does not encrypt.",
+      "description": "How peers authenticate each other. mtls uses certificates from the cluster CA and carries every frame inside TLS. secret proves a shared secret with an HMAC in the handshake only: later frames carry no MAC and are not encrypted, so a host on the path can alter or inject them; use it only on a trusted network. With peers or DNS discovery and no mode, the mode is mtls.",
       "type": "object",
       "additionalProperties": false,
       "properties": {
@@ -396,6 +396,10 @@
         },
         "maxTopicAliasBytes": {
           "description": "Topic bytes one connection's inbound topic aliases may hold; a PUBLISH whose alias would pass it closes the connection with Quota exceeded (0x97). 0 is unlimited; the default is 1048576.",
+          "type": "integer", "minimum": 0
+        },
+        "maxSubscriptions": {
+          "description": "Topic filters one client's session may hold; a SUBSCRIBE filter that would pass it is refused with Quota exceeded (0x97; 0x80 below MQTT 5.0) and the others in the packet are handled as usual. 0, the default, is unlimited.",
           "type": "integer", "minimum": 0
         },
         "clientMessageRate": {

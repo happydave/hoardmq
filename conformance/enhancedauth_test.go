@@ -66,7 +66,7 @@ func scramConnect(t *testing.T, r *Raw, c *scramtest.Client) *packet.Connack {
 func TestEnhancedAuthSCRAM(t *testing.T) {
 	node := scramNode(t)
 	t.Run("unsupported method", func(t *testing.T) {
-		Statement(t, "MQTT-4.12.0-1")
+		Statement(t, Spec5, "MQTT-4.12.0-1")
 		r := node.For(t).DialRaw(packet.V5)
 		method := "X-UNSUPPORTED"
 		ack := r.Connect(&packet.Connect{ClientID: "scram-x", CleanStart: true, Properties: packet.Properties{AuthenticationMethod: &method}})
@@ -76,7 +76,7 @@ func TestEnhancedAuthSCRAM(t *testing.T) {
 		r.ExpectClosed()
 	})
 	t.Run("exchange completes", func(t *testing.T) {
-		Statement(t, "MQTT-4.12.0-2", "MQTT-4.12.0-5", "MQTT-3.15.2-1")
+		Statement(t, Spec5, "MQTT-4.12.0-2", "MQTT-4.12.0-5", "MQTT-3.15.2-1")
 		r := node.For(t).DialRaw(packet.V5)
 		c := &scramtest.Client{User: "dev", Password: "pencil", Nonce: "c0nf0rmance"}
 		ack := scramConnect(t, r, c)
@@ -99,7 +99,7 @@ func TestEnhancedAuthSCRAM(t *testing.T) {
 		}
 	})
 	t.Run("wrong proof", func(t *testing.T) {
-		Statement(t, "MQTT-4.12.0-4")
+		Statement(t, Spec5, "MQTT-4.12.0-4")
 		r := node.For(t).DialRaw(packet.V5)
 		ack := scramConnect(t, r, &scramtest.Client{User: "dev", Password: "wrong", Nonce: "n"})
 		if ack.ReasonCode < 0x80 {
@@ -108,7 +108,7 @@ func TestEnhancedAuthSCRAM(t *testing.T) {
 		r.ExpectClosed()
 	})
 	t.Run("failed re-authentication", func(t *testing.T) {
-		Statement(t, "MQTT-4.12.1-2")
+		Statement(t, Spec5, "MQTT-4.12.1-2")
 		r := node.For(t).DialRaw(packet.V5)
 		if ack := scramConnect(t, r, &scramtest.Client{User: "dev", Password: "pencil", Nonce: "n1"}); ack.ReasonCode != packet.Success {
 			t.Fatalf("CONNACK %s", ack.ReasonCode)

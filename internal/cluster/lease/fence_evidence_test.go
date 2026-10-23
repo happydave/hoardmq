@@ -1,10 +1,12 @@
 package lease
 
 import (
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/happydave/hoardmq/internal/cluster/consensus"
+	"github.com/happydave/hoardmq/internal/cluster/transport"
 )
 
 // TestFenceRecordNamesTheDecidingCondition runs the fence rule's matrix
@@ -79,7 +81,7 @@ func TestFenceRecordNamesTheDecidingCondition(t *testing.T) {
 // decision, whatever else holds.
 func TestDecideFenceHasNothingToDecideBeforeTheTtl(t *testing.T) {
 	now := time.Now()
-	out, rec := decideFence(now, now.Add(-999*time.Millisecond), time.Second, consensus.Status{Role: "candidate"}, 0, nil, true)
+	out, rec := decideFence(now, now.Add(-999*time.Millisecond), time.Second, consensus.Status{Role: "candidate"}, 0, "me", nil, nil, true)
 	if out != FenceNone || rec.Outcome != FenceNone {
 		t.Fatalf("an unlapsed record decided %s", out)
 	}
@@ -90,7 +92,7 @@ func TestDecideFenceHasNothingToDecideBeforeTheTtl(t *testing.T) {
 // leader defers.
 func TestDecideFenceWithoutTransportTakesTheQuorumAsReachable(t *testing.T) {
 	now := time.Now()
-	out, rec := decideFence(now, now.Add(-2*time.Second), time.Second, consensus.Status{Role: "follower"}, 0, nil, false)
+	out, rec := decideFence(now, now.Add(-2*time.Second), time.Second, consensus.Status{Role: "follower"}, 0, "me", nil, nil, false)
 	if out != FenceDefer || !rec.QuorumReachable {
 		t.Fatalf("no transport: outcome %s, quorum_reachable %v", out, rec.QuorumReachable)
 	}
@@ -182,4 +184,84 @@ type slowStatusCore struct {
 func (c *slowStatusCore) Status() consensus.Status {
 	time.Sleep(c.delay)
 	return c.fakeCore.Status()
+}
+
+// TestFenceQuorumCountsTheVoters: the deferral's majority is taken over the
+// consensus voters. Configured peers that are not voters count neither way,
+// a learner is not a voter, a voter the transport does not list is
+// unreachable, and this node counts only as a voter. Each case's figures
+// differ from what the weaker rule named beside it would give.
+func TestFenceQuorumCountsTheVoters(t *testing.T) {
+	ttl := time.Second
+	up := func(n string) transport.PeerInfo { return transport.PeerInfo{Name: n, State: transport.Up} }
+	gone := func(n string) transport.PeerInfo {
+		return transport.PeerInfo{Name: n, State: transport.Connecting, DownForMs: 60000}
+	}
+	cases := []struct {
+		name   string
+		self   string
+		voters []string
+		peers  []transport.PeerInfo
+		defer_ bool
+	}{
+		// Counting the peers: 3 of 7 reachable, a fence.
+		{"configured peers that never ran", "me", []string{"me", "n2", "n3"},
+			[]transport.PeerInfo{up("n2"), up("n3"), gone("n4"), gone("n5"), gone("n6"), gone("n7")}, true},
+		// Counting an unlisted voter as reachable: 5 of 5, a deferral.
+		{"a voter the transport does not list", "me", []string{"me", "n2", "n3", "n4", "n5"},
+			[]transport.PeerInfo{up("n2")}, false},
+		// Counting learners: 3 of 5, a deferral.
+		{"learners are not voters", "me", []string{"me", "n2", "n3"},
+			[]transport.PeerInfo{gone("n2"), gone("n3"), up("n4"), up("n5")}, false},
+		{"this node a learner, two voters up", "me", []string{"n2", "n3", "n4"},
+			[]transport.PeerInfo{up("n2"), up("n3"), gone("n4")}, true},
+		// Counting this node anyway: 2 of 3, a deferral.
+		{"this node a learner, one voter up", "me", []string{"n2", "n3", "n4"},
+			[]transport.PeerInfo{up("n2"), gone("n3"), gone("n4")}, false},
+		// No voter known: the peers stand in, 3 of 7.
+		{"no voter known", "me", nil,
+			[]transport.PeerInfo{up("n2"), up("n3"), gone("n4"), gone("n5"), gone("n6"), gone("n7")}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			now := time.Now()
+			out, rec := decideFence(now, now.Add(-2*ttl), ttl, consensus.Status{Role: "candidate"}, 0, tc.self, tc.voters, tc.peers, true)
+			want := FenceNow
+			if tc.defer_ {
+				want = FenceDefer
+			}
+			if out != want || rec.QuorumReachable != tc.defer_ {
+				t.Fatalf("outcome %s quorum_reachable %v, want %s", out, rec.QuorumReachable, want)
+			}
+			if len(rec.Voters) != len(tc.voters) || len(rec.Peers) != len(tc.peers) {
+				t.Fatalf("record voters %v peers %d, want %v and %d", rec.Voters, len(rec.Peers), tc.voters, len(tc.peers))
+			}
+		})
+	}
+}
+
+// TestCheckFenceReadsTheVoters: the service hands decideFence the core's
+// voters, learners left out, so a node beside configured peers that never
+// ran defers.
+func TestCheckFenceReadsTheVoters(t *testing.T) {
+	now := time.Now()
+	core := &fakeCore{role: "candidate", members: []consensus.Member{
+		{Name: "me", Role: consensus.Voter}, {Name: "n2", Role: consensus.Voter}, {Name: "n3", Role: consensus.Voter},
+		{Name: "n8", Role: consensus.Learner}}}
+	tr := &fakeTransport{up: []string{"n2", "n3"}, down: []string{"n4", "n5", "n6", "n7", "n8"}}
+	sessions := newFakeSessions()
+	s, err := New(Options{Node: "me", Core: core, Machine: consensus.NewMachine(), Transport: tr, Sessions: sessions,
+		TTL: time.Second, Logger: quiet, Clock: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.lastAlive.Store(now.Add(-2 * time.Second).UnixNano())
+	s.checkFence(s.trackLeader())
+	ev := s.FenceEvidence()
+	if sessions.fenceCount() != 0 || len(ev.Records) != 1 || ev.Records[0].Outcome != FenceDefer {
+		t.Fatalf("fenced %d, records %+v", sessions.fenceCount(), ev.Records)
+	}
+	if got := strings.Join(ev.Records[0].Voters, ","); got != "me,n2,n3" {
+		t.Fatalf("voters %q, want me,n2,n3", got)
+	}
 }

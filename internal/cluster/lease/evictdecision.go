@@ -36,9 +36,13 @@ const evictDeferBound = 3
 // a returning client's takeover is still in flight and the lease has not
 // arrived yet. Measured at 681-19,991 connections closed per run this way
 // (WI 1495, sim/results/evict-2026-09-16/).
-func shouldEvict(ownsLease, leaseGone, clientHere bool, deferred int) evictChoice {
+//
+// below is whether this node's build is below the cluster's level: its table
+// has stopped learning, so a lease it shows gone may be one it has not
+// applied, and nothing is evicted on that word.
+func shouldEvict(below, ownsLease, leaseGone, clientHere bool, deferred int) evictChoice {
 	switch {
-	case ownsLease:
+	case ownsLease, below && leaseGone:
 		return evictKeep
 	case clientHere && deferred < evictDeferBound:
 		return evictDefer

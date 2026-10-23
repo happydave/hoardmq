@@ -425,6 +425,7 @@ type Service struct {
 	// advertises BuildLevel.
 	levelPin   atomic.Uint64
 	levelBelow atomic.Bool   // noteLevel has reported this node below the cluster's level
+	handingOff atomic.Bool   // a hand-off of a below-level member's leases is in flight
 	raising    atomic.Uint64 // the level this node has proposed and not yet heard back about; 0 when none
 	// Failure causes, so a collapse can be attributed: the attempt timed
 	// out, no leader was known, the urgent lane was full, anything else.
@@ -1276,6 +1277,7 @@ func New(o Options) (*Service, error) {
 	}
 	s.adopting.onIdle = o.AdoptionsIdle
 	s.table.onRestore = s.observeAfresh
+	s.table.build = s.BuildLevel
 	o.Machine.Register(Kind, s.table)
 	s.lastAlive.Store(o.Steady().UnixNano())
 	s.observeAfresh()
@@ -2029,6 +2031,13 @@ func (s *Service) submitAsync(op Op) {
 }
 
 func (s *Service) enqueue(r request) {
+	if !proposable(r.op.Kind, s.BelowLevel()) {
+		s.count("hoardmq_cluster_feature_level_refusals_total", map[string]string{"where": "propose"}, 1)
+		if r.err != nil {
+			r.err <- ErrBelowLevel
+		}
+		return
+	}
 	s.mu.Lock()
 	s.pending = append(s.pending, r)
 	s.mu.Unlock()
@@ -2059,12 +2068,33 @@ func (s *Service) flushLoop() {
 			s.pending = nil
 			s.inflight = true
 			s.mu.Unlock()
-			s.flush(batch)
+			for _, b := range commands(batch) {
+				s.flush(b)
+			}
 			s.mu.Lock()
 			s.inflight = false
 			s.mu.Unlock()
 		}
 	}
+}
+
+// commands splits a pending batch into the commands it is proposed as: one
+// for every operation but the raises, and one for each raise, which the
+// table refuses when it shares its command.
+func commands(batch []request) [][]request {
+	var out [][]request
+	var rest []request
+	for _, r := range batch {
+		if r.op.Kind == OpSetLevel {
+			out = append(out, []request{r})
+		} else {
+			rest = append(rest, r)
+		}
+	}
+	if len(rest) > 0 {
+		out = append(out, rest)
+	}
+	return out
 }
 
 func (s *Service) failPending(err error) {
@@ -2283,6 +2313,10 @@ func (s *Service) ProposeCommand(ctx context.Context, kind consensus.Kind, paylo
 	if !CommandKindForwardable(kind) {
 		return nil, fmt.Errorf("lease: kind %d is not forwarded as a command", kind)
 	}
+	if s.BelowLevel() {
+		s.count("hoardmq_cluster_feature_level_refusals_total", map[string]string{"where": "propose"}, 1)
+		return nil, ErrBelowLevel
+	}
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -2401,6 +2435,8 @@ func (s *Service) tickLoop() {
 		s.adopt()
 		s.raiseLevel()
 		s.noteLevel()
+		s.transferIfHeld()
+		s.handOffBelow()
 		s.noteDeclared()
 	}
 }
@@ -2506,20 +2542,51 @@ func (s *Service) leaderlessWorst() int64 {
 // none named, or an election in progress.
 func leaderless(st consensus.Status) bool { return st.Leader == "" || st.Role == "candidate" }
 
-// quorumOf reports whether this node and the peers it can reach form a
-// strict majority of the configured membership. A peer counts as reachable
-// while its link is up, and for half a ttl after the link last went down:
-// under a storm a link resets for seconds and is redialed, whereas at the
-// moment a partitioned node's record lapses its links have been down for the
-// whole ttl.
-func quorumOf(peers []transport.PeerInfo, ttl time.Duration) bool {
-	reachable := 0
+// quorumOf reports whether this node and the voters it can reach form a
+// strict majority of the consensus voters. A voter counts as reachable while
+// its link is up, and for half a ttl after the link last went down: under a
+// storm a link resets for seconds and is redialed, whereas at the moment a
+// partitioned node's record lapses its links have been down for the whole
+// ttl. A voter the transport does not list is unreachable, and a configured
+// peer that is not a voter (a learner, or an ordinal a StatefulSet has not
+// started) counts neither way. With no voter known, before this node has
+// joined, the configured peers stand in for the membership.
+func quorumOf(self string, voters []string, peers []transport.PeerInfo, ttl time.Duration) bool {
+	if len(voters) == 0 {
+		reachable := 0
+		for _, p := range peers {
+			if reachableAt(p, ttl) {
+				reachable++
+			}
+		}
+		return (1+reachable)*2 > 1+len(peers)
+	}
+	byName := make(map[string]transport.PeerInfo, len(peers))
 	for _, p := range peers {
-		if reachableAt(p, ttl) {
-			reachable++
+		byName[p.Name] = p
+	}
+	reached := 0
+	for _, v := range voters {
+		if v == self {
+			reached++
+			continue
+		}
+		if p, ok := byName[v]; ok && reachableAt(p, ttl) {
+			reached++
 		}
 	}
-	return (1+reachable)*2 > 1+len(peers)
+	return reached*2 > len(voters)
+}
+
+// voterNames is the membership's voters, learners left out.
+func voterNames(members []consensus.Member) []string {
+	var out []string
+	for _, m := range members {
+		if m.Role == consensus.Voter {
+			out = append(out, m.Name)
+		}
+	}
+	return out
 }
 
 // reachable is the one reading of a peer's link both sides of the fence
@@ -2712,7 +2779,8 @@ func (s *Service) checkFence(st consensus.Status) {
 	if s.o.Transport != nil {
 		peers = s.o.Transport.Peers()
 	}
-	outcome, rec := decideFence(now, last, s.o.TTL, st, s.leaderKnownSince.Load(), peers, s.o.Transport != nil)
+	voters := voterNames(s.o.Core.Members())
+	outcome, rec := decideFence(now, last, s.o.TTL, st, s.leaderKnownSince.Load(), s.o.Node, voters, peers, s.o.Transport != nil)
 	rec.LoopGapMs = float64(s.loopGapNs.Load()) / 1e6
 	rec.StatusReadMs = float64(s.statusReadNs.Load()) / 1e6
 	if outcome == FenceDefer {
@@ -2772,6 +2840,7 @@ type FenceRecord struct {
 	LeaderKnownForMs float64      `json:"leader_known_for_ms"` // 0 while no leader's tenure is being measured
 	LeaderSettled    bool         `json:"leader_settled"`
 	QuorumReachable  bool         `json:"quorum_reachable"`
+	Voters           []string     `json:"voters,omitempty"` // the majority's basis; empty when the peers stood in
 	Peers            []PeerReach  `json:"peers,omitempty"`
 	// The tick loop's timing when the decision ran: the gap since its
 	// previous iteration, and how long its last read of the core's status
@@ -2793,7 +2862,7 @@ type PeerReach struct {
 // has nothing to decide. The fence disconnects every client on the node, so
 // the decision is a function its tests can drive with any inputs. With no
 // transport the quorum is taken as reachable.
-func decideFence(now, lastAlive time.Time, ttl time.Duration, st consensus.Status, knownSince int64, peers []transport.PeerInfo, hasTransport bool) (FenceOutcome, FenceRecord) {
+func decideFence(now, lastAlive time.Time, ttl time.Duration, st consensus.Status, knownSince int64, self string, voters []string, peers []transport.PeerInfo, hasTransport bool) (FenceOutcome, FenceRecord) {
 	rec := FenceRecord{AtUnixMs: now.UnixMilli(), RecordAgeMs: float64(now.Sub(lastAlive)) / 1e6,
 		Role: st.Role, Term: st.Term, Leader: st.Leader, Leaderless: leaderless(st)}
 	if now.Sub(lastAlive) <= ttl {
@@ -2804,7 +2873,8 @@ func decideFence(now, lastAlive time.Time, ttl time.Duration, st consensus.Statu
 		rec.LeaderKnownForMs = float64(now.Sub(time.Unix(0, knownSince))) / 1e6
 	}
 	rec.LeaderSettled = !rec.Leaderless && knownSince != 0 && now.Sub(time.Unix(0, knownSince)) >= ttl
-	rec.QuorumReachable = !hasTransport || quorumOf(peers, ttl)
+	rec.QuorumReachable = !hasTransport || quorumOf(self, voters, peers, ttl)
+	rec.Voters = voters
 	for _, p := range peers {
 		rec.Peers = append(rec.Peers, PeerReach{Name: p.Name, State: p.State.String(), DownForMs: p.DownForMs, Reachable: reachableAt(p, ttl)})
 	}
@@ -3066,6 +3136,11 @@ func (s *Service) adoptState(k key) {
 		case <-s.ctx.Done():
 			return
 		}
+	}
+	if s.BelowLevel() {
+		// Its table has stopped learning whether the lease is still here.
+		s.count("hoardmq_lease_adoptions_skipped_total", map[string]string{"reason": "below-level"}, 1)
+		return
 	}
 	ad, st := s.adopting.claim(k)
 	if st != adoptionQueued {
@@ -3505,6 +3580,10 @@ func (s *Service) awaitAdoption(ctx context.Context, k key, cleanStart bool) (*s
 // Nothing from the replayed history itself is acted on.
 func (s *Service) recovered() {
 	s.observeAfresh()
+	if s.BelowLevel() {
+		s.holdReconcile()
+		return
+	}
 	me := s.o.Node
 	// Replay ran no change hook, so nothing fed the registry.
 	s.table.each(func(l *Lease) { s.tokens.Note(l.Namespace, l.ClientID, l.Epoch) })
@@ -3617,7 +3696,7 @@ func (s *Service) scheduleEvict(k key, deferred int) {
 		l, ok := s.table.Lookup(k.ns, k.id)
 		ownsLease := ok && l.Owner == s.o.Node
 		_, clientHere := s.o.Sessions.ConnAge(k.ns, k.id)
-		choice := shouldEvict(ownsLease, !ok, clientHere, deferred)
+		choice := shouldEvict(s.BelowLevel(), ownsLease, !ok, clientHere, deferred)
 		if choice == evictKeep {
 			return
 		}

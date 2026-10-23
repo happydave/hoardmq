@@ -164,9 +164,10 @@ var signatureAlgorithms = map[string]x509.SignatureAlgorithm{
 // AcceptOCSP is the decision on a response to OCSPRequest(leaf, issuer) at
 // now: successful, basic, signed by the issuer or by a responder the issuer
 // delegated to (id-kp-OCSPSigning, valid at now), naming its signer, with a
-// SingleResponse for this CertID that is current. It returns the answer, or
-// why the response cannot be used.
-func AcceptOCSP(der []byte, leaf, issuer *x509.Certificate, now time.Time) (OCSPAnswer, error) {
+// SingleResponse for this CertID that is current: before its nextUpdate, or,
+// without one, no more than maxAge after its thisUpdate. It returns the
+// answer, or why the response cannot be used.
+func AcceptOCSP(der []byte, leaf, issuer *x509.Certificate, now time.Time, maxAge time.Duration) (OCSPAnswer, error) {
 	var resp ocspResponseASN1
 	if rest, err := asn1.Unmarshal(der, &resp); err != nil || len(rest) != 0 {
 		return OCSPAnswer{}, errors.New("ocsp: malformed response")
@@ -206,6 +207,11 @@ func AcceptOCSP(der []byte, leaf, issuer *x509.Certificate, now time.Time) (OCSP
 		}
 		if !r.NextUpdate.IsZero() && !r.NextUpdate.After(now) {
 			return OCSPAnswer{}, errors.New("ocsp: answer past its nextUpdate")
+		}
+		// Requests carry no nonce, so an answer without a nextUpdate could
+		// otherwise be replayed at any age.
+		if r.NextUpdate.IsZero() && now.Sub(r.ThisUpdate) > maxAge {
+			return OCSPAnswer{}, fmt.Errorf("ocsp: answer without nextUpdate older than %s", maxAge)
 		}
 		a := OCSPAnswer{ThisUpdate: r.ThisUpdate, NextUpdate: r.NextUpdate}
 		switch {

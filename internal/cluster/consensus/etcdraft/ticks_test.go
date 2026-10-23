@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/happydave/hoardmq/internal/cluster/consensus"
 	"go.etcd.io/raft/v3"
 	pb "go.etcd.io/raft/v3/raftpb"
 )
@@ -51,12 +52,15 @@ func (t *tickCounter) count() int {
 }
 
 // loopCore builds the minimum Core that run() drives: a tick period, a node,
-// and the channels the select reads.
+// the machine each tick reads, and the channels the select reads.
 func loopCore(tick time.Duration, n raft.Node) *Core {
+	m := consensus.NewMachine()
 	c := &Core{
 		o:         Options{Tick: tick, ElectionTicks: 10, HeartbeatTicks: 1},
 		log:       slog.New(slog.DiscardHandler),
 		node:      n,
+		machine:   m,
+		members:   m.Membership(),
 		inbox:     make(chan *pb.Message, 1),
 		joins:     make(chan joinEvent, 1),
 		proposals: make(chan proposal, 1),

@@ -23,6 +23,12 @@ type hello struct {
 	nonce   [32]byte
 }
 
+// maxHandshakeFrame bounds a frame read before the peer is authenticated:
+// the largest hello the encoding can carry, two strings of at most 65,535
+// bytes each with their lengths, the version range, the nonce and the
+// acceptor's proof. The auth frame is a proof or nothing.
+const maxHandshakeFrame = 2 + 65535 + 2 + 65535 + 2 + 32 + 32
+
 func (h hello) encode() []byte {
 	out := make([]byte, 0, 4+len(h.cluster)+len(h.name)+2+32)
 	out = binary.BigEndian.AppendUint16(out, uint16(len(h.cluster)))
@@ -115,7 +121,7 @@ func (t *Transport) handshake(c net.Conn, dialer bool) (negotiated, error) {
 		return w.Flush()
 	}
 	recv := func(want Class) ([]byte, error) {
-		f, err := readFrame(c, t.o.MaxFrame, true)
+		f, err := readFrame(c, min(t.o.MaxFrame, maxHandshakeFrame), true)
 		if err != nil {
 			return nil, err
 		}
@@ -201,7 +207,8 @@ func (t *Transport) handshake(c net.Conn, dialer bool) (negotiated, error) {
 
 // checkHello decodes and verifies the peer's hello: cluster identifier,
 // version overlap, that the peer is one we know and not ourselves, and in
-// mtls mode that the certificate's common name is the claimed name. In
+// mtls mode that the certificate's common name is the claimed name and that
+// it carries both auth usages. In
 // secret mode the acceptor's hello (withProof) carries a trailing 32-byte
 // proof, which is verified by the caller.
 func (t *Transport) checkHello(body []byte, c net.Conn, withProof bool) (hello, error) {
@@ -239,6 +246,9 @@ func (t *Transport) checkHello(body []byte, c net.Conn, withProof bool) (hello, 
 		}
 		if cn := state.PeerCertificates[0].Subject.CommonName; cn != h.name {
 			return h, refuse("certificate", fmt.Errorf("certificate is for %q, hello claims %q", cn, h.name))
+		}
+		if !peerUsagesOK(state.PeerCertificates[0]) {
+			return h, refuse("certificate", fmt.Errorf("certificate for %q lacks the client and server auth extended key usages", h.name))
 		}
 	}
 	return h, nil
