@@ -12,7 +12,7 @@ import (
 	"github.com/happydave/hoardmq/internal/packet"
 )
 
-// TestPublishWaitsOnlyForItsRecordsTargets (WI 1631): with n3 down and still
+// TestPublishWaitsOnlyForItsRecordsTargets: with n3 down and still
 // named by the shard map, a QoS 1 publish on n1 whose records have no replica
 // target on n3 is acknowledged, and one whose publisher's or subscriber's
 // records do is refused.

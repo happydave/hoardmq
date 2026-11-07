@@ -30,7 +30,7 @@ type link struct {
 	admitMu sync.Mutex
 	out     chan frame
 	// urgent is the lane the writer drains before out: lease renewals, which
-	// must not wait behind a storm's replication traffic (WI 1337). It is
+	// must not wait behind a storm's replication traffic. It is
 	// outside the admission order and never blocks a sender.
 	urgent  chan frame
 	done    chan struct{}
@@ -39,17 +39,17 @@ type link struct {
 	err     error
 
 	lastSeen atomic.Int64 // unix nanoseconds
-	// Handler time, measured on the drainers (WI 1342 put it on the reader;
-	// WI 1340 moved the handlers off it): total, count, worst, and the class
-	// of the worst, so a storm's timeline names the handler that stalls.
+	// Handler time, measured on the drainers, which run the handlers: total,
+	// count, worst, and the class of the worst, so a storm's timeline names
+	// the handler that stalls.
 	handlerNs    atomic.Int64
 	handlerCount atomic.Int64
 	handlerMaxNs atomic.Int64
 	slowestClass atomic.Uint32
-	// Dispatch: one bounded queue and one drainer per class the peer sends
-	// (WI 1340). The reader decodes, stamps lastSeen and enqueues; it never
-	// runs a handler, so a slow handler delays its own class and nothing
-	// else — the peer's next heartbeat is still read on time.
+	// Dispatch: one bounded queue and one drainer per class the peer sends.
+	// The reader decodes, stamps lastSeen and enqueues; it never runs a
+	// handler, so a slow handler delays its own class and nothing else — the
+	// peer's next heartbeat is still read on time.
 	dispatchMu sync.Mutex
 	queues     map[Class]*classQueue
 	waitMaxNs  atomic.Int64 // longest a frame waited in a queue before its handler
@@ -177,7 +177,7 @@ func (l *link) finish() {
 // the peer is judged silent: the heartbeat interval times the misses on the
 // control connection; ten times that on the data connection, whose reader
 // legitimately pauses under back-pressure and whose liveness the control
-// connection judges (WI 1340; a bounded defence, not the liveness rule).
+// connection judges (a bounded defence, not the liveness rule).
 func (l *link) silenceLimit() time.Duration {
 	limit := l.t.o.Heartbeat * time.Duration(l.t.o.HeartbeatMisses)
 	if l.role == RoleData && !l.both {

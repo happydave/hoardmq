@@ -5,6 +5,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/happydave/hoardmq/internal/auth"
 	"github.com/happydave/hoardmq/internal/cluster/lease"
 	"github.com/happydave/hoardmq/internal/conn"
 	"github.com/happydave/hoardmq/internal/message"
@@ -20,6 +21,9 @@ type core struct {
 	leases  *lease.Service // nil until the consensus core is up
 	node    string
 	timeout time.Duration
+	// bind is whether sessions are bound to their principal
+	// (auth.sessionBinding).
+	bind bool
 	// importGate is Hooks.ImportGate: nil outside tests.
 	importGate func(ns, id string)
 }
@@ -52,10 +56,14 @@ func (k core) Connect(c *conn.Conn, p *packet.Connect) conn.ConnectResult {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), k.timeout)
 	defer cancel()
-	res, err := k.leases.AcquireFrom(ctx, ns, c.ClientID(), will, expiry, p.CleanStart, lease.Requester{ConnAge: c.Age(), Prebuffered: c.Prebuffered()})
+	from := lease.Requester{ConnAge: c.Age(), Prebuffered: c.Prebuffered(), Bind: k.bind, Principal: lease.PrincipalDigest(ns, c.Identity().Username)}
+	res, err := k.leases.AcquireFrom(ctx, ns, c.ClientID(), will, expiry, p.CleanStart, from)
 	if err != nil {
 		var r *lease.Refusal
 		if errors.As(err, &r) {
+			if r.Reason == packet.NotAuthorized {
+				k.m.NotePrincipalRefusal()
+			}
 			out := conn.ConnectResult{Reason: r.Reason}
 			if r.ServerReference != "" {
 				ref := r.ServerReference
@@ -118,10 +126,12 @@ func (k core) Pubrec(c *conn.Conn, id uint16, r packet.ReasonCode) (packet.Reaso
 	return k.m.Pubrec(c, id, r)
 }
 func (k core) Pubcomp(c *conn.Conn, id uint16, r packet.ReasonCode) { k.m.Pubcomp(c, id, r) }
+func (k core) InboundOpen(c *conn.Conn, id uint16) bool             { return k.m.InboundOpen(c, id) }
 func (k core) Subscribe(c *conn.Conn, p *packet.Subscribe) []packet.ReasonCode {
 	return k.m.Subscribe(c, p)
 }
-func (k core) Subscribed(c *conn.Conn) { k.m.Subscribed(c) }
+func (k core) Subscribed(c *conn.Conn)                   { k.m.Subscribed(c) }
+func (k core) Reidentify(c *conn.Conn, id auth.Identity) { k.m.Reidentify(c, id) }
 func (k core) Unsubscribe(c *conn.Conn, p *packet.Unsubscribe) []packet.ReasonCode {
 	return k.m.Unsubscribe(c, p)
 }

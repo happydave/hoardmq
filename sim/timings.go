@@ -11,7 +11,7 @@ const timingsEnv = "HOARDMQ_SIM_TIMINGS"
 
 // failoverTimings resolves the timing set for the failover test. A recorded
 // measurement runs at the product's timings unless HOARDMQ_SIM_TIMINGS asks
-// for the harness's, which are the stress variant (WI 1475). The gate — no
+// for the harness's, which are the stress variant. The gate — no
 // HOARDMQ_SIM_FAILOVER — always runs the harness's: at a 30 s ttl it would
 // wait out lease expiry on every run.
 func failoverTimings(record bool, getenv func(string) string) (TimingSet, error) {

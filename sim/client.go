@@ -118,13 +118,13 @@ type Client struct {
 	awaiting []pendingSub
 	// subAcks is one waiter per outstanding SUBSCRIBE, keyed by its packet
 	// identifier as waiting is for publishes. A single shared channel let one
-	// subscribe settle on another's acknowledgement (WI 1500).
+	// subscribe settle on another's acknowledgement.
 	subAcks map[uint16]chan *packet.Suback
 	online  atomic.Bool
 	// gen counts accepted CONNACKs. It is the identity of the current
 	// connection for everything a grant is bound to.
 	gen atomic.Uint64
-	// recovered is the failover measurement's per-client reading (WI 1618):
+	// recovered is the failover measurement's per-client reading:
 	// every held filter granted in the current generation. It is maintained
 	// where it can change so the measurement's pass reads atomics and takes
 	// no lock — at a hundred thousand clients every 50 ms, a lock here would
@@ -144,7 +144,7 @@ type Client struct {
 	// the DISCONNECT that preceded it, or "none" when the peer simply went
 	// away. A fixed array rather than a map because a hundred thousand clients
 	// each carrying a map is memory the measurement cannot spare, and because
-	// record already holds a lock this can be incremented under (WI 1495).
+	// record already holds a lock this can be incremented under.
 	//
 	// Drops itself counts only closes with no Server Reference — a redirect is
 	// counted in Redirects instead — so these buckets sum to Drops, never to
@@ -156,14 +156,13 @@ type Client struct {
 	// most, cannot wait for the answer: it runs on the connect goroutine
 	// before the reader starts. A client that is online with a refused
 	// subscription receives nothing, so a property that asserts deliveries
-	// would pass for the wrong reason (WI 1500).
+	// would pass for the wrong reason.
 	SubRefusals atomic.Int64
 
 	// SessionLost counts CONNACKs that reported Session Present false to a
 	// client that already held a session in this run. Its queued messages and
 	// its subscriptions went with it, and the resubscribe that follows hides
-	// that, so without this counter a session rebuilt empty leaves no trace
-	// (WI 1653).
+	// that, so without this counter a session rebuilt empty leaves no trace.
 	SessionLost atomic.Int64
 	// SubDowngraded counts SUBACKs that granted a lower QoS than was asked
 	// for. A legal answer, and one that changes what the subscriber is
@@ -211,7 +210,7 @@ func (c *Client) Run(ctx context.Context) error {
 // dials and handshakes — which do not watch the context and can each wait
 // seconds against a starved broker — time out concurrently instead of one
 // Close at a time (a 100,000-client teardown ran 38 minutes past its window
-// before this, WI 1292 round 2).
+// before this).
 func (c *Client) Cancel() { c.cancel() }
 
 // Close ends the client with a clean DISCONNECT when connected.
@@ -522,7 +521,7 @@ func (c *Client) forgetSession() {
 // every refused SUBACK into SubRefusals instead, which is how a refusal here
 // becomes visible — and this is the path that matters, because a mass
 // reconnect after a crash puts every displaced client through it under the
-// contention that produces a refusal (WI 1500).
+// contention that produces a refusal.
 func (c *Client) resubscribe() {
 	c.mu.Lock()
 	subs := append([]packet.Subscription(nil), c.subs...)
@@ -614,7 +613,7 @@ func (c *Client) read() string {
 	c.mu.Unlock()
 	ref := ""
 	// The reason code of the last DISCONNECT on this connection, so the drop
-	// below can say what ended it. Zero means none arrived (WI 1495).
+	// below can say what ended it. Zero means none arrived.
 	var last packet.ReasonCode
 	for {
 		p, err := dec.Read()
@@ -714,7 +713,7 @@ func (c *Client) deliver(m *packet.Publish) {
 // rather than the packet's type: an acknowledgement that arrived is not an
 // acknowledgement that granted anything, and a client that believes it is
 // subscribed when it is not makes every assertion about deliveries vacuous —
-// a property cannot fail when nobody is listening (WI 1500).
+// a property cannot fail when nobody is listening.
 func (c *Client) Subscribe(ctx context.Context, filter string, qos byte) error {
 	sub := packet.Subscription{Filter: filter, QoS: qos}
 	id := c.packetID()

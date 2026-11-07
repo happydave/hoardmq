@@ -79,6 +79,13 @@ type Identity struct {
 	Username   string
 	CertCN     string
 	Attributes map[string]string
+	// AdmittedBy is the identifier of the module whose allow admitted the
+	// connection: the authentication chain's decider, the certificate
+	// chain's, or the enhanced-authentication mechanism's. The broker sets
+	// it, and nothing a module returns does. It is empty when no module
+	// allowed (an anonymous client, a verified certificate alone) and for a
+	// session recovered from disk.
+	AdmittedBy string
 }
 
 // Action is what an authorizer is asked about.
@@ -101,7 +108,10 @@ func (a Action) String() string {
 	return "unsubscribe"
 }
 
-// Authorizer decides whether an identity may act on a topic or filter.
+// Authorizer decides whether an identity may act on a topic or filter. Each
+// authorizer is handed its own copy of the identity, so a change to its
+// fields reaches no other; the attribute map is shared and must not be
+// changed.
 type Authorizer interface {
 	Authorize(ctx context.Context, action Action, topic string, id *Identity) Decision
 }

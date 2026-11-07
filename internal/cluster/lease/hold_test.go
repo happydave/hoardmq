@@ -133,7 +133,7 @@ func belowService(t *testing.T, recovering bool) (*Service, *fakeCore, *fakeSess
 	sess.put("default", "unleased", &store.SessionState{SessionMeta: store.SessionMeta{Namespace: "default", ClientID: "unleased", Epoch: 1}})
 	l, _ := s.table.Lookup("default", "mine")
 	l.DisconnectedAt = time.Now()
-	s.startTimers(l)
+	s.startTimers(l, time.Time{})
 	applyAt(t, s.table, 5, Op{Kind: OpSetLevel, Level: 2})
 	s.SetBuildLevel(1)
 	return s, core, sess

@@ -10,7 +10,7 @@ import (
 )
 
 // The product settings a run may move away from their defaults, each by a
-// variable every run's provenance records (WI 1283).
+// variable every run's provenance records.
 const (
 	// connectRateEnv is "<rate>,<burst>" or "<rate>": every node's client
 	// listener's connectRate and connectBurst.
@@ -19,10 +19,10 @@ const (
 	// password-verification cache off.
 	authCacheTTLEnv = "HOARDMQ_SIM_AUTH_CACHE_TTL"
 	// traceRatioEnv is traces.otlp's sampleRatio on every node, exporting to
-	// an in-process OTLP endpoint the cluster starts (WI 1313).
+	// an in-process OTLP endpoint the cluster starts.
 	traceRatioEnv = "HOARDMQ_SIM_TRACE_RATIO"
 	// drainRateEnv is cluster.drain.ratePerSecond on every node: the least
-	// clients a drain redirects a second (WI 2251).
+	// clients a drain redirects a second.
 	drainRateEnv = "HOARDMQ_SIM_DRAIN_RATE"
 )
 
@@ -99,6 +99,19 @@ func (c *Cluster) drainRate() int {
 		return c.knobs.drainRate
 	}
 	return config.Default().Cluster.Drain.RatePerSecond
+}
+
+// connectRateCaveat says what limited the clients' reconnection storm in a
+// run: the connect rate the knob set on every client listener, or none.
+func (k productKnobs) connectRateCaveat() string {
+	if !k.rateSet || k.rate == 0 {
+		return "no connect-rate limit was set, so the\nsurvivors accept the storm as fast as it arrives"
+	}
+	burst := fmt.Sprintf("a burst of %d", k.burst)
+	if k.burst == 0 {
+		burst = "a burst of twice the rate"
+	}
+	return fmt.Sprintf("each client listener admitted at most %d CONNECTs a\nsecond, with %s, so the\nsurvivors take the storm no faster", k.rate, burst)
 }
 
 // apply sets the knobs on a node's document.

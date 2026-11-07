@@ -527,7 +527,7 @@ func TestAFactAlreadyInTheLogIsNotProposedAgain(t *testing.T) {
 // already at the lost owner's emptied index took a session the adopter had
 // not imported, and now holds it. It puts a newer fact in the log, at an
 // index at or past the takeover's grant, once its hooks have run that far,
-// and once only (WI 1833).
+// and once only.
 func TestANewerFactFollowsATakeoverOfASessionInTransit(t *testing.T) {
 	f := &servedFixture{owned: map[string]int{"n1": 3, "n2": 1, "n3": 4}, applied: 5, hooked: 5, commit: true}
 	p, tr := newServedPlane(t, f)

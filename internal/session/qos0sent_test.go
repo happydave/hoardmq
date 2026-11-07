@@ -124,7 +124,7 @@ func countPayload(pubs []*packet.Publish, payload string) int {
 // offline session and sent from the queue when it reconnects is gone from
 // the log's state and from a replica's, so a restart that recovers the log,
 // or a takeover that installs the replica's copy, does not send it again.
-// QoS 0 is at most once (WI 1831).
+// QoS 0 is at most once.
 func TestQoS0SentFromTheQueueIsNotRecovered(t *testing.T) {
 	t.Run("the replica's state", func(t *testing.T) {
 		e, _ := qos0Queued(t)

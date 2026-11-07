@@ -1,14 +1,17 @@
 # Release checklist
 
-What must be true before a version tag is pushed. The first tag is special:
-it defines cluster feature level 1 (README, *Upgrades and the cluster feature
-level*), so everything that changed a replicated operation before it ships
+What must be true before a version tag is pushed. Releases are source
+releases: the tag is the release, and no image, chart package or SBOM is
+published (adopters build their own from the reference `Dockerfile` and
+chart; operations.md, ["Kubernetes deployment"](operations.md#kubernetes-deployment)). The first tag is special:
+it defines cluster feature level 1 (clustering.md, ["Upgrades and the cluster feature
+level"](clustering.md#upgrades-and-the-cluster-feature-level)), so everything that changed a replicated operation before it ships
 ungated and everything after it must be gated.
 
 ## Before the first tag
 
-- [ ] The README's introduction no longer says no release has been tagged.
-- [ ] `CHANGELOG.md`'s `Unreleased` section becomes the first tag's section,
+- [x] The README's introduction no longer says no release has been tagged.
+- [x] `CHANGELOG.md`'s `Unreleased` section becomes the first tag's section,
   and `docs/stability.md` is no longer marked draft: the owner has decided its
   promises.
 - [x] **The upgrade gate exists.** A replicated cluster feature level, the
@@ -20,18 +23,38 @@ ungated and everything after it must be gated.
   a node declared dead by the leader's own observation, the conditional
   acquire judged at apply, no node comparing a clock with another's stamp)
   is in, as level 1.
-- [ ] The inventory of level 1 in the project's upgrade-gate design is
+- [x] The inventory of level 1 in the project's upgrade-gate design is
   re-read against `git log` for the replication and lease packages, so
-  nothing that changed a replicated semantic is missing from the baseline.
-- [ ] The README states what durability is claimed: acknowledged work
-  survives the loss of any minority of nodes, and a simultaneous power loss
-  of every node is as durable as the hosts' fsync.
-- [ ] `TRADEMARK.md` is expanded from its stub.
-- [ ] The repository's private vulnerability reporting is on, and
-  `SECURITY.md`'s supported versions name the release line instead of `main`
-  alone.
-- [ ] Every gate in `docs/dependency-policy.md` passes on the tagged commit,
+  nothing that changed a replicated semantic is missing from the baseline
+  (2026-11-07: the cluster packages, the stores and the session package,
+  from `385a5b0e` through `e9dd2cd5`).
+- [x] At the tag, the same re-read over the commits since `e9dd2cd5`
+  (2026-11-07: through `402be303`, no row added; the release's own commits
+  change no Go file).
+- [x] operations.md, ["Durability and group commit"](operations.md#durability-and-group-commit) states what durability is claimed:
+  under `walSync: "commit"`, acknowledged work survives the loss of fewer
+  nodes than hold a copy of it (`cluster.replicas`, at most the live nodes;
+  any one node on the chart's 3 pods and 2 copies), and a simultaneous power loss of every node is as durable as the
+  hosts' fsync, which no test has checked by cutting power.
+- [x] `TRADEMARK.md` is no longer marked a stub.
+- [ ] The repository's private vulnerability reporting is on.
+- [x] `SECURITY.md`'s supported versions name the release line instead of
+  `main` alone.
+- [x] Every gate in `docs/dependency-policy.md` passes on the tagged commit,
   the interoperability gate included.
+
+## Before every tag
+
+- [x] `deploy/helm/hoardmq/Chart.yaml`'s `version` and `appVersion` are the
+  tag without its `v`.
+- [x] The reference `Dockerfile` builds at the tagged commit, and the image's
+  `hoardmq version` prints the tag given as `VERSION`. A base image pin is
+  refreshed by pulling its tag and replacing the reference's version and
+  digest (the Dockerfile's header).
+- [x] `docs/production-readiness.md` is re-read against `docs/stability.md`,
+  `SECURITY.md`, `docs/upgrade.md` and the evidence pages: it says nothing
+  they do not, and its "Measured" section states the largest scale measured
+  at this release.
 
 ## Before every tag after the first
 

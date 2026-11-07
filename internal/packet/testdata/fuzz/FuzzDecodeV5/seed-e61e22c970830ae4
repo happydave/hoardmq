@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("\x82\x16\x00\v\x02\v*\x00\n$share/g/a)\x00\x01c\x14")

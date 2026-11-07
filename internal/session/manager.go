@@ -30,12 +30,18 @@ type Options struct {
 	Shards int
 	// StoreAdmission bounds how many connects and disconnects are inside the
 	// store's write path at once; zero means unbounded. The single map lock
-	// used to bound it at one as a side effect (WI 1292 round 5).
-	StoreAdmission   int
-	DropNewest       bool
+	// used to bound it at one as a side effect.
+	StoreAdmission int
+	DropNewest     bool
+	// DropOfflineQoS0 drops a QoS 0 delivery to a session with no connection
+	// rather than queueing it.
+	DropOfflineQoS0  bool
 	MaxSessionExpiry uint32 // 0 means no cap
 	// MaxSubscriptions bounds the filters one session holds; 0 means none.
 	MaxSubscriptions int
+	// MaxRetainedTopics bounds the retained topics one namespace holds on
+	// this node; 0 means none.
+	MaxRetainedTopics int
 	// BindPrincipal refuses a CONNECT whose principal (its identity's
 	// username) differs from the existing session's, resume or clean start.
 	BindPrincipal bool
@@ -114,6 +120,8 @@ type Replication interface {
 	// StoreRetained is asked before a retained message is stored. It
 	// returns true when this node holds the topic's shard and the manager
 	// stores locally; false when the write was handed to the shard leader.
+	// A Replication that also has StoreRetainedFrom (sourcedRetained) is told
+	// the write's source instead.
 	StoreRetained(msg *message.Message) (local bool)
 	// QueryRetained returns the live retained messages a filter matches
 	// across every shard.
@@ -128,7 +136,7 @@ type Manager struct {
 	router Router
 
 	// Every site that closes a client's connection, counted where the close
-	// happens rather than at its callers (WI 1495). A SessionTakenOver a
+	// happens rather than at its callers. A SessionTakenOver a
 	// client reports comes from exactly one of these, and attributing an
 	// excess drop to a lease move without them is a guess: at 1,000 clients
 	// every excess drop was a SessionTakenOver while both lease paths
@@ -144,9 +152,9 @@ type Manager struct {
 	closedDetach atomic.Int64
 	// closedEvictImport is the subset of closedEvict that came from Import —
 	// a lease being adopted and its state pulled in, which evicts whatever
-	// this node held for the key first. WI 1513 attributed the evictions to
-	// the lease service's deferred reclaim and fixed that, and the fix was
-	// inert; this says which caller is actually responsible.
+	// this node held for the key first. Attributing the evictions to the
+	// lease service's deferred reclaim and fixing that proved inert; this
+	// says which caller is actually responsible.
 	closedEvictImport atomic.Int64
 	// A CONNECT refused because the session is sealed for a newer grant, and
 	// sealed sessions a CONNECT at this node's own later grant resumed.
@@ -162,8 +170,10 @@ type Manager struct {
 	// duplicates counts routed deliveries skipped because the session was
 	// installed holding the message (DuplicatesSkipped).
 	duplicates atomic.Int64
-	// queued is the messages queued across this manager's sessions.
-	queued atomic.Int64
+	// queued and inflight are the messages queued, and in flight to their
+	// clients, across this manager's sessions.
+	queued   atomic.Int64
+	inflight atomic.Int64
 
 	replication atomic.Pointer[replicationBox]
 
@@ -173,8 +183,8 @@ type Manager struct {
 
 	// shards hold the session maps. One mutex for all of them made every
 	// connect, disconnect and inbound packet in the process queue behind
-	// every other: WI 1352 round 9 put 80.3% of a storm's mutex delay in the
-	// accept loop and 58.8% of it inside Disconnect. A session and the
+	// every other: one storm put 80.3% of its mutex delay in the accept loop
+	// and 58.8% of it inside Disconnect. A session and the
 	// connection attached to it always land in the same shard, chosen from
 	// the session key, so no operation on one session touches two shards.
 	//
@@ -186,7 +196,7 @@ type Manager struct {
 	// gate bounds how many connects and disconnects are inside the store's
 	// write path at once. The single map lock used to do this as a side
 	// effect — see the comment in Connect — and sharding removes that, so
-	// the bound is explicit here instead (WI 1292 round 5, I6).
+	// the bound is explicit here instead.
 	gate chan struct{}
 	seq  atomic.Uint64
 	// lifecycle guards the manager's own timer, which is not session state.
@@ -284,8 +294,8 @@ func New(opts Options) *Manager {
 		opts.Namespace = "default"
 	}
 	m := &Manager{opts: opts, log: opts.Logger, clock: opts.Clock, router: opts.Router}
-	m.limits.Store(&Limits{MaxQueued: opts.MaxQueued, DropNewest: opts.DropNewest, MaxSessionExpiry: opts.MaxSessionExpiry,
-		MaxSubscriptions: opts.MaxSubscriptions})
+	m.limits.Store(&Limits{MaxQueued: opts.MaxQueued, DropNewest: opts.DropNewest, DropOfflineQoS0: opts.DropOfflineQoS0,
+		MaxSessionExpiry: opts.MaxSessionExpiry, MaxSubscriptions: opts.MaxSubscriptions, MaxRetainedTopics: opts.MaxRetainedTopics})
 	n := opts.Shards
 	if n <= 0 {
 		n = defaultShards
@@ -303,14 +313,18 @@ func New(opts Options) *Manager {
 }
 
 // Limits are the per-session limits a running manager can change: the queue
-// bound and what a full queue drops, from the next message queued, the cap
-// on a session's expiry interval, from the next one a client sets, and the
-// bound on its filters, from the next SUBSCRIBE.
+// bound, what a full queue drops and whether an offline session's QoS 0 is
+// queued, from the next message delivered, the cap on a session's expiry
+// interval, from the next one a client sets, the bound on its filters,
+// from the next SUBSCRIBE, and the bound on a namespace's retained topics,
+// from the next retained write.
 type Limits struct {
-	MaxQueued        int
-	DropNewest       bool
-	MaxSessionExpiry uint32 // 0 means no cap
-	MaxSubscriptions int    // 0 means no bound
+	MaxQueued         int
+	DropNewest        bool
+	DropOfflineQoS0   bool
+	MaxSessionExpiry  uint32 // 0 means no cap
+	MaxSubscriptions  int    // 0 means no bound
+	MaxRetainedTopics int    // 0 means no bound
 }
 
 // SetLimits puts new limits into force. A queue already longer than a
@@ -336,9 +350,28 @@ func (m *Manager) armSweep() {
 		return
 	}
 	m.sweepTimer = m.clock.AfterFunc(sweepInterval, func() {
-		m.router.Sweep(m.clock.Now())
+		m.sweepRetained(m.clock.Now())
 		m.armSweep()
 	})
+}
+
+// sweepRetained drops expired retained messages. With a replication that
+// names the shards this node leads, an expired message on one becomes a
+// tombstone stamped fresh, journaled and so replicated, so an older copy
+// handed over later stays below it; on another shard it is removed here
+// alone.
+func (m *Manager) sweepRetained(now time.Time) {
+	l, ok := m.Replication().(retainedLeader)
+	if !ok {
+		m.router.Sweep(now)
+		return
+	}
+	for _, e := range m.router.SweepLeading(now, l.LeadsRetained) {
+		if c := m.writer().retainAt(e.Msg, e.RV); c > 0 {
+			m.router.MarkRetainedAppended(e.Msg, e.RV, c)
+		}
+	}
+	m.syncIfDirty()
 }
 
 // Close stops the manager's own timers. Sessions are left as they are.
@@ -370,19 +403,160 @@ func (m *Manager) Replication() Replication {
 	return nil
 }
 
-// InjectRetained stores a retained message on this node as the shard leader
-// and makes it durable: the replication layer installs messages it received
-// from other nodes through it. It reports whether the record was appended and
-// synced; one that was not may not be acknowledged.
-func (m *Manager) InjectRetained(msg *message.Message) (durable bool) {
+// InjectRetained stores an unversioned retained message on this node and
+// makes it durable, or, for an empty payload, drops whatever the topic holds
+// (a copy drop). A message is not stored over a topic holding a versioned
+// entry (store.UnversionedRefused), counted older on the hand-over path, where
+// the replication layer uses it. durable reports whether the record was
+// appended and synced; one that was not may not be acknowledged.
+func (m *Manager) InjectRetained(msg *message.Message) (durable bool, refusal store.RetainRefusal) {
 	if msg.Namespace == "" {
 		msg.Namespace = m.opts.Namespace
 	}
-	m.router.Retain(msg)
+	if len(msg.Payload) == 0 {
+		m.router.Retain(msg)
+		return m.journalRetained(msg), store.RetainStored
+	}
+	if refusal := m.retainUnderLimit(msg, 0, "handover"); refusal != store.RetainStored {
+		return false, refusal
+	}
+	return m.journalRetained(msg), store.RetainStored
+}
+
+// InjectRetainedWrite is InjectRetained for a retained write another node
+// forwarded to this one as the shard leader under no map: a new write, so the
+// namespace's retained-topic limit decides it, and it is refused, counted,
+// with nothing stored, over a topic holding a versioned entry or past the
+// limit.
+func (m *Manager) InjectRetainedWrite(msg *message.Message) (durable bool, refusal store.RetainRefusal) {
+	if msg.Namespace == "" {
+		msg.Namespace = m.opts.Namespace
+	}
+	if refusal := m.retainUnderLimit(msg, m.CurrentLimits().MaxRetainedTopics, "forward"); refusal != store.RetainStored {
+		return false, refusal
+	}
+	return m.journalRetained(msg), store.RetainStored
+}
+
+func (m *Manager) journalRetained(msg *message.Message) bool {
 	w := m.ackWriter()
 	w.retain(msg)
 	synced := m.syncIfDirty()
 	return !w.unjournaled() && synced
+}
+
+// InjectRetainedAt is InjectRetained for a copy at a version (a tombstone
+// when its payload is empty): installed by store.MergeRetained, handOver on a
+// hand-over or hand-on path. installed reports whether it replaced what was
+// held. durable reports whether what is held for the topic now (the copy, or
+// the entry that outranked it) is appended and synced here: an entry not yet
+// covered by a sync is appended again and synced first, so a sender is never
+// told "held" over an entry that only memory holds. heldRV is the version of
+// what is held after.
+func (m *Manager) InjectRetainedAt(msg *message.Message, v store.Version, handOver bool) (installed, durable bool, heldRV store.Version) {
+	if msg.Namespace == "" {
+		msg.Namespace = m.opts.Namespace
+	}
+	installed, held := m.router.MergeRetained(msg, v, handOver)
+	if installed && held.Msg == nil {
+		// A copy drop: removed here, nothing held to make durable.
+		return true, m.journalRetained(&message.Message{Namespace: msg.Namespace, Topic: msg.Topic}), store.Version{}
+	}
+	if installed || held.Appended == 0 || m.synced.Load() < held.Appended {
+		return installed, m.journalEntry(held), held.RV
+	}
+	return false, true, held.RV
+}
+
+// DropRetainedTombstone removes a topic's tombstone while it is the one at v:
+// the shard leader's drop, or a drop its leader named. The drop is not
+// journaled here: a restart before the next checkpoint brings the tombstone
+// back, the safe direction, where a record could land after a newer write's.
+func (m *Manager) DropRetainedTombstone(ns, topic string, v store.Version) bool {
+	return m.router.DropTombstoneIf(ns, topic, v)
+}
+
+// retainStampedAtLimit is RetainStamped that, when the retained-topic limit
+// refuses a clear, asks the replication to drop every tombstone of the
+// namespace that may go and tries once more. A refused message write asks
+// nothing: the drops' scans are paid only to make room for a clear.
+func (m *Manager) retainStampedAtLimit(msg *message.Message, epoch uint64) (store.Version, bool) {
+	limit := m.CurrentLimits().MaxRetainedTopics
+	if v, ok := m.router.RetainStamped(msg, epoch, limit); ok {
+		return v, true
+	}
+	if len(msg.Payload) > 0 {
+		return store.Version{}, false
+	}
+	d, ok := m.Replication().(tombstoneDropper)
+	if !ok || d.DropEligibleTombstones(msg.Namespace) == 0 {
+		return store.Version{}, false
+	}
+	return m.router.RetainStamped(msg, epoch, limit)
+}
+
+// journalEntry appends a held entry's record and syncs, marking the entry
+// appended, and reports whether both took.
+func (m *Manager) journalEntry(e RetainedEntry) bool {
+	w := m.ackWriter()
+	count := w.retainAt(e.Msg, e.RV)
+	synced := m.syncIfDirty()
+	if count > 0 {
+		m.router.MarkRetainedAppended(e.Msg, e.RV, count)
+	}
+	return !w.unjournaled() && synced
+}
+
+// InjectRetainedWriteAt is InjectRetainedWrite at the shard's leader under a
+// map version: the write, or clear, is stamped (epoch, the next number) and
+// journaled. refusal says why nothing was stored: the retained-topic limit,
+// or, under no map (epoch 0), a versioned entry held for the topic.
+func (m *Manager) InjectRetainedWriteAt(msg *message.Message, epoch uint64) (durable bool, refusal store.RetainRefusal) {
+	if msg.Namespace == "" {
+		msg.Namespace = m.opts.Namespace
+	}
+	if epoch == 0 {
+		return m.InjectRetainedWrite(msg)
+	}
+	v, ok := m.retainStampedAtLimit(msg, epoch)
+	if !ok {
+		m.limitRefused(msg)
+		return false, store.RetainOverLimit
+	}
+	m.stamped("forward")
+	return m.journalEntry(RetainedEntry{Msg: msg, RV: v, Tombstone: len(msg.Payload) == 0}), store.RetainStored
+}
+
+// limitRefused counts a retained write or clear the retained-topic limit
+// refused.
+func (m *Manager) limitRefused(msg *message.Message) {
+	op := "write"
+	if len(msg.Payload) == 0 {
+		op = "clear"
+	}
+	m.count("hoardmq_retained_limit_refusals_total", map[string]string{"namespace": msg.Namespace, "op": op}, 1)
+}
+
+// stamped counts a leader's stamped install on a path: its stamp outranks
+// whatever is held, so it is always newer.
+func (m *Manager) stamped(path string) {
+	m.count("hoardmq_retained_merges_total", map[string]string{"path": path, "outcome": "newer"}, 1)
+}
+
+// retainUnderLimit stores a new unversioned retained write unless the topic
+// holds a versioned entry, counted older on path, or the namespace holds limit
+// retained topics (0 is none), counted as the limit's refusal.
+func (m *Manager) retainUnderLimit(msg *message.Message, limit int, path string) store.RetainRefusal {
+	refusal := m.router.RetainUnder(msg, limit)
+	switch refusal {
+	case store.RetainVersionedHeld:
+		m.count("hoardmq_retained_merges_total", map[string]string{"path": path, "outcome": "older"}, 1)
+		m.log.Debug("unversioned retained write refused: the topic holds a versioned entry", "topic", msg.Topic, "path", path)
+	case store.RetainOverLimit:
+		m.limitRefused(msg)
+		m.log.Debug("retained write refused: the namespace holds its limit of retained topics", "topic", msg.Topic, "limit", limit)
+	}
+	return refusal
 }
 
 // retainedFor returns the retained messages a filter matches, across the
@@ -401,7 +575,9 @@ func (m *Manager) Inject(msg *message.Message) {
 	}
 	msg.Seq = m.seq.Add(1)
 	msg.Arrived = m.clock.Now()
-	m.dispatch(msg, nil, nil, false)
+	if _, _, refusal := m.dispatch(msg, nil, nil, false, sourceModule); refusal != 0 {
+		return
+	}
 	if m.opts.Observer != nil {
 		m.opts.Observer.OnPublishAccepted(context.Background(), hook.SourceModule, msg)
 	}
@@ -427,7 +603,7 @@ func (m *Manager) Records() []Record {
 	return out
 }
 
-// Router returns the router in use, for the subscription work item's tests.
+// Router returns the router in use, for tests.
 func (m *Manager) Router() Router { return m.router }
 
 // Record returns the view of a session, and whether it exists.
@@ -496,7 +672,7 @@ func (m *Manager) ConnectReplacing(c Connection, pkt *packet.Connect, leaseEpoch
 
 func (m *Manager) connect(c Connection, pkt *packet.Connect, leaseEpoch uint64, replacing bool) conn.ConnectResult {
 	k := key{m.opts.Namespace, c.ClientID()}
-	// The gate before the shard lock, never under it (WI 1292 round 5, I6):
+	// The gate before the shard lock, never under it:
 	// this path journals, and the single map lock used to bound how many
 	// connects reached the store at once as a side effect. Sharding removes
 	// that side effect, so the bound is taken explicitly here.
@@ -579,6 +755,7 @@ func (m *Manager) connect(c Connection, pkt *packet.Connect, leaseEpoch uint64, 
 	s.online.Store(true)
 	s.version = c.Version()
 	s.identity = *c.Identity()
+	s.queueLimit = m.queueLimitOf(s)
 	sh.byConn[c] = s
 	interval, capped := m.expiryFor(pkt)
 	s.expiryInterval = interval
@@ -614,8 +791,7 @@ func (m *Manager) connect(c Connection, pkt *packet.Connect, leaseEpoch uint64, 
 	// concurrent connects piled onto the store directly — fill went from
 	// 4m25s to not completing in 45 minutes at 100,000 clients. Sharding the
 	// map removes that side effect, so `StoreAdmission` is now the bound, set
-	// deliberately rather than inherited from an unrelated mutex. See WI 1292
-	// rounds 2 and 5.
+	// deliberately rather than inherited from an unrelated mutex.
 	m.writer().upsert(s)
 	s.mu.Unlock()
 	sh.mu.Unlock()
@@ -627,7 +803,7 @@ func (m *Manager) connect(c Connection, pkt *packet.Connect, leaseEpoch uint64, 
 		// third producer of SessionTakenOver besides the lease service's two,
 		// and at 1,000 clients it was the only one that fired — so a
 		// measurement that attributes every such disconnect to a lease move
-		// is attributing it to the wrong thing (WI 1495).
+		// is attributing it to the wrong thing.
 		m.displaced.Add(1)
 		old.Close(packet.SessionTakenOver)
 	}
@@ -747,7 +923,7 @@ func (m *Manager) deliverMatch(msg *message.Message, match Match, now time.Time,
 		return
 	}
 	l := m.limits.Load()
-	s.deliver(msg, t, now, l.MaxQueued, l.DropNewest, w)
+	s.deliver(msg, t, now, l, w)
 	s.mu.Unlock()
 }
 
@@ -795,23 +971,50 @@ func (m *Manager) DuplicatesSkipped() int64 { return m.duplicates.Load() }
 // dispatch stores a retained message and routes it to every match. It
 // returns the number of local matches plus the forwards sent to other nodes,
 // so a publish whose only subscriber is elsewhere is not answered as having
-// none (WI 1487). When into is non-nil, every record this publish caused that
+// none. When into is non-nil, every record this publish caused that
 // a barrier must cover is appended to it: each local session delivered into,
 // and the retained topic when the message is retained. When acked, the
 // publish's acknowledgement waits on what it writes: failed reports a record
-// that did not append, and a queued copy that failed is withdrawn.
-func (m *Manager) dispatch(msg *message.Message, publisher *Session, into *[]store.Scope, acked bool) (n int, failed bool) {
+// that did not append, and a queued copy that failed is withdrawn. A retained
+// message this node would store past the retained-topic limit (0x97), or
+// unversioned over a topic holding a versioned entry (0x83), is refused before
+// it is routed, and nothing else is done: refusal is its reason code, 0 when
+// it was not refused.
+func (m *Manager) dispatch(msg *message.Message, publisher *Session, into *[]store.Scope, acked bool, source string) (n int, failed bool, refusal packet.ReasonCode) {
 	w := m.writer()
 	if acked {
 		w = m.ackWriter()
 	}
 	if msg.Retain {
 		local := true
+		var epoch uint64
 		if r := m.Replication(); r != nil {
-			local = r.StoreRetained(msg)
+			local, epoch = storeRetainedAt(r, msg, source)
 		}
-		if local {
-			m.router.Retain(msg)
+		switch {
+		case local && epoch > 0:
+			// This node leads the shard under the map read for the decision:
+			// the write is stamped and installed in one step.
+			v, ok := m.retainStampedAtLimit(msg, epoch)
+			if !ok {
+				m.limitRefused(msg)
+				return 0, false, packet.QuotaExceeded
+			}
+			m.stamped("local")
+			if c := w.retainAt(msg, v); c > 0 {
+				m.router.MarkRetainedAppended(msg, v, c)
+			}
+		case local:
+			// Unversioned: no map, or no leader for the shard.
+			switch m.retainUnderLimit(msg, m.CurrentLimits().MaxRetainedTopics, "local") {
+			case store.RetainOverLimit:
+				return 0, false, packet.QuotaExceeded
+			case store.RetainVersionedHeld:
+				if source == sourceWill || source == sourceModule {
+					m.log.Warn("retained write dropped: unversioned over a topic holding a versioned entry", "source", source, "topic", msg.Topic)
+				}
+				return 0, false, packet.ImplementationSpecificError
+			}
 			w.retain(msg)
 		}
 		if m.opts.Observer != nil {
@@ -836,7 +1039,7 @@ func (m *Manager) dispatch(msg *message.Message, publisher *Session, into *[]sto
 			publisher.mu.Unlock()
 		}
 	}
-	return n, w.unjournaled()
+	return n, w.unjournaled(), 0
 }
 
 // Durable returns once everything journaled so far is synced and, with
@@ -915,8 +1118,14 @@ func principalRefused(bind bool, owner, connecting string) bool {
 // refusePrincipal answers a CONNECT refused for its principal; nothing of the
 // session has been changed.
 func (m *Manager) refusePrincipal() conn.ConnectResult {
-	m.count("hoardmq_connect_refusals_total", map[string]string{"reason": "principal"}, 1)
+	m.NotePrincipalRefusal()
 	return conn.ConnectResult{Reason: packet.NotAuthorized}
+}
+
+// NotePrincipalRefusal counts a CONNECT refused for its principal, here or
+// by the lease service before its acquire.
+func (m *Manager) NotePrincipalRefusal() {
+	m.count("hoardmq_connect_refusals_total", map[string]string{"reason": "principal"}, 1)
 }
 
 // count adds to a metric when a provider is configured.
@@ -930,7 +1139,8 @@ func (m *Manager) count(name string, labels map[string]string, delta float64) {
 func (m *Manager) event(ev hook.DeliveryEvent, s *Session, msg *message.Message, qos byte) {
 	switch ev {
 	case hook.Dropped:
-		m.count("hoardmq_drops_total", map[string]string{"namespace": s.key.ns, "reason": "queue_full"}, 1)
+		m.dropped(dropQueueFull, s, msg, qos)
+		return
 	case hook.Expired:
 		m.count("hoardmq_drops_total", map[string]string{"namespace": s.key.ns, "reason": "expired"}, 1)
 	default:
@@ -938,6 +1148,21 @@ func (m *Manager) event(ev hook.DeliveryEvent, s *Session, msg *message.Message,
 	}
 	if m.opts.Observer != nil {
 		m.opts.Observer.OnDelivery(context.Background(), ev, s.key.ns, s.key.id, msg, qos)
+	}
+}
+
+// The reasons hoardmq_drops_total counts a dropped delivery under.
+const (
+	dropQueueFull   = "queue_full"
+	dropOfflineQoS0 = "offline_qos0"
+)
+
+// dropped counts a delivery dropped for reason and reports it to the
+// observer as Dropped.
+func (m *Manager) dropped(reason string, s *Session, msg *message.Message, qos byte) {
+	m.count("hoardmq_drops_total", map[string]string{"namespace": s.key.ns, "reason": reason}, 1)
+	if m.opts.Observer != nil {
+		m.opts.Observer.OnDelivery(context.Background(), hook.Dropped, s.key.ns, s.key.id, msg, qos)
 	}
 }
 
@@ -972,7 +1197,9 @@ func (m *Manager) publishWill(w *Will, s *Session) {
 		m.opts.Observer.OnWill(context.Background(), s.key.ns, s.key.id, w.Message)
 	}
 	m.count("hoardmq_wills_total", map[string]string{"namespace": s.key.ns}, 1)
-	m.dispatch(w.Message, s, nil, false)
+	if _, _, refusal := m.dispatch(w.Message, s, nil, false, sourceWill); refusal != 0 {
+		return
+	}
 	if m.opts.Observer != nil {
 		m.opts.Observer.OnPublishAccepted(context.Background(), hook.SourceWill, w.Message)
 	}
@@ -981,3 +1208,7 @@ func (m *Manager) publishWill(w *Will, s *Session) {
 // Queued is the number of messages queued across this node's sessions, read
 // without a lock.
 func (m *Manager) Queued() int64 { return m.queued.Load() }
+
+// Held is the number of messages this node's sessions hold for their clients,
+// queued or in flight, read without a lock.
+func (m *Manager) Held() int64 { return m.queued.Load() + m.inflight.Load() }

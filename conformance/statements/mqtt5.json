@@ -21,7 +21,7 @@
  },
  {
   "id": "MQTT-2.1.3-1",
-  "text": "Where a flag bit is marked as �Reserved� it is reserved for future use and MUST be set to the value listed."
+  "text": "Where a flag bit is marked as “Reserved” it is reserved for future use and MUST be set to the value listed."
  },
  {
   "id": "MQTT-2.2.1-2",
@@ -57,15 +57,15 @@
  },
  {
   "id": "MQTT-3.1.2-1",
-  "text": "If the Password Flag is set to 1, a Password MUST be present in the Payload."
+  "text": "The protocol name MUST be the UTF-8 String \"MQTT\". If the Server does not want to accept the CONNECT, and wishes to reveal that it is an MQTT Server it MAY send a CONNACK packet with Reason Code of 0x84 (Unsupported Protocol Version), and then it MUST close the Network Connection."
  },
  {
   "id": "MQTT-3.1.2-2",
-  "text": "If the value of Request Problem Information is 0, the Server MAY return a Reason String or User Properties on a CONNACK or DISCONNECT packet, but MUST NOT send a Reason String or User Properties on any packet other than PUBLISH, CONNACK, or DISCONNECT."
+  "text": "If the Protocol Version is not 5 and the Server does not want to accept the CONNECT packet, the Server MAY send a CONNACK packet with Reason Code 0x84 (Unsupported Protocol Version) and then MUST close the Network Connection"
  },
  {
   "id": "MQTT-3.1.2-3",
-  "text": "If a Client sets an Authentication Method in the CONNECT, the Client MUST NOT send any packets other than AUTH or DISCONNECT packets until it has received a CONNACK packet."
+  "text": "The Server MUST validate that the reserved flag in the CONNECT packet is set to 0."
  },
  {
   "id": "MQTT-3.1.2-4",
@@ -177,7 +177,7 @@
  },
  {
   "id": "MQTT-3.1.3-1",
-  "text": "If the User Name Flag is set to 1, the User Name is the next field in the Payload. The User Name MUST be a UTF-8 Encoded String."
+  "text": "The Payload of the CONNECT packet contains one or more length-prefixed fields, whose presence is determined by the flags in the Variable Header. These fields, if present, MUST appear in the order Client Identifier, Will Properties, Will Topic, Will Payload, User Name, Password."
  },
  {
   "id": "MQTT-3.1.3-2",
@@ -193,7 +193,7 @@
  },
  {
   "id": "MQTT-3.1.3-5",
-  "text": "The Server MUST allow ClientID�s which are between 1 and 23 UTF-8 encoded bytes in length, and that contain only the characters \"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ\"."
+  "text": "The Server MUST allow ClientID’s which are between 1 and 23 UTF-8 encoded bytes in length, and that contain only the characters \"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ\"."
  },
  {
   "id": "MQTT-3.1.3-6",
@@ -213,7 +213,7 @@
  },
  {
   "id": "MQTT-3.1.3-10",
-  "text": "The Server MUST maintain the order of User Properties when forwarding the Application Message."
+  "text": "The Server MUST maintain the order of User Properties when publishing the Will Message."
  },
  {
   "id": "MQTT-3.1.3-11",
@@ -257,11 +257,11 @@
  },
  {
   "id": "MQTT-3.2.2-1",
-  "text": "The Server MUST NOT send this property if it would increase the size of the CONNACK packet beyond the Maximum Packet Size specified by the Client."
+  "text": "Byte 1 is the \"Connect Acknowledge Flags\". Bits 7-1 are reserved and MUST be set to 0."
  },
  {
   "id": "MQTT-3.2.2-2",
-  "text": "If the Server does not send the Server Keep Alive, the Server MUST use the Keep Alive value set by the Client on CONNECT."
+  "text": "If the Server accepts a connection with Clean Start set to 1, the Server MUST set Session Present to 0 in the CONNACK packet in addition to setting a 0x00 (Success) Reason Code in the CONNACK packet."
  },
  {
   "id": "MQTT-3.2.2-3",
@@ -341,7 +341,7 @@
  },
  {
   "id": "MQTT-3.3.1-1",
-  "text": "If the value of Retain As Published subscription option is set to 1, the Server MUST set the RETAIN flag equal to the RETAIN flag in the received PUBLISH packet."
+  "text": "The DUP flag MUST be set to 1 by the Client or Server when it attempts to re-deliver a PUBLISH packet."
  },
  {
   "id": "MQTT-3.3.1-2",
@@ -393,15 +393,15 @@
  },
  {
   "id": "MQTT-3.3.2-1",
-  "text": "The Content Type MUST be a UTF-8 Encoded String."
+  "text": "The Topic Name MUST be present as the first field in the PUBLISH packet Variable Header. It MUST be a UTF-8 Encoded String."
  },
  {
   "id": "MQTT-3.3.2-2",
-  "text": "A Server MUST send the Content Type unaltered to all subscribers receiving the Application Message."
+  "text": "The Topic Name in the PUBLISH packet MUST NOT contain wildcard characters."
  },
  {
   "id": "MQTT-3.3.2-3",
-  "text": "The Topic Name in a PUBLISH packet sent by a Server to a subscribing Client MUST match the Subscription�s Topic Filter."
+  "text": "The Topic Name in a PUBLISH packet sent by a Server to a subscribing Client MUST match the Subscription’s Topic Filter."
  },
  {
   "id": "MQTT-3.3.2-4",
@@ -473,7 +473,7 @@
  },
  {
   "id": "MQTT-3.3.4-1",
-  "text": "The Server MUST NOT delay the sending of any packets other than PUBLISH packets due to having sent Receive Maximum PUBLISH packets without receiving acknowledgements for them."
+  "text": "The receiver of a PUBLISH Packet MUST respond with the packet as determined by the QoS in the PUBLISH Packet."
  },
  {
   "id": "MQTT-3.3.4-2",
@@ -597,7 +597,7 @@
  },
  {
   "id": "MQTT-3.8.4-3",
-  "text": "If a Server receives a SUBSCRIBE packet containing a Topic Filter that is identical to a Non‑shared Subscription�s Topic Filter for the current Session then it MUST replace that existing Subscription with a new Subscription."
+  "text": "If a Server receives a SUBSCRIBE packet containing a Topic Filter that is identical to a Non‑shared Subscription’s Topic Filter for the current Session then it MUST replace that existing Subscription with a new Subscription."
  },
  {
   "id": "MQTT-3.8.4-4",
@@ -765,7 +765,7 @@
  },
  {
   "id": "MQTT-4.3.2-3",
-  "text": "In the QoS 1 delivery protocol, the sender MUST treat the PUBLISH packet as �unacknowledged� until it has received the corresponding PUBACK packet from the receiver."
+  "text": "In the QoS 1 delivery protocol, the sender MUST treat the PUBLISH packet as “unacknowledged” until it has received the corresponding PUBACK packet from the receiver."
  },
  {
   "id": "MQTT-4.3.2-4",
@@ -777,7 +777,7 @@
  },
  {
   "id": "MQTT-4.3.3-1",
-  "text": "In the QoS 2 delivery protocol, the receiver MUST continue the QoS 2 acknowledgement sequence even if it has applied Application Message expiry."
+  "text": "In the QoS 2 delivery protocol, the sender MUST assign an unused Packet Identifier when it has a new Application Message to publish."
  },
  {
   "id": "MQTT-4.3.3-2",
@@ -785,7 +785,7 @@
  },
  {
   "id": "MQTT-4.3.3-3",
-  "text": "In the QoS 2 delivery protocol, the sender MUST treat the PUBLISH packet as �unacknowledged� until it has received the corresponding PUBREC packet from the receiver."
+  "text": "In the QoS 2 delivery protocol, the sender MUST treat the PUBLISH packet as “unacknowledged” until it has received the corresponding PUBREC packet from the receiver."
  },
  {
   "id": "MQTT-4.3.3-4",
@@ -793,7 +793,7 @@
  },
  {
   "id": "MQTT-4.3.3-5",
-  "text": "In the QoS 2 delivery protocol, the sender MUST treat the PUBREL packet as �unacknowledged� until it has received the corresponding PUBCOMP packet from the receiver."
+  "text": "In the QoS 2 delivery protocol, the sender MUST treat the PUBREL packet as “unacknowledged” until it has received the corresponding PUBCOMP packet from the receiver."
  },
  {
   "id": "MQTT-4.3.3-6",
@@ -989,11 +989,11 @@
  },
  {
   "id": "MQTT-6.0.0-3",
-  "text": "The Client MUST include �mqtt� in the list of WebSocket Sub Protocols it offers."
+  "text": "The Client MUST include “mqtt” in the list of WebSocket Sub Protocols it offers."
  },
  {
   "id": "MQTT-6.0.0-4",
-  "text": "The WebSocket Subprotocol name selected and returned by the Server MUST be �mqtt�."
+  "text": "The WebSocket Subprotocol name selected and returned by the Server MUST be “mqtt”."
  },
  {
   "id": "MQTT-3.2.2-8",

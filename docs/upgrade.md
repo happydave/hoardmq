@@ -4,7 +4,7 @@ How to move a HoardMQ cluster to a new release, and back: in what order to
 replace nodes, what a cluster running two builds refuses while it does, how
 the cluster feature level is raised, what a node below that level looks like
 and what to do with it, and what cannot be rolled back. The mechanism behind
-it is in the README, "Upgrades and the cluster feature level". Each statement
+it is in clustering.md, ["Upgrades and the cluster feature level"](clustering.md#upgrades-and-the-cluster-feature-level). Each statement
 of behaviour below names the test that holds it.
 
 ## What a release can change
@@ -33,7 +33,12 @@ minor and a major release.
   `TestCheckReportsEveryProblem`).
 - Every node serving: `/servingz` answers 200 on each.
 - Each volume has room for twice `hoardmq_raft_snapshot_bytes` beside the
-  logs (README, "Consensus core").
+  logs (clustering.md, ["Consensus core"](clustering.md#consensus-core)).
+- A node locks its data directory (`node.dataDir/LOCK`) and refuses to start
+  while another process holds it, naming that process's PID
+  (`TestServeRefusesADataDirectoryInUse`). A build from before the lock takes
+  none, so stop the old process before starting the new one on its directory
+  (operations.md, ["Persistence"](operations.md#persistence)).
 
 ## The order: one node at a time
 
@@ -52,8 +57,10 @@ kubectl -n hoardmq rollout status statefulset/hoardmq --timeout=30m
 The StatefulSet's update strategy is `RollingUpdate`
 (`TestDesignedDeploymentProperties`). Kubernetes' StatefulSet controller then
 replaces one pod at a time, from the highest ordinal down, each once the one
-before it is Ready; the chart's recorded rolling-restart runs show one pod not
-ready at a time. The PodDisruptionBudget allows one pod down, each pod drains
+before it is Ready; in the chart's eleven recorded rolling-restart runs of the
+evening of 2026-10-05, a once-a-second sample during a rollout never found two pods not
+ready at once ([evidence/rolling-restart-kind.md](evidence/rolling-restart-kind.md)).
+The PodDisruptionBudget allows one pod down, each pod drains
 in its preStop hook, and the termination grace covers the drain's two timeouts
 (`TestDesignedDeploymentProperties`, `TestTerminationGraceHoldsTheWholeDrain`,
 `TestBrokerHoldsItsExitForThePreStop`).
@@ -145,8 +152,9 @@ replays what it held with the semantics each entry was committed under
 (`TestBelowLevelNodeHoldsAndCatchesUpAfterUpgrade`,
 `TestHeldLeaderRefusesAtOnceAndReplaysAfterRestart`). Restarted on the same
 build, it holds again at the same entry (the second test). Until then its raft
-log grows with every committed entry, since it compacts nothing; there is no
-command to remove a member, so upgrade it before its volume fills.
+log grows with every committed entry, since it compacts nothing, so upgrade it,
+or remove it with `hoardmq cluster remove` (operations.md, ["Removing a member"](operations.md#drain-and-readiness)),
+before its volume fills.
 
 ## Rolling back
 

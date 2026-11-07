@@ -17,7 +17,7 @@ func TestOnlineShapeRecordsPeakTroughAndNinetyNine(t *testing.T) {
 	from := time.Now()
 	s := newOnlineShape(100000, from)
 
-	// Round 12's shape: a fall to zero when both survivors fenced, a climb
+	// A run whose survivors both fenced: a fall to zero, a climb
 	// to 99,911, then a decay. Its published headline was 88,570.
 	for _, n := range []int{67178, 33333, 0, 35578, 93278, 99911, 99137, 90570, 88570} {
 		s.observe(n, n)
@@ -36,7 +36,7 @@ func TestOnlineShapeRecordsPeakTroughAndNinetyNine(t *testing.T) {
 
 func TestOnlineShapeReportsNinetyNineNotReached(t *testing.T) {
 	s := newOnlineShape(100000, time.Now())
-	// Round 15's shape: never got close.
+	// A run that never got close.
 	for _, n := range []int{67178, 0, 21808, 12933} {
 		s.observe(n, n)
 	}
@@ -49,9 +49,9 @@ func TestOnlineShapeReportsNinetyNineNotReached(t *testing.T) {
 }
 
 // TestOnlineShapeMarksTheReturnNotThePreStormReading replays the shape of
-// the run that produced WI 1498: the window loop's first samples are taken
-// before the clients notice the crash, so the count starts at target, falls,
-// and comes back. The mark belongs to the return.
+// a run whose time-to-99% counted a pre-storm reading: the window loop's
+// first samples are taken before the clients notice the crash, so the count
+// starts at target, falls, and comes back. The mark belongs to the return.
 //
 // The published figures are r1 of the 2026-09-15 client-host batch
 // (sim/results/gtr-clients-2026-09-15/r1-remote-1k): a time to 99% of 16 ms
@@ -149,11 +149,11 @@ func TestRunsCoveredSaysItIsOneSample(t *testing.T) {
 	}
 }
 
-// TestShapeAgreesWithThePublishedRounds is WI 1373's fourth acceptance
-// criterion: the new figures, derived by this code from the four published
-// rounds' own progress logs, must agree with what those runs did. It is the
-// test that makes the other four trustworthy, and it is the easiest to skip
-// because the data is already in hand and "obviously" right.
+// TestShapeAgreesWithThePublishedRounds: the new figures, derived by this
+// code from the four published rounds' own progress logs, must agree with
+// what those runs did. It is the test that makes the rest trustworthy, and
+// it is the easiest to skip because the data is already in hand and
+// "obviously" right.
 func TestShapeAgreesWithThePublishedRounds(t *testing.T) {
 	if _, err := os.Stat("results"); errors.Is(err, fs.ErrNotExist) {
 		t.Skip("sim/results/ is not in this checkout: the public repository omits the published results, which the private repository keeps")
@@ -217,7 +217,7 @@ func TestShapeAgreesWithThePublishedRounds(t *testing.T) {
 
 // The 99% and 99.9% marks are of the recovered count, not the online one: a
 // population that is online with its subscriptions refused has not returned
-// to the line, and since WI 1618 the headline says so.
+// to the line, and the headline says so.
 func TestOnlineShapeMarksFollowTheRecoveredCount(t *testing.T) {
 	base := time.Now()
 	s := newOnlineShape(1000, base)

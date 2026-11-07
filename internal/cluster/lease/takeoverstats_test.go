@@ -10,7 +10,7 @@ import (
 // TestTakeoverStatsCountThePullAndThePass: a takeover from a live owner is
 // counted on both sides — the requester's pull with what it brought back, and
 // the owner's request, pass and the parts of it that take the session
-// manager's locks (WI 1691).
+// manager's locks.
 func TestTakeoverStatsCountThePullAndThePass(t *testing.T) {
 	c := newCluster(t, []string{"n1", "n2"}, 2*time.Second, nil)
 	a, b := c.nodes["n1"], c.nodes["n2"]
@@ -52,7 +52,7 @@ func TestTakeoverStatsCountThePullAndThePass(t *testing.T) {
 // counted from the moment the request was handed to the queue, and the pass's
 // own time from the moment a worker started it — the two must not be one
 // figure, since it is the difference between "the owner was slow" and "the
-// owner had four workers and a storm" (WI 1691).
+// owner had four workers and a storm".
 func TestTakeoverPassSeparatesItsQueueWaitFromItsOwnTime(t *testing.T) {
 	const queued, taking = 200 * time.Millisecond, 60 * time.Millisecond
 	c := newCluster(t, []string{"n1", "n2"}, 2*time.Second, nil)

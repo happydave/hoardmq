@@ -14,7 +14,7 @@ import (
 // barriers that failed by peer and reason, and how long the refused publish
 // took. A reason code alone cannot tell a state that changed since `New`
 // from a refusal with every predicate still holding, and it was the second
-// that turned out to be happening (WI 1661).
+// that turned out to be happening.
 func refusalDiagnosis(c *Cluster, took time.Duration) string {
 	var b strings.Builder
 	serving := c.notServing()

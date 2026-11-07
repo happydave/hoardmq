@@ -17,7 +17,7 @@ import (
 // A repeat exists because the measurement cannot characterise a build from
 // one run. Four runs of identical code on 2026-09-07 gave 1m39.804s,
 // 5m36.225s, and twice not-reached — a spread covering every outcome this
-// project had been reading as a difference between builds (WI 1374).
+// project had been reading as a difference between builds.
 
 // repeatRun is one measurement's outcome within a batch.
 type repeatRun struct {
@@ -36,16 +36,16 @@ type repeatRun struct {
 	PeakOnline   int     `json:"peak_online,omitempty"`
 	TroughOnline int     `json:"trough_online,omitempty"`
 	OnlineAtEnd  int     `json:"online_at_end,omitempty"`
-	// Leader placement (WI 1493), so runs can be compared within a shape.
+	// Leader placement, so runs can be compared within a shape.
 	VictimPolicy      string `json:"victim_policy,omitempty"`
 	LeaderBeforeCrash string `json:"leader_before_crash,omitempty"`
 	LeaderAfter       string `json:"leader_after,omitempty"`
 	StormTarget       string `json:"storm_target,omitempty"`
-	// Subscribe refusals (WI 1509). Kept per run, not only in the batch total,
+	// Subscribe refusals. Kept per run, not only in the batch total,
 	// because a batch total cannot say whether one run carried all of them.
 	SubRefusals       int64 `json:"sub_refusals,omitempty"`
 	SubRefusedClients int   `json:"sub_refused_clients,omitempty"`
-	// Bounds is the run judged against the owner's pass bounds (WI 1734),
+	// Bounds is the run judged against the owner's pass bounds,
 	// from the run.json figures in in.
 	Bounds *boundsVerdict `json:"bounds,omitempty"`
 	in     boundsInput
@@ -69,19 +69,19 @@ type repeatSummary struct {
 	MaxSec     float64     `json:"max_sec,omitempty"`
 	Detail     []repeatRun `json:"detail"`
 	// TimingSets are the distinct timing labels the runs used; a batch
-	// that mixed them is visible as more than one (WI 1475).
+	// that mixed them is visible as more than one.
 	TimingSets []string `json:"timing_sets,omitempty"`
 	// SubRefusals is the batch total and SubRefusedRuns how many runs saw any.
 	// A recovery figure counts a client as back when it reconnects, and a
 	// client whose resubscribe was refused is back and subscribed to nothing;
-	// these two say whether that happened in the batch being read (WI 1509).
+	// these two say whether that happened in the batch being read.
 	SubRefusals    int64 `json:"sub_refusals"`
 	SubRefusedRuns int   `json:"sub_refused_runs"`
 	// Bounds judges the runs that produced a measurement against the pass
-	// bounds, each run's verdict beside the batch's (WI 1734).
+	// bounds, each run's verdict beside the batch's.
 	Bounds *batchVerdict `json:"bounds,omitempty"`
 	// Provenance is the driver's own: how the batch was invoked and from
-	// which tree. Each run's run.json carries its child's (WI 1379).
+	// which tree. Each run's run.json carries its child's.
 	Provenance *Provenance `json:"provenance,omitempty"`
 }
 
@@ -219,7 +219,7 @@ func readRun(index int, dir string) repeatRun {
 // on live paths — "/", a home directory — without risk, and breaking the guard
 // to confirm the test catches it costs a red test and nothing else. Keeping
 // the decision separable from the deletion is the point: a guard whose only
-// test drives the destructive path is safe only while the guard works (WI 1377).
+// test drives the destructive path is safe only while the guard works.
 func validateStoreRoot(dir string) error {
 	root := os.TempDir()
 	rel, err := filepath.Rel(root, dir)
@@ -257,12 +257,12 @@ func removeStore(dir string) (string, error) {
 // can be asserted on a synthetic artifact. Inline in the driver, the only
 // evidence it ran was a log line at a scale the dev host cannot reach: with
 // the call deleted, runs at 300 and 20,000 clients still left nothing behind,
-// because the child cleaned up itself before the driver ended it (WI 1465).
+// because the child cleaned up itself before the driver ended it.
 //
 // The note is what the driver logs about the store: where it was removed,
 // where it was leaked and why, or nothing when no root was published or the
 // run failed to read. A leaked store never fails the run; the measurement is
-// still valid (WI 1377).
+// still valid.
 func finishRun(index int, dir string) (repeatRun, string) {
 	r := readRun(index, dir)
 	if r.Failed {

@@ -136,7 +136,7 @@ func TestRolesGrant(t *testing.T) {
 	}
 }
 
-// Workitem AC 1: on every route that declares a scope, an identity whose
+// On every route that declares a scope, an identity whose
 // only role holds every scope but that one is refused with 403 naming it,
 // and the refusal is audited; one whose role holds exactly that scope is
 // not refused with 403.
@@ -223,7 +223,7 @@ func createKey(t *testing.T, f *rbacFixture, token, body string) (CreatedAPIKey,
 	return k, rec.Code
 }
 
-// Workitem AC 3: a key is scoped, revocable and never logged.
+// A key is scoped, revocable and never logged.
 func TestAPIKeyLifecycle(t *testing.T) {
 	f := newRBACFixture(t, false)
 	k, code := createKey(t, f, opsToken, `{"name":"ci deploys","scopes":["clients:read"]}`)
@@ -544,7 +544,7 @@ func TestAPIKeysWithoutAStore(t *testing.T) {
 	}
 }
 
-// Workitem AC 2 at the API: an ID token from the configured provider is an
+// At the API, an ID token from the configured provider is an
 // identity with the roles its groups map to.
 func TestOIDCAuthentication(t *testing.T) {
 	f := newRBACFixture(t, true)

@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("{\"keys\":[{\"kty\":\"EC\",\"kid\":\"e\",\"crv\":\"P-256\",\"x\":\"AAAA\",\"y\":\"AAAA\"}]}")

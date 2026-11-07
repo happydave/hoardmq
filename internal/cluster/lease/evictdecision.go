@@ -35,7 +35,7 @@ const evictDeferBound = 3
 // back is one with a live connection — which the old test could not see, since
 // a returning client's takeover is still in flight and the lease has not
 // arrived yet. Measured at 681-19,991 connections closed per run this way
-// (WI 1495, sim/results/evict-2026-09-16/).
+// (sim/results/evict-2026-09-16/).
 //
 // below is whether this node's build is below the cluster's level: its table
 // has stopped learning, so a lease it shows gone may be one it has not

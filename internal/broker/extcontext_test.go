@@ -1,13 +1,16 @@
 package broker
 
 import (
+	"encoding/json"
 	"io"
 	"log/slog"
 	"testing"
 	"time"
 
+	"github.com/happydave/hoardmq/internal/audit"
 	"github.com/happydave/hoardmq/internal/auth"
 	"github.com/happydave/hoardmq/internal/config"
+	"github.com/happydave/hoardmq/internal/packet"
 )
 
 // TestModuleContextPasswords: a module verifies a stored credential through
@@ -46,5 +49,62 @@ func TestModuleContextPasswords(t *testing.T) {
 	}
 	if checking.Services != nil {
 		t.Fatal("hoardmq check's context carries services")
+	}
+}
+
+// TestModuleAuditor: a module's audit event is queued without waiting; with
+// the queue full it is dropped, counted in the log's own drops, and Audit
+// reports false. Without an audit log Audit reports false.
+func TestModuleAuditor(t *testing.T) {
+	s := &Server{}
+	a := moduleAuditor{s: s}
+	if a.Audit("c", "payload.invalid", "r", "x", nil) {
+		t.Fatal("recorded with no audit log")
+	}
+	l, err := audit.Open(t.TempDir(), audit.Options{Queue: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	l.Pause()
+	t.Cleanup(l.Resume) // before Close, which waits for the writer
+	s.audit.Store(l)
+	if !a.Audit("c", "payload.invalid", "r", "x", nil) {
+		t.Fatal("the first event was not queued")
+	}
+	done := make(chan bool, 1)
+	go func() { done <- a.Audit("c", "payload.invalid", "r", "x", nil) }()
+	select {
+	case ok := <-done:
+		if ok {
+			t.Fatal("an event past a full queue reported queued")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Audit waited on a full queue")
+	}
+	if st := l.Stats(); st.Dropped != 1 {
+		t.Fatalf("dropped %d, want 1", st.Dropped)
+	}
+}
+
+// TestPayloadSchemaWithAuditOff: with the node's audit log off a module's
+// Context.Audit is nil, and an auditing rule still refuses.
+func TestPayloadSchemaWithAuditOff(t *testing.T) {
+	f := start(t, func(d *config.Document) {
+		d.Observability.Audit.Enabled = false
+		d.Modules["schema.json"] = json.RawMessage(`{"audit":true,"rules":[{"name":"r","filter":"r/#","schema":{"type":"object"}}]}`)
+	})
+	pub, _ := f.connect("tcp", packet.V5, &packet.Connect{ClientID: "pub", CleanStart: true}, false)
+	pub.send(&packet.Publish{Topic: "r/1", QoS: 1, PacketID: 1, Payload: []byte(`[]`)})
+	if a := pub.read().(*packet.Puback); a.ReasonCode != packet.PayloadFormatInvalid {
+		t.Fatalf("refusal with the audit log off: %s", a.ReasonCode)
+	}
+	// The module was handed no auditor, so it tried to record nothing: an
+	// auditor over a missing log would have reported each event dropped.
+	if got := f.series("hoardmq_payload_schema_refusals_total", map[string]string{"rule": "r", "action": "drop"}); got != 1 {
+		t.Fatalf("refusals %v, want 1", got)
+	}
+	if got := f.series("hoardmq_payload_schema_audit_dropped_total", nil); got != 0 {
+		t.Fatalf("audit dropped %v with the audit log off", got)
 	}
 }

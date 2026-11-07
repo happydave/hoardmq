@@ -80,7 +80,7 @@ func tokenConnect(user, token string) *packet.Connect {
 	return c
 }
 
-// AC 1, JWKS: access tokens connect at 5.0 and 3.1.1 and the identity is the
+// With JWKS, access tokens connect at 5.0 and 3.1.1 and the identity is the
 // token's subject; an expired token and one for another audience are refused.
 func TestJWTAuthenticationOnANode(t *testing.T) {
 	p := oidctest.New(t, "hoardmq")
@@ -159,7 +159,7 @@ func TestJWTSessionEndsAtExpiry(t *testing.T) {
 	}
 }
 
-// AC 1, introspection: an active token connects; revoked at the provider, it
+// With introspection, an active token connects; revoked at the provider, it
 // is refused; each CONNECT asks.
 func TestJWTIntrospectionOnANode(t *testing.T) {
 	p := oidctest.New(t, "hoardmq")
@@ -213,7 +213,7 @@ func useCert(t *testing.T, f *fixture, r *testcert.Responder, serial int64) {
 	f.client = leaf
 }
 
-// AC 2: a revoked certificate is refused by OCSP and by CRL; unreachable
+// A revoked certificate is refused by OCSP and by CRL; unreachable
 // endpoints follow the policy, counted.
 func TestCertificateRevocationOnANode(t *testing.T) {
 	for _, source := range []string{`{"crl":false}`, `{"ocsp":false}`} {
@@ -272,7 +272,7 @@ func TestCertificateRevocationOnANode(t *testing.T) {
 	}
 }
 
-// AC 3 on a node: a SCRAM exchange completes against a credential written
+// On a node, a SCRAM exchange completes against a credential written
 // by hash-password -scram; a pbkdf2-form user cannot complete SCRAM, and logs
 // in by password where auth.file reads the same file.
 func TestSCRAMOnANode(t *testing.T) {

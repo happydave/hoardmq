@@ -20,11 +20,14 @@ func (pingHooks) Disconnected(context.Context, hook.Info, packet.ReasonCode, boo
 func (pingHooks) Subscribe(context.Context, hook.Info, *packet.Subscription) hook.Outcome {
 	return hook.OK
 }
-func (h pingHooks) Inbound(_ context.Context, _ hook.Info, p packet.Packet) hook.Outcome {
-	if _, ok := p.(*packet.Pingreq); ok && h.in {
-		return hook.Outcome{Action: hook.Disconnect, Reason: packet.AdministrativeAction}
-	}
+func (pingHooks) Unsubscribe(context.Context, hook.Info, string) hook.Outcome {
 	return hook.OK
+}
+func (h pingHooks) Inbound(_ context.Context, _ hook.Info, p packet.Packet) (hook.Outcome, string) {
+	if _, ok := p.(*packet.Pingreq); ok && h.in {
+		return hook.Outcome{Action: hook.Disconnect, Reason: packet.AdministrativeAction}, "ping"
+	}
+	return hook.OK, ""
 }
 func (h pingHooks) Outbound(_ context.Context, _ hook.Info, p packet.Packet) hook.Outcome {
 	if _, ok := p.(*packet.Pingresp); ok && h.out {
@@ -205,6 +208,54 @@ func TestDeliverDoesNotBlock(t *testing.T) {
 	}
 	if writable.Load() == 0 {
 		t.Fatal("OnWritable was not called once the client read the queue")
+	}
+}
+
+// TestOfferDoesNotBlock: a control packet offered to a client that reads
+// nothing is queued while there is room and answered ErrBusy at once after,
+// OnWritable follows once the client reads, and a closed connection answers
+// ErrClosed.
+func TestOfferDoesNotBlock(t *testing.T) {
+	var writable atomic.Int32
+	o := defaultOptions()
+	o.OnWritable = func(*Conn) { writable.Add(1) }
+	h := newHarness(t, o, &fakeCore{})
+	if ack := h.connect(packet.V5, nil); ack.ReasonCode != packet.Success {
+		t.Fatal(ack)
+	}
+	began := time.Now()
+	accepted, busy := 0, 0
+	for i := 0; i < 200; i++ {
+		switch err := h.conn.Offer(&packet.Pubrel{Ack: packet.Ack{PacketID: uint16(i + 1)}}); err {
+		case nil:
+			accepted++
+		case ErrBusy:
+			busy++
+		default:
+			t.Fatalf("offer %d: %v", i, err)
+		}
+	}
+	if took := time.Since(began); took > time.Second {
+		t.Fatalf("200 offers to a client that reads nothing took %v", took)
+	}
+	if accepted < 32 || busy == 0 || busy != 200-accepted {
+		t.Fatalf("%d accepted and %d busy: want the queue's worth accepted and the rest busy", accepted, busy)
+	}
+	for i := 0; i < accepted; i++ {
+		if p := h.readWithin(2 * time.Second); p.Type() != packet.PUBREL {
+			t.Fatalf("read %d: %+v", i, p)
+		}
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for writable.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if writable.Load() == 0 {
+		t.Fatal("OnWritable was not called once the client read the queue")
+	}
+	h.conn.Close(packet.Success)
+	if err := h.conn.Offer(&packet.Pubrel{Ack: packet.Ack{PacketID: 999}}); err != ErrClosed {
+		t.Fatalf("an offer after Close: %v, want ErrClosed", err)
 	}
 }
 

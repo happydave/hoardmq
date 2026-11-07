@@ -207,6 +207,8 @@ func checkCapabilities(m Module) string {
 		{CapTraces, is[TraceProvider](m), "traces"},
 		{CapPublishAccepted, is[PublishAccepted](m), "publish-accepted"},
 		{CapPublishAdmission, is[PublishAdmission](m), "publish-admission"},
+		{CapUnsubscribe, is[UnsubscribeInterceptor](m), "unsubscribe"},
+		{CapCluster, is[ClusterListener](m), "cluster"},
 	}
 	for _, ch := range checks {
 		declared := caps.Has(ch.c)
@@ -225,8 +227,8 @@ func is[T any](m Module) bool {
 	return ok
 }
 
-// Start starts every module in order; on failure the started ones are
-// stopped in reverse and the error returned.
+// Start starts every module in order, then the cluster event workers; on
+// failure the started modules are stopped in reverse and the error returned.
 func (r *Registry) Start(ctx context.Context) error {
 	for i, e := range r.modules {
 		if err := e.m.Start(ctx); err != nil {
@@ -236,11 +238,14 @@ func (r *Registry) Start(ctx context.Context) error {
 			return fmt.Errorf("module %s: %w", e.id, err)
 		}
 	}
+	r.hooks.startCluster()
 	return nil
 }
 
-// Stop stops every module in reverse order and returns the first error.
+// Stop stops the cluster event workers, dropping and counting what they
+// hold, then every module in reverse order, and returns the first error.
 func (r *Registry) Stop(ctx context.Context) error {
+	r.hooks.stopCluster()
 	var first error
 	for i := len(r.modules) - 1; i >= 0; i-- {
 		if err := r.modules[i].m.Stop(ctx); err != nil && first == nil {
@@ -339,7 +344,7 @@ func isCertificate(m Module) bool {
 }
 
 // Mechanism returns the enabled module providing an enhanced-authentication
-// method.
+// method, naming that module (auth.AdmitterOf).
 func (r *Registry) Mechanism(method string) (auth.Mechanism, bool) {
 	r.hooks.mu.RLock()
 	defer r.hooks.mu.RUnlock()
@@ -350,7 +355,7 @@ func (r *Registry) Mechanism(method string) (auth.Mechanism, bool) {
 		}
 		for _, name := range mech.Methods() {
 			if name == method {
-				return mech, true
+				return namedMechanism{Mechanism: mech, id: string(e.id)}, true
 			}
 		}
 	}
@@ -407,11 +412,23 @@ func (r *Registry) Tracer() *otel.Tracer {
 	return nil
 }
 
+// namedMechanism is a mechanism with the identifier of its module.
+type namedMechanism struct {
+	auth.Mechanism
+	id string
+}
+
+// AdmitterID names the module as registered.
+func (n namedMechanism) AdmitterID() string { return n.id }
+
 // gated wraps an authenticator so a disabled module passes.
 type gated struct {
 	e *entry
 	a auth.Authenticator
 }
+
+// AdmitterID names the module as registered.
+func (g gated) AdmitterID() string { return string(g.e.id) }
 
 func (g gated) Authenticate(ctx context.Context, req *auth.Request) auth.Result {
 	if !g.e.enabled.Load() {

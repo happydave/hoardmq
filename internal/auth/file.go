@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 
@@ -114,11 +115,14 @@ func (f *FileAuthenticator) Authenticate(_ context.Context, req *Request) Result
 //	{"rules": [{"principal": {"username": "u"}, "topic": "devices/${clientid}/#", "allow": ["publish", "subscribe"]}]}
 //
 // A rule applies when every stated principal member matches the identity and
-// the topic filter, after template substitution, matches the request topic.
+// the topic filter, after template substitution (${clientid}, ${username},
+// ${cn}, ${attr.<name>}), matches the request topic.
 // The first applicable rule that mentions the action decides; "deny" lists
 // refuse, "allow" lists grant. No applicable rule passes. A rule whose
-// template value is empty or contains a wildcard or level separator is not
-// applicable to that identity.
+// template value is empty or contains a wildcard or level separator, or
+// names an attribute the identity was not given, is not applicable to that
+// identity. A template only fills in a topic; an attribute grants nothing by
+// itself.
 type FileAuthorizer struct {
 	path  string
 	mu    sync.RWMutex
@@ -178,7 +182,10 @@ func parseACL(data []byte) ([]aclRule, error) {
 		if r.Topic == "" {
 			return nil, fmt.Errorf("rules[%d]: topic is empty", i)
 		}
-		if msg := topic.ValidateFilter(substitute(r.Topic, &Identity{ClientID: "x", Username: "x", CertCN: "x"})); msg != "" {
+		if strings.Contains(templatePattern.ReplaceAllString(r.Topic, ""), "${attr.") {
+			return nil, fmt.Errorf("rules[%d]: an attribute template is ${attr.<name>}, a name of letters, digits, '.', '_' or '-'", i)
+		}
+		if msg := topic.ValidateFilter(substitute(r.Topic, checkIdentity(r.Topic))); msg != "" {
 			return nil, fmt.Errorf("rules[%d]: %s", i, msg)
 		}
 		if len(r.Allow) == 0 && len(r.Deny) == 0 {
@@ -205,25 +212,56 @@ func parseAction(s string) (Action, bool) {
 	return 0, false
 }
 
-// substitute replaces ${clientid}, ${username} and ${cn} in a rule topic.
+// templatePattern finds every template in a rule topic: ${clientid},
+// ${username}, ${cn} and ${attr.<name>}, an authenticator's attribute.
+var templatePattern = regexp.MustCompile(`\$\{(clientid|username|cn|attr\.[A-Za-z0-9_.-]+)\}`)
+
+// templateValue is the identity's value for one template's name, and
+// whether it has one; an attribute it was not given has none.
+func templateValue(name string, id *Identity) (string, bool) {
+	switch name {
+	case "clientid":
+		return id.ClientID, true
+	case "username":
+		return id.Username, true
+	case "cn":
+		return id.CertCN, true
+	}
+	v, ok := id.Attributes[strings.TrimPrefix(name, "attr.")]
+	return v, ok
+}
+
+// substitute replaces every template in a rule topic in one pass, so a value
+// is never read again as a template.
 func substitute(pattern string, id *Identity) string {
-	r := strings.NewReplacer("${clientid}", id.ClientID, "${username}", id.Username, "${cn}", id.CertCN)
-	return r.Replace(pattern)
+	return templatePattern.ReplaceAllStringFunc(pattern, func(m string) string {
+		v, _ := templateValue(m[2:len(m)-1], id)
+		return v
+	})
 }
 
 // templateUsable reports whether every template the pattern uses has a
-// usable value, so that no identity member can widen a rule.
+// usable value, so that no identity member, and no missing attribute, can
+// widen a rule.
 func templateUsable(pattern string, id *Identity) bool {
-	if strings.Contains(pattern, "${clientid}") && !templateValueUsable(id.ClientID) {
-		return false
-	}
-	if strings.Contains(pattern, "${username}") && !templateValueUsable(id.Username) {
-		return false
-	}
-	if strings.Contains(pattern, "${cn}") && !templateValueUsable(id.CertCN) {
-		return false
+	for _, m := range templatePattern.FindAllStringSubmatch(pattern, -1) {
+		if v, ok := templateValue(m[1], id); !ok || !templateValueUsable(v) {
+			return false
+		}
 	}
 	return true
+}
+
+// checkIdentity stands for every identity when a rule's topic is validated:
+// each template, attributes included, as a plain value.
+func checkIdentity(pattern string) *Identity {
+	id := &Identity{ClientID: "x", Username: "x", CertCN: "x", Attributes: map[string]string{}}
+	for _, m := range templatePattern.FindAllStringSubmatch(pattern, -1) {
+		if name, ok := strings.CutPrefix(m[1], "attr."); ok {
+			id.Attributes[name] = "x"
+		}
+	}
+	return id
 }
 
 // templateValueUsable reports whether a value can stand in a rule topic as

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/happydave/hoardmq/internal/message"
+	"github.com/happydave/hoardmq/internal/store"
 )
 
 // Subscription is one filter a session holds, with its options.
@@ -30,6 +31,9 @@ type Match struct {
 	Group             string
 }
 
+// RetainedEntry is one held retained topic (store.RetainedEntry).
+type RetainedEntry = store.RetainedEntry
+
 // Router maps topics to subscribers and holds retained messages. The
 // dispatch package implements it with the trie; the exact-match router here
 // serves this package's tests.
@@ -48,16 +52,46 @@ type Router interface {
 	Match(msg *message.Message, publisher *Session) []Match
 	// MatchGroup chooses a member of a shared group other than exclude.
 	MatchGroup(namespace, group string, msg *message.Message, exclude *Session) (Match, bool)
-	// Retain stores or, for an empty payload, removes a retained message.
+	// Retain stores a retained message unversioned or, for an empty payload,
+	// removes whatever the topic holds: a copy drop.
 	Retain(msg *message.Message)
+	// RetainUnder is Retain for a new unversioned write: it stores nothing
+	// over a topic holding a versioned entry (store.UnversionedRefused), nor a
+	// message that would add a topic to a namespace already holding limit
+	// topics (0 is none), and reports why it did not store it.
+	RetainUnder(msg *message.Message, limit int) store.RetainRefusal
 	// RetainedFor returns the live retained messages a filter matches.
 	RetainedFor(namespace, filter string, now time.Time) []*message.Message
 	// Sweep drops expired retained messages.
 	Sweep(now time.Time)
-	// AllRetained lists every retained message, for snapshots.
+	// AllRetained lists every retained message held, tombstones left out.
 	AllRetained() []*message.Message
-	// LoadRetained installs retained messages recovered from a store.
-	LoadRetained([]*message.Message)
+	// RetainStamped installs a leader's client write or clear (an empty
+	// payload) stamped (epoch, the router's next number) in one critical
+	// section, unless it would add a topic past limit; a tombstone counts as
+	// a held topic. It returns the version and whether it installed.
+	RetainStamped(msg *message.Message, epoch uint64, limit int) (store.Version, bool)
+	// MergeRetained installs a copy (a tombstone when its payload is empty) at
+	// a version by store.MergeRetained, handOver on a hand-over or hand-on
+	// path, and reports whether it did, with what is held after. An empty
+	// payload at the zero Version is a copy drop, outside merge.
+	MergeRetained(msg *message.Message, v store.Version, handOver bool) (bool, RetainedEntry)
+	// MarkRetainedAppended records the journal's append count at a topic's
+	// record, while its entry is still msg at v.
+	MarkRetainedAppended(msg *message.Message, v store.Version, count uint64)
+	// HeldRetained is what is held for a topic, tombstone included.
+	HeldRetained(ns, topic string) (RetainedEntry, bool)
+	// DropTombstoneIf removes a topic's tombstone only while it is the one
+	// at v.
+	DropTombstoneIf(ns, topic string, v store.Version) bool
+	// RetainedEntries lists every held entry, tombstones included.
+	RetainedEntries() []RetainedEntry
+	// SeedRetainedVersion makes later stamps take numbers above n.
+	SeedRetainedVersion(n uint64)
+	// SweepLeading drops expired retained messages: on a shard this node
+	// leads (leads gives the epoch) each becomes a fresh-stamped tombstone,
+	// returned for the caller to journal; elsewhere it is removed here alone.
+	SweepLeading(now time.Time, leads func(ns, topic string) (uint64, bool)) []RetainedEntry
 }
 
 type routeKey struct{ ns, filter string }
@@ -67,11 +101,148 @@ type routeKey struct{ ns, filter string }
 type exactRouter struct {
 	mu       sync.RWMutex
 	routes   map[routeKey]map[*Session]Subscription
-	retained map[routeKey]*message.Message
+	retained map[routeKey]*message.Message // a tombstone has an empty payload
+	vers     map[routeKey]store.Version
+	appended map[routeKey]uint64
+	n        uint64
 }
 
 func newExactRouter() *exactRouter {
-	return &exactRouter{routes: map[routeKey]map[*Session]Subscription{}, retained: map[routeKey]*message.Message{}}
+	return &exactRouter{routes: map[routeKey]map[*Session]Subscription{}, retained: map[routeKey]*message.Message{},
+		vers: map[routeKey]store.Version{}, appended: map[routeKey]uint64{}}
+}
+
+// putLocked stores m at v. The lock is held.
+func (r *exactRouter) putLocked(m *message.Message, v store.Version) {
+	k := routeKey{m.Namespace, m.Topic}
+	r.retained[k] = m
+	if v.Zero() {
+		delete(r.vers, k)
+	} else {
+		r.vers[k] = v
+	}
+	delete(r.appended, k)
+}
+
+func (r *exactRouter) dropLocked(k routeKey) {
+	delete(r.retained, k)
+	delete(r.vers, k)
+	delete(r.appended, k)
+}
+
+func (r *exactRouter) heldLocked(k routeKey) (RetainedEntry, bool) {
+	m, ok := r.retained[k]
+	if !ok {
+		return RetainedEntry{}, false
+	}
+	return RetainedEntry{Msg: m, RV: r.vers[k], Tombstone: len(m.Payload) == 0, Appended: r.appended[k]}, true
+}
+
+func (r *exactRouter) RetainStamped(msg *message.Message, epoch uint64, limit int) (store.Version, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	k := routeKey{msg.Namespace, msg.Topic}
+	if _, holds := r.retained[k]; !holds && limit > 0 {
+		held := 0
+		for rk := range r.retained {
+			if rk.ns == msg.Namespace {
+				held++
+			}
+		}
+		if held >= limit {
+			return store.Version{}, false
+		}
+	}
+	r.n++
+	v := store.Version{E: epoch, N: r.n}
+	r.putLocked(msg, v)
+	return v, true
+}
+
+func (r *exactRouter) MergeRetained(msg *message.Message, v store.Version, handOver bool) (bool, RetainedEntry) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	k := routeKey{msg.Namespace, msg.Topic}
+	if len(msg.Payload) == 0 && v.Zero() {
+		r.dropLocked(k)
+		return true, RetainedEntry{}
+	}
+	cur, exists := r.heldLocked(k)
+	if !store.MergeRetained(cur.RV, exists, v, handOver) {
+		return false, cur
+	}
+	if v.N > r.n {
+		r.n = v.N
+	}
+	r.putLocked(msg, v)
+	after, _ := r.heldLocked(k)
+	return true, after
+}
+
+func (r *exactRouter) MarkRetainedAppended(msg *message.Message, v store.Version, count uint64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	k := routeKey{msg.Namespace, msg.Topic}
+	if r.retained[k] == msg && r.vers[k] == v {
+		r.appended[k] = count
+	}
+}
+
+func (r *exactRouter) HeldRetained(ns, topic string) (RetainedEntry, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.heldLocked(routeKey{ns, topic})
+}
+
+func (r *exactRouter) DropTombstoneIf(ns, topic string, v store.Version) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	k := routeKey{ns, topic}
+	if m, ok := r.retained[k]; !ok || len(m.Payload) != 0 || r.vers[k] != v {
+		return false
+	}
+	r.dropLocked(k)
+	return true
+}
+
+func (r *exactRouter) RetainedEntries() []RetainedEntry {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]RetainedEntry, 0, len(r.retained))
+	for k := range r.retained {
+		e, _ := r.heldLocked(k)
+		out = append(out, e)
+	}
+	return out
+}
+
+func (r *exactRouter) SeedRetainedVersion(n uint64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if n > r.n {
+		r.n = n
+	}
+}
+
+func (r *exactRouter) SweepLeading(now time.Time, leads func(string, string) (uint64, bool)) []RetainedEntry {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var stamped []RetainedEntry
+	for k, m := range r.retained {
+		if len(m.Payload) == 0 || !m.Expired(now) {
+			continue
+		}
+		if epoch, ok := leads(k.ns, k.filter); ok && epoch > 0 {
+			r.n++
+			tomb := &message.Message{Namespace: k.ns, Topic: k.filter, Retain: true}
+			v := store.Version{E: epoch, N: r.n}
+			r.putLocked(tomb, v)
+			stamped = append(stamped, RetainedEntry{Msg: tomb, RV: v, Tombstone: true})
+			continue
+		}
+		r.dropLocked(k)
+	}
+	return stamped
 }
 
 func (r *exactRouter) Add(s *Session, sub Subscription) bool {
@@ -137,16 +308,43 @@ func (r *exactRouter) Retain(msg *message.Message) {
 	defer r.mu.Unlock()
 	k := routeKey{msg.Namespace, msg.Topic}
 	if len(msg.Payload) == 0 {
-		delete(r.retained, k)
+		r.dropLocked(k)
 		return
 	}
-	r.retained[k] = msg
+	r.putLocked(msg, store.Version{})
+}
+
+func (r *exactRouter) RetainUnder(msg *message.Message, limit int) store.RetainRefusal {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	k := routeKey{msg.Namespace, msg.Topic}
+	_, holds := r.retained[k]
+	if store.UnversionedRefused(r.vers[k], holds) {
+		return store.RetainVersionedHeld
+	}
+	if len(msg.Payload) > 0 && !holds && limit > 0 {
+		held := 0
+		for rk := range r.retained {
+			if rk.ns == msg.Namespace {
+				held++
+			}
+		}
+		if held >= limit {
+			return store.RetainOverLimit
+		}
+	}
+	if len(msg.Payload) == 0 {
+		r.dropLocked(k)
+		return store.RetainStored
+	}
+	r.putLocked(msg, store.Version{})
+	return store.RetainStored
 }
 
 func (r *exactRouter) RetainedFor(ns, filter string, now time.Time) []*message.Message {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	if m, ok := r.retained[routeKey{ns, filter}]; ok && !m.Expired(now) {
+	if m, ok := r.retained[routeKey{ns, filter}]; ok && len(m.Payload) > 0 && !m.Expired(now) {
 		return []*message.Message{m}
 	}
 	return nil
@@ -159,13 +357,9 @@ func (r *exactRouter) AllRetained() []*message.Message {
 	defer r.mu.RUnlock()
 	out := make([]*message.Message, 0, len(r.retained))
 	for _, m := range r.retained {
-		out = append(out, m)
+		if len(m.Payload) > 0 {
+			out = append(out, m)
+		}
 	}
 	return out
-}
-
-func (r *exactRouter) LoadRetained(ms []*message.Message) {
-	for _, m := range ms {
-		r.Retain(m)
-	}
 }

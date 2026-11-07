@@ -121,8 +121,7 @@ func TestDefectForgetInbound(t *testing.T) {
 // in time and answers an error PUBREC, the scenario must not retransmit into an
 // exchange that has ended. Forward acknowledgements from the subscriber's node
 // are held past the acknowledgement timeout for two seconds, so the first
-// attempts fail and a later one succeeds; the sound build reports no duplicate
-// (WI 1486).
+// attempts fail and a later one succeeds; the sound build reports no duplicate.
 func TestForgetInboundScenarioUnderLoad(t *testing.T) {
 	c := New(t, Options{})
 	delayForwardAcks := func(c *Cluster) {
@@ -149,7 +148,7 @@ func TestForgetInboundScenarioUnderLoad(t *testing.T) {
 // have routed the message it could not confirm. Retransmitting into that ended
 // exchange is a new publish, and its second delivery is the protocol working,
 // not the defect: so an errored attempt stops there and the scenario tries
-// again with a new identifier and sequence number (WI 1486).
+// again with a new identifier and sequence number.
 func forgetInboundScenario(afterRoute func(*Cluster), erroredOut *[]string) func(t *testing.T, c *Cluster) Evidence {
 	return func(t *testing.T, c *Cluster) Evidence {
 		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
@@ -201,7 +200,7 @@ func forgetInboundScenario(afterRoute func(*Cluster), erroredOut *[]string) func
 		}
 		// Attempts continue for a time budget rather than a count: under the
 		// whole-module gate's contention the harness's 1 s barrier has been
-		// seen to fail five times running (WI 1487).
+		// seen to fail five times running.
 		budget := time.Now().Add(20 * time.Second)
 		var errored []string
 		accepted := false
@@ -792,7 +791,7 @@ func staleCopyScenario(touch bool) func(t *testing.T, c *Cluster) Evidence {
 			// When n4 returns n2 stops holding the shard, so its copy is
 			// handed over. Which holder the takeover then reads no longer
 			// decides the outcome: a holder the owner replicates nothing to
-			// has no copy to be read (WI 1569), so the screen that pinned
+			// has no copy to be read, so the screen that pinned
 			// this scenario to the fed holder is gone.
 			if back.Holds(s, n2.Name) {
 				continue
@@ -1032,9 +1031,9 @@ func unfedCopyScenario() func(t *testing.T, c *Cluster) Evidence {
 		// owner, so the takeover looks at n1 rather than at the holder the
 		// owner was feeding; and the lease has not yet expired, so no
 		// adoption has claimed it for n1 — which would drop the copy this
-		// control is about, since an owner holds no copy of its own session
-		// (WI 1293). So the subscriber returns as soon as the map has moved,
-		// without waiting out the lease.
+		// control is about, since an owner holds no copy of its own session.
+		// So the subscriber returns as soon as the map has moved, without
+		// waiting out the lease.
 		waitBasisWithout(t, c, n3.Name, 30*time.Second)
 		sctx, scancel := context.WithTimeout(ctx, 30*time.Second)
 		// The subscriber returns on n1 — the holder whose copy this is about,
@@ -1126,8 +1125,8 @@ func waitReplicaCopy(t *testing.T, n *Node, id string, entries int, bound time.D
 // settleHandOver gives a map change's hand-over, or the drop that replaces it,
 // time to finish: it returns as soon as the node holds no copy of the session,
 // and otherwise waits out the bound. It does not require the copy to be gone —
-// a hand-over its holders do not acknowledge in time is kept by design
-// (WI 1289) — only that the scenario does not race it.
+// a hand-over its holders do not acknowledge in time is kept by design —
+// only that the scenario does not race it.
 func settleHandOver(n *Node, id string, bound time.Duration) {
 	deadline := time.Now().Add(bound)
 	for replicaCopy(n, id) != nil && time.Now().Before(deadline) {

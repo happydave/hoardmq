@@ -35,6 +35,12 @@ type Control struct {
 	// every other filter's QoS to 0.
 	RefuseFilter string
 	LowerQoS     bool
+	// RefuseUnsubscribe is refused on unsubscribe with reason 0x87.
+	RefuseUnsubscribe string
+	// AuthResult is every authentication's answer; the zero value passes.
+	AuthResult auth.Result
+	// MechAttributes are attached by a success of the mechanism Method.
+	MechAttributes map[string]string
 	// AdmitOutcome is returned by the publish admission check for every
 	// PUBLISH whose payload equals AdmitTrigger; others are admitted.
 	AdmitTrigger string
@@ -91,6 +97,7 @@ func Register() {
 
 type mod struct {
 	c       *Control
+	node    string
 	enabled bool
 	started bool
 }
@@ -99,9 +106,10 @@ func (*mod) ID() module.ID { return ID }
 func (*mod) Capabilities() module.Capability {
 	return module.CapConnection | module.CapAuthentication | module.CapAuthorization | module.CapInbound |
 		module.CapOutbound | module.CapSubscribe | module.CapDelivery | module.CapRetained | module.CapWill |
-		module.CapPublishAccepted | module.CapPublishAdmission
+		module.CapPublishAccepted | module.CapPublishAdmission | module.CapUnsubscribe | module.CapCluster |
+		module.CapMechanism
 }
-func (m *mod) Provision(_ *module.Context, raw json.RawMessage) error {
+func (m *mod) Provision(ctx *module.Context, raw json.RawMessage) error {
 	var cfg struct {
 		Fail bool `json:"fail"`
 	}
@@ -112,6 +120,7 @@ func (m *mod) Provision(_ *module.Context, raw json.RawMessage) error {
 		return fmt.Errorf("configured to fail provisioning")
 	}
 	m.enabled = true
+	m.node = ctx.Node
 	return nil
 }
 func (m *mod) Start(context.Context) error { m.started = true; m.c.record("start"); return nil }
@@ -133,11 +142,35 @@ func (m *mod) pause() {
 
 func (m *mod) Authenticate(context.Context, *auth.Request) auth.Result {
 	m.c.record("authenticate")
-	return auth.Result{Decision: auth.Pass}
+	m.c.mu.Lock()
+	defer m.c.mu.Unlock()
+	return m.c.AuthResult
 }
 
-func (m *mod) Authorize(context.Context, auth.Action, string, *auth.Identity) auth.Decision {
-	m.c.record("authorize")
+// Method is the test module's enhanced-authentication method: one step that
+// succeeds as the CONNECT's username.
+const Method = "TEST-ATTR"
+
+func (m *mod) Methods() []string { return []string{Method} }
+
+func (m *mod) Begin(_ context.Context, _ string, req *auth.Request) auth.Exchange {
+	m.c.record("mechanism " + req.Username)
+	m.c.mu.Lock()
+	defer m.c.mu.Unlock()
+	return exchange{user: req.Username, attrs: m.c.MechAttributes}
+}
+
+type exchange struct {
+	user  string
+	attrs map[string]string
+}
+
+func (x exchange) Step([]byte) auth.Step {
+	return auth.Step{Kind: auth.Succeed, Username: x.user, Attributes: x.attrs}
+}
+
+func (m *mod) Authorize(_ context.Context, action auth.Action, topic string, _ *auth.Identity) auth.Decision {
+	m.c.record("authorize " + action.String() + " " + topic)
 	return auth.Pass
 }
 
@@ -150,12 +183,14 @@ func (m *mod) Disconnected(_ context.Context, info module.ConnectionInfo, reason
 }
 
 func (m *mod) InterceptInbound(_ context.Context, info module.ConnectionInfo, p packet.Packet) module.Outcome {
-	m.c.record("inbound " + p.Type().String())
-	m.pause()
 	pub, ok := p.(*packet.Publish)
 	if !ok {
+		m.c.record("inbound " + p.Type().String())
+		m.pause()
 		return module.OK
 	}
+	m.c.record(fmt.Sprintf("inbound %s %q id=%d dup=%v", p.Type(), pub.Topic, pub.PacketID, pub.Dup))
+	m.pause()
 	m.c.mu.Lock()
 	defer m.c.mu.Unlock()
 	if m.c.Trigger == "" || string(pub.Payload) != m.c.Trigger {
@@ -205,6 +240,23 @@ func (m *mod) OnWill(_ context.Context, ns, id string, msg *message.Message) {
 
 func (m *mod) OnPublishAccepted(_ context.Context, source module.PublishSource, msg *message.Message) {
 	m.c.record(fmt.Sprintf("accepted %s %s %d", source, msg.Topic, msg.QoS))
+}
+
+func (m *mod) InterceptUnsubscribe(_ context.Context, _ module.ConnectionInfo, filter string) module.Outcome {
+	m.c.record("unsubscribe " + filter)
+	m.c.mu.Lock()
+	defer m.c.mu.Unlock()
+	if m.c.RefuseUnsubscribe != "" && filter == m.c.RefuseUnsubscribe {
+		return module.Outcome{Action: module.Drop, Reason: packet.NotAuthorized}
+	}
+	return module.OK
+}
+
+// OnClusterEvent records the event as the node it was raised on saw it,
+// every field of it, and whether its time was set.
+func (m *mod) OnClusterEvent(_ context.Context, ev module.ClusterEvent) {
+	m.c.record(fmt.Sprintf("cluster at=%s %s member=%s ns=%s id=%s from=%s to=%s timed=%v",
+		m.node, ev.Kind, ev.Member, ev.Namespace, ev.ClientID, ev.From, ev.To, !ev.Time.IsZero()))
 }
 
 func (m *mod) AdmitPublish(_ context.Context, _ module.ConnectionInfo, msg *message.Message) module.Outcome {

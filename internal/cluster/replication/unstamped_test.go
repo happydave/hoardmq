@@ -18,7 +18,7 @@ func unstamped(sinks map[string]*counters, node, typ string) float64 {
 // TestSessionRecordWithoutALeaseEpochIsReported: a session record written
 // with no epoch, while this node's lease table holds one for the client, is
 // counted and named — the anomaly behind a follower's stale-epoch refusal of
-// a record its own owner wrote (WI 1570).
+// a record its own owner wrote.
 func TestSessionRecordWithoutALeaseEpochIsReported(t *testing.T) {
 	h, sinks := withCounters(t, []string{"n1", "n2"}, 2, 2)
 	h.applyMap(shardmap.Compute(1, h.order, 2, 2))
@@ -40,7 +40,7 @@ func TestSessionRecordWithoutALeaseEpochIsReported(t *testing.T) {
 // TestStampedSessionRecordCostsNoLeaseLookup: the report above is the only
 // reason the fan-out reads the lease table, and it reads it for an unstamped
 // record alone — the lookup is on the path every write takes, and its lock is
-// the one a takeover storm starves (WI 1292).
+// the one a takeover storm starves.
 func TestStampedSessionRecordCostsNoLeaseLookup(t *testing.T) {
 	h, _ := withCounters(t, []string{"n1", "n2"}, 2, 2)
 	h.applyMap(shardmap.Compute(1, h.order, 2, 2))

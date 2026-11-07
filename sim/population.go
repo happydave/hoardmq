@@ -34,10 +34,9 @@ type population interface {
 }
 
 // popSample is one reading of the clients: how many hold an accepted
-// connection, how many are recovered (WI 1618 — online with every held filter
-// granted on the connection they are on now), and the refusals and failed
-// connects since the mark. At is when the reading was known, on the test's
-// clock.
+// connection, how many are recovered (online with every held filter granted
+// on the connection they are on now), and the refusals and failed connects
+// since the mark. At is when the reading was known, on the test's clock.
 //
 // There is no "back" flag: whether the cluster has recovered is a statement
 // about a series of readings rather than about one of them, and holdWatch
@@ -62,7 +61,7 @@ type popSummary struct {
 	// and SubRefusedClients how many clients suffered at least one. A client
 	// whose resubscribe was refused is online and receives nothing, so the two
 	// figures are what says whether "recovered" means what the headline
-	// implies (WI 1509). One client refused fifty times and fifty clients
+	// implies. One client refused fifty times and fifty clients
 	// refused once are different failures and a total cannot separate them.
 	SubRefusals       int64
 	SubRefusedClients int
@@ -70,7 +69,7 @@ type popSummary struct {
 	// the broker had none, since the mark, and SessionLostClients how many
 	// clients suffered one. The resubscribe that follows hides the event, so
 	// without these a run that rebuilt sessions empty reads exactly like one
-	// that did not (WI 1653).
+	// that did not.
 	SessionLost        int64
 	SessionLostClients int
 	// SessionLostSample names up to sessionLostSampleCap of those clients.
@@ -80,8 +79,8 @@ type popSummary struct {
 	SubDowngraded int64
 	// DropCauses splits Drops by what ended the connection, in the same order
 	// as dropCauseNames. Without it `drops` is a count with no cause attached,
-	// which is what made WI 1495's excess drops uninterpretable from the
-	// artifact alone.
+	// which is what made the excess drops after a leader crash
+	// uninterpretable from the artifact alone.
 	DropCauses [dropCauseCount]int64
 }
 

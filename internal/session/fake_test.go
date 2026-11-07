@@ -23,6 +23,11 @@ type fakeConn struct {
 	// busy answers every delivery ErrBusy, as a connection whose outbound
 	// queue is full does.
 	busy bool
+	// stall, while set, holds a Send until it is closed and answers an
+	// Offer ErrBusy, as a connection whose writer is stuck does; offered
+	// receives each control packet Send or Offer is asked for.
+	stall   chan struct{}
+	offered chan packet.Packet
 }
 
 func newFake(id string, v packet.Version, quota int) *fakeConn {
@@ -52,7 +57,32 @@ func (f *fakeConn) Deliver(p *packet.Publish) error {
 
 func (f *fakeConn) Send(p packet.Packet) error {
 	f.mu.Lock()
+	stall, offered := f.stall, f.offered
+	f.mu.Unlock()
+	if offered != nil {
+		offered <- p
+	}
+	if stall != nil {
+		<-stall
+	}
+	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.sent = append(f.sent, p)
+	return nil
+}
+
+func (f *fakeConn) Offer(p packet.Packet) error {
+	f.mu.Lock()
+	stall, offered := f.stall, f.offered
+	f.mu.Unlock()
+	if offered != nil {
+		offered <- p
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.busy || stall != nil {
+		return conn.ErrBusy
+	}
 	f.sent = append(f.sent, p)
 	return nil
 }

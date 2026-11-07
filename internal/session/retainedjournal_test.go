@@ -21,13 +21,13 @@ func TestInjectRetainedReportsAFailedAppend(t *testing.T) {
 	metrics := &seriesMetrics{}
 	m, d, _ := journaledManager(t, func(o *Options) { o.Metrics = metrics })
 	d.FailNext(1)
-	if m.InjectRetained(retained("a")) {
+	if durable, _ := m.InjectRetained(retained("a")); durable {
 		t.Fatal("a retained write whose record failed to append reported durable")
 	}
 	if n := failedAppends(metrics); n != 1 {
 		t.Fatalf("the failed append counted %v, want 1", n)
 	}
-	if !m.InjectRetained(retained("b")) {
+	if durable, _ := m.InjectRetained(retained("b")); !durable {
 		t.Fatal("a retained write with no fault reported not durable")
 	}
 }
@@ -47,14 +47,14 @@ func TestInjectRetainedReportsAFailedSync(t *testing.T) {
 		o.Metrics = metrics
 	})
 	d.FailNext(1)
-	if m.InjectRetained(retained("a")) {
+	if durable, _ := m.InjectRetained(retained("a")); durable {
 		t.Fatal("a retained write whose sync failed reported durable")
 	}
 	snap := metrics.snapshot()
 	if snap[seriesKey("hoardmq_journal_failures_total", opSync)] != 1 || snap[seriesKey("hoardmq_journal_failures_total", opAppend)] != 0 {
 		t.Fatalf("precondition: want one failed sync and no failed append, have %v", snap)
 	}
-	if !m.InjectRetained(retained("b")) {
+	if durable, _ := m.InjectRetained(retained("b")); !durable {
 		t.Fatal("a retained write with no fault reported not durable")
 	}
 }

@@ -158,7 +158,14 @@ func (m *Manager) publish(c Connection, p *packet.Publish, sp otel.Span) (code p
 	}
 	// A record the publish wrote into another session reports its failure
 	// here, not on that session: this acknowledgement claims it.
-	matched, unjournaled := m.dispatch(msg, s, into, p.QoS > 0)
+	source := sourceClient
+	if p.QoS == 0 {
+		source = sourceClientQoS0
+	}
+	matched, unjournaled, refusal := m.dispatch(msg, s, into, p.QoS > 0, source)
+	if refusal != 0 {
+		return refusal, s, a, opened, nil
+	}
 	if sp.Recording() {
 		sp.Int("hoardmq.matched", int64(matched))
 	}
@@ -187,6 +194,22 @@ func (m *Manager) publish(c Connection, p *packet.Publish, sp otel.Span) (code p
 		return packet.NoMatchingSubscribers, s, a, opened, msg
 	}
 	return packet.Success, s, a, opened, msg
+}
+
+// InboundOpen reports whether c's session holds the inbound QoS 2 identifier
+// open, in any state: a PUBLISH under it goes to publishAgain.
+func (m *Manager) InboundOpen(c Connection, id uint16) bool {
+	if m.opts.ForgetInboundQoS2 {
+		return false
+	}
+	s := m.lookup(c)
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, open := s.inboundQoS2[id]
+	return open
 }
 
 // inboundAttempt is the state of an open inbound QoS 2 identifier.
@@ -706,7 +729,7 @@ func (m *Manager) Subscribed(c Connection) {
 				qos = req.qos
 			}
 			l := m.limits.Load()
-			s.deliver(r, target{qos: qos, ids: req.ids, retain: true}, now, l.MaxQueued, l.DropNewest, m.writer())
+			s.deliver(r, target{qos: qos, ids: req.ids, retain: true}, now, l, m.writer())
 		}
 	}
 	s.mu.Unlock()
@@ -754,7 +777,7 @@ func (m *Manager) Unsubscribe(c Connection, p *packet.Unsubscribe) []packet.Reas
 func (m *Manager) Disconnect(c Connection, graceful bool, _ packet.ReasonCode, willWanted bool) {
 	// The gate before the shard lock, never under it: this path journals,
 	// and waiting for the store while holding a shard would rebuild the
-	// convoy sharding removes, one shard at a time (WI 1292 round 5, I6).
+	// convoy sharding removes, one shard at a time.
 	release := m.admit()
 	defer release()
 	sh := m.shardForConn(c)

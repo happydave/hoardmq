@@ -15,17 +15,21 @@ import (
 
 func TestShouldDropCopy(t *testing.T) {
 	for _, c := range []struct {
-		past, alive, acked bool
-		want               dropVerdict
+		past, alive, acked, lack bool
+		want                     dropVerdict
 	}{
-		{true, true, true, dropCopy},
-		{false, true, true, keepMapBehind},
-		{true, false, true, keepOwnerNotAlive},
-		{true, true, false, keepHandoverUnacknowledged},
-		{false, false, false, keepMapBehind},
+		{true, true, true, false, dropCopy},
+		{false, true, true, false, keepMapBehind},
+		{true, false, true, false, keepOwnerNotAlive},
+		{true, true, false, false, keepHandoverUnacknowledged},
+		{true, true, true, true, keepOwnerOnlyHolder},
+		{false, false, false, false, keepMapBehind},
+		{false, true, true, true, keepMapBehind},
+		{true, false, true, true, keepOwnerNotAlive},
+		{true, true, false, true, keepHandoverUnacknowledged},
 	} {
-		if got := shouldDropCopy(c.past, c.alive, c.acked); got != c.want {
-			t.Errorf("shouldDropCopy(%v, %v, %v) = %v, want %v", c.past, c.alive, c.acked, got, c.want)
+		if got := shouldDropCopy(c.past, c.alive, c.acked, c.lack); got != c.want {
+			t.Errorf("shouldDropCopy(%v, %v, %v, %v) = %v, want %v", c.past, c.alive, c.acked, c.lack, got, c.want)
 		}
 	}
 }

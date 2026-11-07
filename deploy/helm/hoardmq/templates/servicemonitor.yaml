@@ -1,0 +1,24 @@
+{{- if .Values.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "hoardmq.fullname" . }}
+  labels:
+    {{- include "hoardmq.labels" . | nindent 4 }}
+    {{- with .Values.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  # Both Services carry these labels; only the headless one has the
+  # observability port, so each pod is scraped once.
+  selector:
+    matchLabels:
+      {{- include "hoardmq.selectorLabels" . | nindent 6 }}
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  endpoints:
+    - port: observability
+      path: /metrics
+      interval: {{ .Values.serviceMonitor.interval }}
+{{- end }}

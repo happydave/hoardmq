@@ -17,7 +17,7 @@ type subscribeRefusal struct {
 // records. Client.Subscribe returns the error to its caller, but
 // Client.resubscribe — the path a reconnect takes, and the one a storm puts
 // every displaced client through — cannot wait for its acknowledgements, so
-// the event is the only trace either path leaves in the ledger (WI 1500).
+// the event is the only trace either path leaves in the ledger.
 func subscribeRefusals(events []Event) []subscribeRefusal {
 	var out []subscribeRefusal
 	for _, e := range events {

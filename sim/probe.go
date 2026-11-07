@@ -12,11 +12,12 @@ import (
 	"github.com/happydave/hoardmq/internal/packet"
 )
 
-// The failover measurement's publish probe (WI 1618).
+// The failover measurement's publish probe.
 //
 // The measurement publishes nothing, so a cluster in which every client is
-// back and every QoS 1 publish is refused read as recovered: WIs 1624 and
-// 1625 were both invisible to it. The probe is a small cohort of
+// back and every QoS 1 publish is refused read as recovered: publishes
+// refused after a lost node left the shard map, and after its sessions were
+// adopted elsewhere, were both invisible to it. The probe is a small cohort of
 // publisher/subscriber pairs that keeps publishing through the crash, the
 // storm and the hold, and reports what the broker answered — by reason code —
 // and whether what it acknowledged arrived.

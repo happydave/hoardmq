@@ -40,7 +40,7 @@ type dropTimeline struct {
 	MapReconciledSec map[string]float64 `json:"map_reconciled_sec,omitempty"`
 	// AdoptedSec is, per survivor, the first served check that found its
 	// own adoptions up to the victim's emptied index finished; ProposedSec
-	// when its served fact covering that index was committed (WI 1633).
+	// when its served fact covering that index was committed.
 	AdoptedSec  map[string]float64 `json:"adopted_sec,omitempty"`
 	ProposedSec map[string]float64 `json:"proposed_sec,omitempty"`
 	// CoverSec is, per survivor that took sessions in transit, when its
@@ -53,7 +53,7 @@ type dropTimeline struct {
 	ForgetLastHeld map[string]string `json:"forget_last_held,omitempty"`
 	InstantSec     *float64          `json:"instant_sec,omitempty"`
 	// DegradedSec is, per survivor, the seconds between the crash mark and
-	// the read in which it lacked an owner's routes (WI 1571).
+	// the read in which it lacked an owner's routes.
 	DegradedSec map[string]float64 `json:"degraded_sec,omitempty"`
 	Missing     []string           `json:"missing,omitempty"`
 }
@@ -342,7 +342,7 @@ func dropOrder(d *dropTimeline) string {
 func writeDropSection(w io.Writer, runs []runFile) {
 	p := func(format string, a ...any) { _, _ = fmt.Fprintf(w, format, a...) }
 	p("\n\n## The crashed node's drop from the shard map, and the forget, against the recovery instant\n\n")
-	p("Seconds after the harness's crash mark, from `drop_timeline` (WI 1791). Report-only: no verdict reads it.\n\n")
+	p("Seconds after the harness's crash mark, from `drop_timeline`. Report-only: no verdict reads it.\n\n")
 	p("| Run | Leader | Last renewal | Declaration proposed | Declaration applied | Map decided (check) | Map applied | Forgotten (last held) | Instant | Drop against the instant |\n")
 	p("|---|---|---|---|---|---|---|---|---|---|\n")
 	for _, r := range runs {
@@ -400,14 +400,14 @@ func servedProposals(after map[string]map[string]float64) map[string]float64 {
 	return out
 }
 
-// writeServedSection is failoverbounds' report of WI 1633's two points per
-// run: when each survivor's own adoptions up to the crashed node's emptied
-// index finished, and when it forgot the crashed node's routes, against the
+// writeServedSection is failoverbounds' report of two points per run: when
+// each survivor's own adoptions up to the crashed node's emptied index
+// finished, and when it forgot the crashed node's routes, against the
 // instant; and the served facts proposed. It judges nothing.
 func writeServedSection(w io.Writer, runs []runFile) {
 	p := func(format string, a ...any) { _, _ = fmt.Fprintf(w, format, a...) }
 	p("\n\n## Adoptions finished, served facts, and the forget, against the recovery instant\n\n")
-	p("Seconds after the harness's crash mark, from `drop_timeline` (WI 1633). *Adoptions finished* is each survivor's " +
+	p("Seconds after the harness's crash mark, from `drop_timeline`. *Adoptions finished* is each survivor's " +
 		"first served check that found its own adoptions up to the crashed node's emptied index done; *fact* when its " +
 		"served fact was committed; *proposals* the served facts its lease service proposed over the run, attempts " +
 		"included. Report-only.\n\n")

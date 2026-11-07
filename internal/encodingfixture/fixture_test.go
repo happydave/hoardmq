@@ -89,8 +89,8 @@ func encodings(t *testing.T) map[string][]byte {
 		func() error { return s.Complete(k, 12) },
 		func() error { return s.Dropped(k, 4) },
 		func() error { return s.Enqueue(k, store.Entry{Seq: 5, Message: m, QoS: 2, State: store.StateQueued}) },
-		func() error { return s.Retain(m) },
-		func() error { return s.RetainDelete("default", "plant/7/temp") },
+		func() error { return s.Retain(m, store.Version{}) },
+		func() error { return s.RetainDrop("default", "plant/7/temp") },
 		func() error { return s.SessionDelete(k) },
 	}
 	for i, step := range steps {

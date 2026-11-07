@@ -93,6 +93,9 @@ func (d *Decoder) readRaw() (Type, byte, []byte, int, error) {
 		}
 		multiplier *= 128
 	}
+	if n > 2 && d.hdr[n-1] == 0 {
+		return 0, 0, nil, -1, malformed("Remaining Length is not in its minimum number of bytes")
+	}
 	limit := uint32(MaxPacketSize)
 	if d.MaxPacketSize != 0 && d.MaxPacketSize < limit {
 		limit = d.MaxPacketSize

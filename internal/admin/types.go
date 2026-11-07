@@ -17,8 +17,10 @@ type Backend interface {
 	ScanClients(ctx context.Context, search, after, owner string, limit int) (items []ClientListItem, more bool, err error)
 	Client(id string) (ClientDetail, error)
 	Subscriptions(id string) ([]Subscription, error)
-	Disconnect(id string) error
-	Invalidate(ctx context.Context, id string) (Invalidated, error)
+	// Disconnect and Invalidate publish the client's Will when will is true,
+	// and drop it otherwise.
+	Disconnect(id string, will bool) error
+	Invalidate(ctx context.Context, id string, will bool) (Invalidated, error)
 	Matchers(topic string) []Matcher
 
 	Retained(filter, after string, limit int) (items []RetainedMessage, more bool)
@@ -29,6 +31,9 @@ type Backend interface {
 	Lease(id string) (Lease, error)
 	DrainStatus() DrainStatus
 	Drain() DrainStatus
+	// RemoveMember removes a consensus member. On a node that does not lead it
+	// answers a 409 naming the leader, which the route forwards there.
+	RemoveMember(ctx context.Context, node string) (MemberRemoval, error)
 
 	// RunningConfig is the running document as JSON, before redaction.
 	RunningConfig() ([]byte, error)
@@ -120,6 +125,12 @@ type Connection struct {
 	Username         string  `json:"username,omitempty"`
 	ProtocolVersion  int     `json:"protocolVersion"`
 	ConnectedSeconds float64 `json:"connectedSeconds"`
+	// KeepAlive is the keep alive in force, in seconds (0: none): the
+	// client's, or the server's limits.maxKeepAlive when it replaced the
+	// client's. RequestedKeepAlive is what the client's CONNECT asked for.
+	KeepAlive          int  `json:"keepAlive"`
+	RequestedKeepAlive int  `json:"requestedKeepAlive"`
+	CleanStart         bool `json:"cleanStart"`
 }
 
 // Lease is a client identifier's ownership record in the lease table.
@@ -219,6 +230,13 @@ type Member struct {
 	DeclaredDeadAt uint64 `json:"declaredDeadAt"`
 	ServedIndex    uint64 `json:"servedIndex"`
 	ServedRoutes   uint64 `json:"servedRoutes"`
+}
+
+// MemberRemoval is a removal's answer: the member removed and the members
+// after it.
+type MemberRemoval struct {
+	Node    string   `json:"node"`
+	Members []Member `json:"members"`
 }
 
 // FeatureLevel is the cluster's feature level, this build's, and the lowest

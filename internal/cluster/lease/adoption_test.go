@@ -275,7 +275,7 @@ func TestConnectConsultsAnAdoptionThatOvertookItsAcquire(t *testing.T) {
 // TestAdoptedStateIsImportedAtTheAdoptedEpoch: the state a worker fetches for
 // an adopted lease carries its previous owner's epoch; it is imported at the
 // epoch of the lease this node now holds, or every follower that has applied
-// the reassignment refuses the whole write (WI 1564).
+// the reassignment refuses the whole write.
 func TestAdoptedStateIsImportedAtTheAdoptedEpoch(t *testing.T) {
 	f := newAdoptionFixture(t, false)
 	if f.state.Epoch != 0 {

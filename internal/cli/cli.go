@@ -36,6 +36,7 @@ var verbs = []verb{
 	{name: "serve", summary: "validate the configuration and run the broker", run: runServe},
 	{name: "drain", summary: "ask a running node to leave gracefully (redirect clients, hand leases off, exit)", run: runDrain},
 	{name: "check", summary: "validate the configuration and report every problem", run: runCheck},
+	{name: "wal", summary: "verify a stopped node's logs and checkpoints, or make the repairs a start would (wal verify, wal repair)", run: runWal},
 	{name: "clients", summary: "list, search, inspect, disconnect and invalidate clients (admin API)", run: runAdminGroup("clients")},
 	{name: "retained", summary: "list and delete retained messages (admin API)", run: runAdminGroup("retained")},
 	{name: "cluster", summary: "cluster status, the shard map and a client's lease (admin API)", run: runAdminGroup("cluster")},
@@ -103,7 +104,7 @@ func usage(w io.Writer) {
 		fprintf(w, "  %-8s %s\n", v.name, v.summary)
 	}
 	fprintln(w)
-	fprintln(w, "serve and check take -config PATH (default $"+config.EnvConfig+", else "+config.DefaultPath+").")
+	fprintln(w, "serve, check and wal take -config PATH (default $"+config.EnvConfig+", else "+config.DefaultPath+").")
 	fprintln(w, "the admin API verbs take -admin HOST:PORT (default $"+config.EnvAdminAddress+", else "+DefaultAdminAddress+") and -token-file (default $"+config.EnvAdminToken+").")
 	fprintln(w, "exit codes: 0 ok, 1 configuration, start-up or API problem, 2 usage.")
 	fprintln(w, "environment overrides applied before validation:")
@@ -270,10 +271,17 @@ func runVersion(a *app, args []string) int {
 // binary, a dependency of one hoardmq-build compiled.
 const brokerModule = "github.com/happydave/hoardmq"
 
-// Version derives the version string from build information: the broker
-// module's version when set, else "devel" with the VCS revision when
-// embedded.
+// stampedVersion is set at link time, by the reference Dockerfile's VERSION
+// argument: -ldflags=-X=github.com/happydave/hoardmq/internal/cli.stampedVersion=<v>.
+var stampedVersion string
+
+// Version is the link-time stamp when set; otherwise it derives the version
+// from build information: the broker module's version when set, else "devel"
+// with the VCS revision when embedded.
 func Version() string {
+	if stampedVersion != "" {
+		return stampedVersion
+	}
 	info, ok := debug.ReadBuildInfo()
 	if !ok {
 		return "devel"
@@ -291,7 +299,7 @@ func buildVersion(info *debug.BuildInfo) string {
 		if d.Path != brokerModule {
 			continue
 		}
-		if d.Replace != nil && d.Replace.Version == "" {
+		if d.Replace != nil && (d.Replace.Version == "" || d.Replace.Version == "(devel)") {
 			return "devel (" + d.Replace.Path + ")"
 		}
 		return d.Version

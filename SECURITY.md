@@ -33,17 +33,19 @@ Out of scope:
 - a defect in a third-party dependency itself: report it to its project. How
   HoardMQ uses a dependency is in scope.
 - the simulation harness (`sim/`), the conformance suite and other tests;
-- a deployment that chooses a setting the README documents as unsafe, such as
+- a deployment that chooses a setting the documentation describes as unsafe, such as
   `secret` cluster authentication on a network it does not trust, or
   anonymous access in production.
 
 ## Supported versions
 
-Until the first release is tagged, only the latest commit of `main` is
-supported: fixes land there.
+| Version | Supported |
+|---|---|
+| `main` | yes |
+| `v0.1.x`, the latest minor release line | yes |
 
-Once releases exist, fixes go to `main` and to the latest minor release line.
-Older lines are not patched; upgrade to the latest release.
+Fixes go to `main` and to the latest minor release line. Older lines are not
+patched; upgrade to the latest release.
 
 ## What to expect
 
@@ -64,4 +66,4 @@ HoardMQ is a small project, so these are targets, not guarantees:
 Each fix is announced as a GitHub security advisory for this repository,
 naming the affected versions, the fixing commit or release, and any
 workaround. A CVE identifier is requested through GitHub when the issue
-warrants one. Once releases exist, the release notes list the advisory too.
+warrants one. The release notes list the advisory too.

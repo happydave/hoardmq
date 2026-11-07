@@ -103,7 +103,7 @@ func claimsOf(t *testing.T, token string) map[string]any {
 	return c
 }
 
-// Workitem AC 2 end to end: the CLI's login yields an ID token, and the
+// End to end, the CLI's login yields an ID token, and the
 // admin API, given it, answers the identity with its mapped roles.
 func TestLoginEndToEnd(t *testing.T) {
 	idp := oidctest.New(t, "hoardmq-cli")

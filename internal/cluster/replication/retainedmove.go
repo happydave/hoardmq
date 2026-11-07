@@ -246,7 +246,7 @@ func (r *Replicator) retainedMoving(m shardmap.Map, shard int) bool {
 	r.recMu.Lock()
 	prev := r.reconciled
 	r.recMu.Unlock()
-	return movingShard(pending, m.Version, prev.Version, holdersChanged(prev, m, shard))
+	return movingShard(pending, m.Version, prev.Version, holdersChanged(prev, m, shard)) || r.promotionKept(shard)
 }
 
 // KeptRetained is how many retained shards this node keeps copies of, waiting
@@ -317,15 +317,23 @@ const retainedPollMoving = 20 * time.Millisecond
 
 // retainedPoll is how soon the reconcile worker should look at the retained
 // moves again, and false when nothing waits: a pending move is looked at
-// often; a kept shard or an owed release each acknowledgement timeout.
+// often; a kept shard, an owed release or an install or delete the journal
+// did not take each acknowledgement timeout; tracked tombstones, or kind-11
+// entries a peer is owed, a tenth of the tombstone hold apart, at least the
+// acknowledgement timeout and at most 30 s.
 func (r *Replicator) retainedPoll() (time.Duration, bool) {
+	r.rfailed.mu.Lock()
+	failed := len(r.rfailed.promoted)+len(r.rfailed.deletes) > 0
+	r.rfailed.mu.Unlock()
 	r.rmoves.mu.Lock()
 	defer r.rmoves.mu.Unlock()
 	switch {
 	case len(r.rmoves.pending) > 0:
 		return retainedPollMoving, true
-	case len(r.rmoves.kept) > 0 || len(r.rmoves.passed) > 0:
+	case len(r.rmoves.kept) > 0 || len(r.rmoves.passed) > 0 || failed:
 		return r.o.AckTimeout, true
+	case r.tombsTracked.Load():
+		return min(max(r.tombstoneHold()/10, r.o.AckTimeout), 30*time.Second), true
 	}
 	return 0, false
 }
@@ -412,16 +420,18 @@ func (r *Replicator) receivedFrom(shard int, peer string) uint64 {
 // forgetKept ends a shard's note.
 func (r *Replicator) forgetKept(shard int) {
 	r.rmoves.mu.Lock()
-	if _, ok := r.rmoves.kept[shard]; ok {
+	if n, ok := r.rmoves.kept[shard]; ok {
 		delete(r.rmoves.kept, shard)
 		r.writeKeptRetainedLocked()
+		r.log.Debug("retained keep note ended", "shard", shard, "releaser", n.Releaser, "map", n.Version, "own", n.Own, "handOver", n.HandOver)
 	}
 	r.rmoves.mu.Unlock()
 }
 
-// ownRetainedIn is this node's own retained messages in a shard.
-func (r *Replicator) ownRetainedIn(shard int) []*message.Message {
-	return inShard(r, r.o.Local.AllRetained(), shard)
+// ownRetainedIn is this node's own retained entries in a shard, tombstones
+// included.
+func (r *Replicator) ownRetainedIn(shard int) []store.RetainedEntry {
+	return entriesInShard(r, r.localEntries(), shard)
 }
 
 // dropKeptShard deletes every copy this node keeps of a shard: its replica
@@ -429,9 +439,9 @@ func (r *Replicator) ownRetainedIn(shard int) []*message.Message {
 // topics it deleted.
 func (r *Replicator) dropKeptShard(shard int, own bool, reason string) int {
 	n := 0
-	for _, m := range r.follower.retainedIn(shard) {
-		if _, err := r.follower.apply(store.RetainRecord(&message.Message{Namespace: m.Namespace, Topic: m.Topic})); err != nil {
-			r.log.Error("kept retained copy not dropped", "topic", m.Topic, "err", err)
+	for _, e := range r.follower.retainedIn(shard) {
+		if _, err := r.follower.apply(store.RetainRecord(&message.Message{Namespace: e.Msg.Namespace, Topic: e.Msg.Topic})); err != nil {
+			r.log.Error("kept retained copy not dropped", "topic", e.Msg.Topic, "err", err)
 			continue
 		}
 		n++
@@ -461,8 +471,10 @@ func (r *Replicator) dropOwnRetained(shard int) int {
 		return 0
 	}
 	n := 0
-	for _, m := range r.ownRetainedIn(shard) {
-		_ = r.o.Sessions.InjectRetained(&message.Message{Namespace: m.Namespace, Topic: m.Topic})
+	for _, e := range r.ownRetainedIn(shard) {
+		if durable, _ := r.o.Sessions.InjectRetained(&message.Message{Namespace: e.Msg.Namespace, Topic: e.Msg.Topic}); !durable {
+			r.noteDeleteFailed(shard, e.Msg)
+		}
 		n++
 	}
 	if n > 0 {
@@ -483,17 +495,12 @@ func (r *Replicator) endOwnAfterHandOver(cur shardmap.Map, shard int, leader str
 		r.dropOwnRetained(shard)
 		return
 	}
-	have := map[string]bool{}
-	for _, m := range r.follower.retainedIn(shard) {
-		have[m.Namespace+"\x00"+m.Topic] = true
-	}
 	n := 0
-	for _, m := range r.ownRetainedIn(shard) {
-		if have[m.Namespace+"\x00"+m.Topic] {
-			continue
-		}
-		if _, err := r.follower.apply(store.RetainRecord(m)); err != nil {
-			r.log.Error("own retained copy not kept as a follower's; the own copies stay", "topic", m.Topic, "err", err)
+	for _, e := range r.ownRetainedIn(shard) {
+		// The replica store merges by version: a copy it holds already at
+		// a version as high stays, tombstones included.
+		if _, err := r.follower.applyTimed(entryRecord(e), nil, holdApplyOther, "own-to-replica", ""); err != nil {
+			r.log.Error("own retained copy not kept as a follower's; the own copies stay", "topic", e.Msg.Topic, "err", err)
 			return
 		}
 		n++
@@ -549,6 +556,7 @@ func (r *Replicator) forgetKeptIf(shard int, note retainedNote) bool {
 	}
 	delete(r.rmoves.kept, shard)
 	r.writeKeptRetainedLocked()
+	r.log.Debug("retained keep note ended", "shard", shard, "releaser", n.Releaser, "map", n.Version, "own", n.Own, "handOver", n.HandOver)
 	return true
 }
 
@@ -582,28 +590,19 @@ func (r *Replicator) applyReleaseOf(peer string, shard int, version uint64) (cha
 	r.rmoves.mu.Unlock()
 	leads := cur.Shards[shard].Leader == r.o.Node
 	if leads {
+		r.handOverReleased(peer, shard)
 		return false
 	}
 	note, noted := r.keptNote(shard)
 	orphaned := noted && note.Releaser != peer && !r.o.Leases.Live(note.Releaser)
-	r.recMu.Lock()
-	acted := r.reconciled
-	r.recMu.Unlock()
-	owed := false
+	owed, acted := false, uint64(0)
 	if !r.o.IgnoreOwedHandOver {
-		heldThen, senderLedThen := false, false
-		if acted.Version > 0 && shard < len(acted.Shards) {
-			heldThen, senderLedThen = acted.Holds(shard, r.o.Node), acted.Shards[shard].Leader == peer
-			if r.o.NoHandOverAtLeaderChange {
-				senderLedThen = acted.Holds(shard, peer)
-			}
-		}
-		owed = owesHandOver(noted && note.HandOver, acted.Version, version, heldThen, senderLedThen)
+		owed, acted = r.owesHandOverTo(peer, shard, version)
 	}
 	if !releaseDrops(leads, cur.Holds(shard, r.o.Node), orphaned, owed, version, cur.Version) {
 		if owed && (len(r.follower.retainedIn(shard)) > 0 || (noted && note.Own)) {
 			r.count("hoardmq_replicas_kept_total", map[string]string{"reason": "retained-handover-owed"}, 1)
-			r.log.Debug("retained copies kept through a release; a hand-over to its sender is owed", "shard", shard, "by", peer, "map", version, "acted", acted.Version)
+			r.log.Debug("retained copies kept through a release; a hand-over to its sender is owed", "shard", shard, "by", peer, "map", version, "acted", acted)
 		}
 		return false
 	}
@@ -612,9 +611,27 @@ func (r *Replicator) applyReleaseOf(peer string, shard int, version uint64) (cha
 		r.forgetKept(shard)
 		r.log.Info("kept retained copies released", "shard", shard, "by", peer, "map", version, "topics", n)
 	} else if n > 0 {
-		r.log.Debug("retained copies dropped by a release", "shard", shard, "by", peer, "map", version, "acted", acted.Version, "topics", n)
+		r.log.Debug("retained copies dropped by a release", "shard", shard, "by", peer, "map", version, "acted", acted, "topics", n)
 	}
 	return n > 0
+}
+
+// owesHandOverTo decides whether this node owes peer a hand-over of shard
+// against a word peer sent under map version (owesHandOver): a release, or a
+// kind-11 frame. acted is the version of the map this node last acted on.
+func (r *Replicator) owesHandOverTo(peer string, shard int, version uint64) (owed bool, acted uint64) {
+	note, noted := r.keptNote(shard)
+	r.recMu.Lock()
+	m := r.reconciled
+	r.recMu.Unlock()
+	heldThen, senderLedThen := false, false
+	if m.Version > 0 && shard < len(m.Shards) {
+		heldThen, senderLedThen = m.Holds(shard, r.o.Node), m.Shards[shard].Leader == peer
+		if r.o.NoHandOverAtLeaderChange {
+			senderLedThen = m.Holds(shard, peer)
+		}
+	}
+	return owesHandOver(noted && note.HandOver, m.Version, version, heldThen, senderLedThen), m.Version
 }
 
 // newFollowerPush is one release-then-whole push owed to a new follower.
@@ -637,10 +654,10 @@ func (r *Replicator) pushReleasesAndShards(version uint64, owed []newFollowerPus
 		r.pushMu.Lock()
 		defer r.pushMu.Unlock()
 	}
-	byShard := map[int][]*message.Message{}
-	for _, m := range r.o.Local.AllRetained() {
-		s := r.o.Map.ShardOf(m.Namespace, m.Topic)
-		byShard[s] = append(byShard[s], m)
+	byShard := map[int][]store.RetainedEntry{}
+	for _, e := range r.localEntries() {
+		s := r.o.Map.ShardOf(e.Msg.Namespace, e.Msg.Topic)
+		byShard[s] = append(byShard[s], e)
 	}
 	if r.pushGate != nil {
 		r.pushGate()
@@ -662,9 +679,9 @@ func (r *Replicator) pushReleasesAndShards(version uint64, owed []newFollowerPus
 		ob.push(frame{Kind: kindRetainedRelease, Shards: shards, Epoch: version})
 		topics := 0
 		for _, shard := range shards {
-			for _, m := range byShard[shard] {
-				rec := store.RetainRecord(m)
-				ob.push(frame{Kind: kindAppend, Type: rec.Type, Namespace: m.Namespace, Topic: m.Topic, Epoch: version, Payload: rec.Payload})
+			for _, e := range byShard[shard] {
+				rec := entryRecord(e)
+				ob.push(frame{Kind: kindAppend, Type: rec.Type, Namespace: e.Msg.Namespace, Topic: e.Msg.Topic, Epoch: version, Payload: rec.Payload})
 				topics++
 			}
 		}
@@ -1046,30 +1063,65 @@ func (r *Replicator) retryHandOver(cur shardmap.Map, shard int, note retainedNot
 		if len(held) > 0 && !r.handOverRetained(leader, held, cur.Version) {
 			return
 		}
-		if !r.claimJudged(shard, note, cur) {
+		if !cur.Holds(shard, r.o.Node) && len(held) > 0 {
+			r.renoteKept(shard, note, cur, leader, false)
 			return
 		}
-		if !cur.Holds(shard, r.o.Node) && len(held) > 0 {
-			r.keepRetained(shard, leader, cur.Version, false, false)
-		}
+		r.claimJudged(shard, note, cur)
 		return
 	}
 	// A note owing a hand-over may also hold replica copies, kept from an
 	// earlier move: every copy of the shard goes to the leader.
 	mine := r.ownRetainedIn(shard)
 	held := r.follower.retainedIn(shard)
-	if all := append(append([]*message.Message(nil), mine...), held...); len(all) > 0 && !r.handOverRetained(leader, all, cur.Version) {
+	if all := append(append([]store.RetainedEntry(nil), mine...), held...); len(all) > 0 && !r.handOverRetained(leader, all, cur.Version) {
 		return
 	}
-	if !r.claimJudged(shard, note, cur) {
-		return
-	}
-	r.pushRelease(leader, cur.Version, shard)
 	if cur.Holds(shard, r.o.Node) || len(mine)+len(held) == 0 {
+		if !r.claimJudged(shard, note, cur) {
+			return
+		}
+		r.pushRelease(leader, cur.Version, shard)
 		r.endOwnAfterHandOver(cur, shard, leader)
 		return
 	}
-	r.keepRetained(shard, leader, cur.Version, true, false)
+	if !r.renoteKept(shard, note, cur, leader, true) {
+		return
+	}
+	r.pushRelease(leader, cur.Version, shard)
+}
+
+// renoteKept replaces a shard's note, judged on cur and owing a hand-over the
+// leader has now acknowledged, with one that keeps the copies for releaser's
+// release at cur's version and owes nothing. The copies stay noted
+// throughout, so the keep is the same keep and is not counted again. It
+// reports false, changing nothing, when the note or the map moved since the
+// judgement.
+func (r *Replicator) renoteKept(shard int, judged retainedNote, cur shardmap.Map, releaser string, own bool) bool {
+	r.rmoves.mu.Lock()
+	held, ok := r.rmoves.kept[shard]
+	if !renoteAllowed(held, ok, judged, r.o.Map.Current().Version, cur.Version, r.o.StaleKeptJudgement) {
+		r.rmoves.mu.Unlock()
+		return false
+	}
+	r.rmoves.kept[shard] = retainedNote{Releaser: releaser, Version: cur.Version, Own: own, Since: r.o.Clock()}
+	r.writeKeptRetainedLocked()
+	r.rmoves.mu.Unlock()
+	if !ok {
+		r.count("hoardmq_replicas_kept_total", map[string]string{"reason": "retained-moved"}, 1)
+	}
+	r.log.Info("retained copies kept until the shard's leader releases them", "shard", shard, "releaser", releaser, "map", cur.Version, "own", own, "handOver", false)
+	return true
+}
+
+// renoteAllowed decides whether a note judged on a map may be replaced: the
+// map applied now is still that map and the note held is still the one
+// judged, or the stale judgement's defect is set. It is pure.
+func renoteAllowed(held retainedNote, noted bool, judged retainedNote, nowVersion, judgedVersion uint64, stale bool) bool {
+	if stale {
+		return true
+	}
+	return nowVersion == judgedVersion && noted && sameNote(held, judged)
 }
 
 // retainedStep runs the moves this node leads and the shards it keeps against
@@ -1083,4 +1135,6 @@ func (r *Replicator) retainedStep() {
 	r.recMu.Unlock()
 	r.advanceRetainedMoves(cur)
 	r.judgeKeptRetained(cur)
+	r.retryRetainedFailures(cur)
+	r.tombsTracked.Store(r.judgeTombstones(cur))
 }

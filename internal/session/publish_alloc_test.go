@@ -95,7 +95,7 @@ func TestRetainedPublishNamesItsTopic(t *testing.T) {
 }
 
 // TestPublishAllocationsAreBoundedByFanOut holds the publish path to the
-// budget WI 1510's plan set: naming costs at most one allocation per publish
+// budget: naming costs at most one allocation per publish
 // plus one per matched subscriber, a QoS 0 publish names nothing, and a node
 // with no replication attached pays nothing at any QoS.
 func TestPublishAllocationsAreBoundedByFanOut(t *testing.T) {

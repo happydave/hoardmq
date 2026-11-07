@@ -10,7 +10,7 @@ import (
 // A per-stream trace of what each replication stream was sent, refused and
 // failed, for the failover measurement. It is counters, capped samples and a
 // ring of short time buckets, read at the end of a run: node logging moves the
-// failover run's election (WI 1734), and this writes nothing while it runs.
+// failover run's election, and this writes nothing while it runs.
 // Nothing reads it to decide.
 
 const (
@@ -557,6 +557,10 @@ func rejectClass(reason string) string {
 		return "retained-unacknowledged"
 	case strings.HasPrefix(reason, notJournaledReason):
 		return "not-journaled"
+	case strings.HasPrefix(reason, retainedLimitReason):
+		return "retained-limit"
+	case strings.HasPrefix(reason, versionedHeldReason):
+		return "versioned-held"
 	case strings.Contains(reason, "without"):
 		return "malformed"
 	}

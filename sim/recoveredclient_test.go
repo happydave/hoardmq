@@ -118,8 +118,8 @@ func TestRecoveredOnSessionPresent(t *testing.T) {
 }
 
 // Session Present false is counted only when the client already held a
-// session: a first connection legitimately has none. This is WI 1653's
-// population, which the resubscribe hid.
+// session: a first connection legitimately has none. This is the population
+// served an empty session on a reconnect, which the resubscribe hid.
 func TestSessionLostCountsOnlyReconnects(t *testing.T) {
 	b := newFakeBroker(t, func(int, string) packet.ReasonCode { return packet.GrantedQoS1 },
 		brokerOpts{dropAfterSuback: true})

@@ -15,7 +15,7 @@ import (
 // orderingRun sends forwarded publishes from senders goroutines and returns
 // the admitted order recorded under the admission lock and the arrival order
 // at the peer. One class: the order the design guarantees (invariant 4) is
-// within the forwarded-publish class per peer; since WI 1340 each class is
+// within the forwarded-publish class per peer; each class is
 // dispatched by its own drainer, so order across classes is not a property.
 func orderingRun(t *testing.T, reorder bool, senders int) (admitted, arrived []string) {
 	t.Helper()

@@ -51,7 +51,8 @@ func (r *reader) uint32() (uint32, *Error) {
 }
 
 // varint decodes a Variable Byte Integer with the range check ahead of the
-// multiplier update, as the 3.1.1 erratum has it.
+// multiplier update, as the 3.1.1 erratum has it. A last byte of zero after
+// the first means the value fits in fewer bytes, which MQTT-1.5.5-1 refuses.
 func (r *reader) varint() (uint32, *Error) {
 	var value uint32
 	multiplier := uint32(1)
@@ -65,6 +66,9 @@ func (r *reader) varint() (uint32, *Error) {
 		}
 		value += uint32(b&0x7F) * multiplier
 		if b&0x80 == 0 {
+			if b == 0 && multiplier > 1 {
+				return 0, malformed("variable byte integer is not in its minimum number of bytes")
+			}
 			return value, nil
 		}
 		multiplier *= 128

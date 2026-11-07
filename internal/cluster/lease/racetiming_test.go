@@ -5,24 +5,24 @@ import (
 	"time"
 )
 
-// TestRaceTimestamps: the three timestamps WI 1514 reads the adoption regime
+// TestRaceTimestamps: the three timestamps the adoption regime is read
 // from. What matters is that a "first" is never overwritten — the whole
 // measurement is the *order* of two firsts, so a later event moving one would
 // invert the answer rather than merely blur it.
 func TestRaceTimestamps(t *testing.T) {
 	base := time.Date(2026, 9, 16, 2, 0, 0, 0, time.UTC)
 	now := base
-	s := &Service{table: NewTable(), timers: map[key]*adopted{}}
+	s := bareService(t)
 	s.o.Node = "me"
 	s.o.Clock = func() time.Time { return now }
 
 	adopt := func(id string) {
 		s.changed(&Lease{Namespace: "default", ClientID: id, Owner: "dead"},
-			&Lease{Namespace: "default", ClientID: id, Owner: "me", Online: false})
+			&Lease{Namespace: "default", ClientID: id, Owner: "me", Online: false}, time.Time{})
 	}
 	clientTake := func(id string) {
 		s.changed(&Lease{Namespace: "default", ClientID: id, Owner: "other"},
-			&Lease{Namespace: "default", ClientID: id, Owner: "me", Online: true})
+			&Lease{Namespace: "default", ClientID: id, Owner: "me", Online: true}, time.Time{})
 	}
 
 	st := s.LivenessStats()
@@ -54,8 +54,8 @@ func TestRaceTimestamps(t *testing.T) {
 	if st.FirstAdoptMs > st.LastAdoptMs {
 		t.Error("first adoption is after the last")
 	}
-	// The quantity B3 reads: positive means the reassignment landed before any
-	// client took its own lease.
+	// The race the adoption regime turns on: positive means the reassignment
+	// landed before any client took its own lease.
 	if got := st.FirstClientTakeMs - st.FirstAdoptMs; got != 5000 {
 		t.Errorf("takeover minus adoption = %d ms, want 5000", got)
 	}
@@ -66,24 +66,24 @@ func TestRaceTimestamps(t *testing.T) {
 // two timestamps the same event and the measurement vacuous.
 func TestRaceTimestampsDistinguishTheTwoCases(t *testing.T) {
 	now := time.Date(2026, 9, 16, 2, 0, 0, 0, time.UTC)
-	s := &Service{table: NewTable(), timers: map[key]*adopted{}}
+	s := bareService(t)
 	s.o.Node = "me"
 	s.o.Clock = func() time.Time { return now }
 
 	// Only a client takeover: no adoption should be recorded.
 	s.changed(&Lease{Namespace: "default", ClientID: "x", Owner: "other"},
-		&Lease{Namespace: "default", ClientID: "x", Owner: "me", Online: true})
+		&Lease{Namespace: "default", ClientID: "x", Owner: "me", Online: true}, time.Time{})
 	if st := s.LivenessStats(); st.FirstAdoptMs != 0 {
 		t.Errorf("a client takeover was recorded as an adoption: %d", st.FirstAdoptMs)
 	}
 
 	// A lease this node already owned coming online is neither: no client took
 	// it from anyone.
-	s2 := &Service{table: NewTable(), timers: map[key]*adopted{}}
+	s2 := bareService(t)
 	s2.o.Node = "me"
 	s2.o.Clock = func() time.Time { return now }
 	s2.changed(&Lease{Namespace: "default", ClientID: "y", Owner: "me"},
-		&Lease{Namespace: "default", ClientID: "y", Owner: "me", Online: true})
+		&Lease{Namespace: "default", ClientID: "y", Owner: "me", Online: true}, time.Time{})
 	if st := s2.LivenessStats(); st.FirstClientTakeMs != 0 {
 		t.Errorf("a client reconnecting to the node that already owned its lease was counted as a takeover: %d", st.FirstClientTakeMs)
 	}
@@ -96,13 +96,13 @@ func TestRaceTimestampsDistinguishTheTwoCases(t *testing.T) {
 func TestFirstTakeFromIsPerPreviousOwner(t *testing.T) {
 	base := time.Date(2026, 9, 16, 3, 0, 0, 0, time.UTC)
 	now := base
-	s := &Service{table: NewTable(), timers: map[key]*adopted{}}
+	s := bareService(t)
 	s.o.Node = "me"
 	s.o.Clock = func() time.Time { return now }
 
 	take := func(id, from string) {
 		s.changed(&Lease{Namespace: "default", ClientID: id, Owner: from},
-			&Lease{Namespace: "default", ClientID: id, Owner: "me", Online: true})
+			&Lease{Namespace: "default", ClientID: id, Owner: "me", Online: true}, time.Time{})
 	}
 
 	// A client re-homes from the surviving peer first — this is the event that

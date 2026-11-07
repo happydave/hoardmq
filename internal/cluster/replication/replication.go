@@ -66,15 +66,37 @@ type Sessions interface {
 	// A whole write queued inside fn is ordered against every record of the
 	// session; fn must not block.
 	WholeState(ns, id string, fn func(*store.SessionState)) bool
-	// InjectRetained stores a retained message locally as the shard leader,
-	// reporting whether its record is durable here.
-	InjectRetained(msg *message.Message) (durable bool)
+	// InjectRetained stores an unversioned retained message locally, or for
+	// an empty payload drops whatever the topic holds (a copy drop),
+	// reporting whether its record is durable here. A message is refused,
+	// nothing stored, over a topic holding a versioned entry.
+	InjectRetained(msg *message.Message) (durable bool, refusal store.RetainRefusal)
+	// InjectRetainedAt installs a copy at a version (a tombstone when its
+	// payload is empty) by store.MergeRetained, handOver on a hand-over or
+	// hand-on path. installed reports whether it replaced what was held;
+	// durable whether what is held now is appended and synced here; heldRV
+	// is the version of what is held after.
+	InjectRetainedAt(msg *message.Message, v store.Version, handOver bool) (installed, durable bool, heldRV store.Version)
+	// InjectRetainedWriteAt stores a write another node forwarded to this
+	// one, the shard's leader under map version epoch: stamped, or under no
+	// map (epoch 0) unversioned. refusal says why nothing was stored: the
+	// namespace's retained-topic limit, or, unversioned, a versioned entry
+	// held for the topic.
+	InjectRetainedWriteAt(msg *message.Message, epoch uint64) (durable bool, refusal store.RetainRefusal)
+	// DropRetainedTombstone removes a topic's tombstone while it is the one
+	// at v, reporting whether it did.
+	DropRetainedTombstone(ns, topic string, v store.Version) bool
 }
 
 // Local is the node's retained store (the dispatcher).
 type Local interface {
 	RetainedFor(ns, filter string, now time.Time) []*message.Message
 	AllRetained() []*message.Message
+	// RetainedEntries lists every held entry, tombstones included, with
+	// versions.
+	RetainedEntries() []store.RetainedEntry
+	// HeldRetained is what is held for a topic, tombstone included.
+	HeldRetained(ns, topic string) (store.RetainedEntry, bool)
 }
 
 // Options configure the replicator.
@@ -119,8 +141,8 @@ type Options struct {
 	// acknowledgement: the defect the acknowledged hand-over removes.
 	DeleteWithoutHandoverAck bool
 	// AcknowledgeUnapplied makes a follower acknowledge a record it could not
-	// apply instead of refusing it — the silent divergence this work item
-	// removed; Defects.
+	// apply instead of refusing it — the silent divergence the refusal
+	// removes; Defects.
 	AcknowledgeUnapplied bool
 	// HandOverOwnedCopies makes an owner keep and hand over a replica copy
 	// of a session it owns — the stale copy from the session's previous
@@ -180,6 +202,22 @@ type Options struct {
 	// HandOverNoteOverwritten lets a later keep of a retained shard replace a
 	// note that still owes a hand-over, so the owing is forgotten; Defects.
 	HandOverNoteOverwritten bool
+	// DropFailedPromotion drops a promoted replica copy whose install in this
+	// node's journal was not durable, as before such copies were kept;
+	// Defects.
+	DropFailedPromotion bool
+	// RetainedTombstoneHold is the least time a leader keeps a retained
+	// tombstone (limits.retainedTombstoneHold); 0 is an hour.
+	RetainedTombstoneHold time.Duration
+	// FanOutCopyDrops replicates a delete without a version, as before copy
+	// drops and clears were told apart; Defects.
+	FanOutCopyDrops bool
+	// FillOnlyMerge installs a hand-over only where nothing is held, as before
+	// versions; the retained search's negative control. Defects.
+	FillOnlyMerge bool
+	// InstallMisrouted installs a forwarded retained write at a node that does
+	// not lead its shard, as before such writes were refused; Defects.
+	InstallMisrouted bool
 	// AnswerHandOverAnywhere answers a retained hand-over from the own store
 	// on a node that does not lead the shard; Defects.
 	AnswerHandOverAnywhere bool
@@ -188,6 +226,10 @@ type Options struct {
 	// write on a moving shard, does not know the release's kind and ignores
 	// the hand-over mark. For the tests of a mixed pair; never configured.
 	PreRetainedMoves bool
+	// BeforeRetainedHandOver, when set, is called with the leader's name
+	// before each retained hand-over is sent to it, so a test can order a
+	// write at that leader ahead of the hand-over. Never configured.
+	BeforeRetainedHandOver func(leader string)
 	// UnorderedRetainedPush reads a shard for a new follower's push, and the
 	// retained messages for a resync, without the lock that orders them
 	// against the shard's writes; a test control.
@@ -232,7 +274,7 @@ const (
 	// kindResyncMark ends every resync. A break marks every frame sent so
 	// far as failed, and a barrier fails while its target is at or below that
 	// mark; when the resync has nothing to send, only a frame after the mark
-	// lets a later barrier pass, once the peer acknowledges it (WI 1494). It
+	// lets a later barrier pass, once the peer acknowledges it. It
 	// changes nothing on the peer, so a peer that ignores it is safe.
 	kindResyncMark byte = 9
 )
@@ -251,8 +293,14 @@ type frame struct {
 	State     *store.SessionState `json:"state,omitempty"`
 	Filter    string              `json:"filter,omitempty"`
 	Msg       *message.Message    `json:"msg,omitempty"`
-	Msgs      []*message.Message  `json:"msgs,omitempty"`
-	Found     bool                `json:"found,omitempty"`
+	// RV is a retained write's or hand-over's version, absent when
+	// unversioned; a tombstone travels as a Msg with an empty payload and an
+	// RV. An older receiver ignores it.
+	RV *store.Version `json:"rv,omitempty"`
+	// Drops names the tombstones a kind-11 frame says its sender dropped.
+	Drops []tombDrop         `json:"drops,omitempty"`
+	Msgs  []*message.Message `json:"msgs,omitempty"`
+	Found bool               `json:"found,omitempty"`
 	// Level is the cluster feature level the sender read when it built the
 	// frame, absent at level 1. A frame is applied off the log, so the
 	// receiver's own reading of the level may differ from the sender's; the
@@ -293,6 +341,15 @@ type ack struct {
 	ClientID  string `json:"id,omitempty"`
 	Topic     string `json:"topic,omitempty"`
 	Epoch     uint64 `json:"epoch,omitempty"`
+	// Map is the refusing node's applied map version, on a refusal of a
+	// retained write it does not lead the shard of: the sender forwards a
+	// message no barrier waits on once its own map reaches it. Absent from an
+	// older follower, and ignored by an older sender.
+	Map uint64 `json:"map,omitempty"`
+	// Unapplied acknowledges a kind-11 frame the follower did not act on, so
+	// its sender names those tombstones again later. Absent from an older
+	// follower, and ignored by an older sender.
+	Unapplied bool `json:"unapplied,omitempty"`
 }
 
 // rejection is a follower's refusal of one frame, naming what it carried.
@@ -366,6 +423,15 @@ type Replicator struct {
 	// of the shard's writes: a tap holds it for reading.
 	rmoves *retainedMoves
 	pushMu sync.RWMutex
+	// rheld holds the retained forwards no barrier waits on, until answered
+	// (misrouted.go).
+	rheld retainedHeld
+	// tombs is the retained tombstones' life at this node (tombstones.go).
+	tombs        *tombstones
+	tombsTracked atomic.Bool
+	// rfailed holds the retained installs and deletes this node's journal
+	// did not take, made again by retainedStep (retainedfailed.go).
+	rfailed retainedFailures
 	// judgeGate, set by a test, runs before a judging pass acts on each kept
 	// shard.
 	judgeGate func(shard int)
@@ -407,7 +473,7 @@ func New(o Options, machine *consensus.Machine) (*Replicator, error) {
 	if o.Clock == nil {
 		o.Clock = time.Now
 	}
-	r := &Replicator{o: o, log: o.Logger.With("component", "replication"), peers: map[string]*outbound{}, pres: newPresence(), stop: make(chan struct{}), done: make(chan struct{}), wake: make(chan struct{}, 1), basisWake: make(chan struct{}, 1), unwritten: newUnwrittenCopies(), checkSlots: make(chan struct{}, unwrittenChecksAtOnce), rmoves: newRetainedMoves()}
+	r := &Replicator{o: o, log: o.Logger.With("component", "replication"), peers: map[string]*outbound{}, pres: newPresence(), stop: make(chan struct{}), done: make(chan struct{}), wake: make(chan struct{}, 1), basisWake: make(chan struct{}, 1), unwritten: newUnwrittenCopies(), checkSlots: make(chan struct{}, unwrittenChecksAtOnce), rmoves: newRetainedMoves(), tombs: newTombstones()}
 	r.ctx, r.cancel = context.WithCancel(context.Background())
 	r.persisted, r.persistedKnown = r.readReconciled()
 	r.rmoves.kept = r.readKeptRetained()
@@ -440,7 +506,7 @@ func New(o Options, machine *consensus.Machine) (*Replicator, error) {
 		o.Transport.Handle(transport.ReplicationAppend, r.receive)
 		o.Transport.Handle(transport.ReplicationAck, r.receiveAck)
 		o.Transport.Observe(r.peerChanged)
-		// Replication rides the data connection (WI 1340): its resets break
+		// Replication rides the data connection: its resets break
 		// the streams and its return is when a peer is resynced.
 		o.Transport.ObserveData(r.peerChanged)
 	}
@@ -452,7 +518,31 @@ func (r *Replicator) Start() {
 	if r.started.Swap(true) {
 		return
 	}
+	r.seedRetainedVersion()
+	r.readDropped()
 	go r.driveLoop()
+}
+
+// seedRetainedVersion raises the session manager's retained stamp counter
+// above every number the replica store holds: after a former leader's own
+// copies moved there (endOwnAfterHandOver), the replica store can hold this
+// node's own stamps.
+func (r *Replicator) seedRetainedVersion() {
+	s, ok := r.o.Sessions.(interface{ SeedRetainedVersion(uint64) })
+	if !ok {
+		return
+	}
+	var high uint64
+	st := r.follower.snapshot(holdSnapshotOther)
+	for _, v := range st.RetainedVersions {
+		high = max(high, v.RV.N)
+	}
+	for _, t := range st.RetainedTombstones {
+		high = max(high, t.RV.N)
+	}
+	if high > 0 {
+		s.SeedRetainedVersion(high)
+	}
 }
 
 // Stop ends the loops and the follower's ack loop; the replica store is
@@ -504,12 +594,29 @@ func (r *Replicator) Tap(rec store.Record) func() {
 	var targets []string
 	var epoch uint64
 	var after func()
+	clear := false
 	if store.IsRetained(rec.Type) {
 		shard := r.o.Map.ShardOf(rec.Key.Namespace, rec.Key.Topic)
 		if m.Shards[shard].Leader != r.o.Node {
 			return nil // not this node's shard to replicate
 		}
 		r.notePresence(shard, store.IsRetainedDelete(rec.Type))
+		if store.IsRetainedDelete(rec.Type) {
+			_, clear = store.RecordVersion(rec)
+			if !clear && !r.o.FanOutCopyDrops {
+				// A copy drop is this node's alone: sent on, it would remove
+				// whatever a follower holds, newer stamped copies included.
+				return nil
+			}
+			if clear && !r.tombsTracked.Swap(true) {
+				// A first tombstone: the reconcile worker starts looking at
+				// tombstones, which nothing else would wake it for.
+				select {
+				case r.wake <- struct{}{}:
+				default:
+				}
+			}
+		}
 		targets = recordTargets(m, shard, r.o.Node, true)
 		epoch = m.Version
 		// A new follower's whole push of the shard holds this for writing,
@@ -547,7 +654,7 @@ func (r *Replicator) Tap(rec store.Record) func() {
 			// one refuses it as stale, which marks the key not held and fails
 			// the barrier over it — a refused publish, diagnosable only from
 			// the refusal until now. The lookup is here and not above because
-			// it runs for this record alone (WI 1570).
+			// it runs for this record alone.
 			r.noteUnstamped(rec)
 		}
 	}
@@ -556,8 +663,19 @@ func (r *Replicator) Tap(rec store.Record) func() {
 	}
 	f := frame{Kind: kindAppend, Type: rec.Type, Namespace: rec.Key.Namespace, ClientID: rec.Key.ClientID, Topic: rec.Key.Topic, Epoch: epoch, Payload: rec.Payload}
 	began := time.Now()
+	var seqs map[string]uint64
+	if clear {
+		seqs = make(map[string]uint64, len(targets))
+	}
 	for _, t := range targets {
-		r.outboundFor(t).push(f)
+		seq := r.outboundFor(t).push(f)
+		if seqs != nil {
+			seqs[t] = seq
+		}
+	}
+	if seqs != nil {
+		rv, _ := store.RecordVersion(rec)
+		r.noteTapped(rec.Key.Namespace, rec.Key.Topic, rv, seqs)
 	}
 	pushed := time.Now()
 	r.count("hoardmq_replication_records_total", map[string]string{"direction": "out"}, float64(len(targets)))
@@ -594,7 +712,7 @@ func (r *Replicator) dropOwnedCopyAfterWrite(ns, id string, wroteAt uint64, reas
 // session it has just written as owner is the previous owner's. Only a copy
 // at a higher epoch than the record survives, and only when the record
 // carries an epoch at all: a record written before its owner held a
-// generation for the client (WI 1570) still clears what came before it.
+// generation for the client still clears what came before it.
 func dropStaleOwnedCopy(held bool, copyEpoch, recordEpoch uint64) bool {
 	if !held {
 		return false
@@ -614,7 +732,7 @@ func (r *Replicator) noteUnstamped(rec store.Record) {
 }
 
 // StreamState is what an operator is shown about one peer's stream: whether
-// no barrier to it may pass, why, and for how long (WI 1523). The age is
+// no barrier to it may pass, why, and for how long. The age is
 // measured here, against the clock the block was recorded with, so a reader
 // need not hold that clock to read it.
 type StreamState struct {
@@ -626,8 +744,8 @@ type StreamState struct {
 // StreamStates reports every peer this node replicates to, blocked or not. A
 // blocked stream is why a QoS 1 or 2 publish that needs that peer is refused,
 // and the age of the state is what says whether it is happening now or
-// happened once (WI 1519's question, asked of the product rather than the
-// harness).
+// happened once: how long a node refuses, read from the product rather than
+// the harness.
 func (r *Replicator) StreamStates() []StreamState {
 	r.mu.Lock()
 	peers := make([]*outbound, 0, len(r.peers))
@@ -701,7 +819,7 @@ func (r *Replicator) BacklogByPeer() map[string]int64 {
 // dropped and no resync has repaired it — so no barrier to them may pass. A
 // publish that needs one of those peers is refused until the resync lands,
 // which is why the simulation harness waits for this before it calls a
-// cluster ready to take a publish (WI 1570).
+// cluster ready to take a publish.
 func (r *Replicator) HoledStreams() []string {
 	r.mu.Lock()
 	peers := make([]*outbound, 0, len(r.peers))
@@ -1006,6 +1124,9 @@ func (r *Replicator) receiveAck(peer string, payload []byte) {
 			p.acked(a.Seq)
 			return
 		}
+		if a.Reason == misroutedReason {
+			r.misroutedRefused(peer, a)
+		}
 		// Usual cause: an old owner's clean-up record after a takeover. A
 		// rejected record is not held by the follower, so the barriers
 		// covering it fail as they do for a failed send.
@@ -1023,6 +1144,8 @@ func (r *Replicator) receiveAck(peer string, payload []byte) {
 	}
 	r.count("hoardmq_replication_acks_total", map[string]string{"outcome": "ok"}, 1)
 	p.acked(a.Seq)
+	r.releaseHeld(peer, a.Seq)
+	r.tombstoneDropsAcked(peer, a.Seq, a.Unapplied)
 }
 
 // receive runs on the transport reader for the sending peer: frames are
@@ -1188,7 +1311,7 @@ func (r *Replicator) resync(peer string) {
 // resyncAfter arranges one resync of a peer whose resync the cooldown
 // refused, for when the cooldown ends. Without it a stream that broke within
 // the cooldown stayed holed, and every barrier for the peer failed, until some
-// later failure or state change happened to ask again (WI 1491). At most one
+// later failure or state change happened to ask again. At most one
 // is pending per peer.
 func (r *Replicator) resyncAfter(peer string, p *outbound, wait time.Duration) {
 	p.mu.Lock()
@@ -1238,6 +1361,7 @@ func (r *Replicator) resyncPeer(peer string) {
 	}
 	bulk.done()
 	n += r.resyncRetained(peer, m)
+	r.resendOwedDrops(peer)
 	if n > 0 {
 		r.log.Info("replicas resynced to peer", "peer", peer, "items", n)
 	}
@@ -1253,16 +1377,16 @@ func (r *Replicator) resyncRetained(peer string, m shardmap.Map) int {
 		r.pushMu.Lock()
 		defer r.pushMu.Unlock()
 	}
-	retained := r.o.Local.AllRetained()
+	retained := r.localEntries()
 	if r.resyncRetainedGate != nil {
 		r.resyncRetainedGate()
 	}
 	n := 0
-	for _, msg := range retained {
-		shard := r.o.Map.ShardOf(msg.Namespace, msg.Topic)
+	for _, e := range retained {
+		shard := r.o.Map.ShardOf(e.Msg.Namespace, e.Msg.Topic)
 		if m.Shards[shard].Leader == r.o.Node && contains(m.Shards[shard].Followers, peer) {
-			rec := store.RetainRecord(msg)
-			r.outboundFor(peer).push(frame{Kind: kindAppend, Type: rec.Type, Namespace: msg.Namespace, Topic: msg.Topic, Epoch: m.Version, Payload: rec.Payload})
+			rec := entryRecord(e)
+			r.outboundFor(peer).push(frame{Kind: kindAppend, Type: rec.Type, Namespace: e.Msg.Namespace, Topic: e.Msg.Topic, Epoch: m.Version, Payload: rec.Payload})
 			n++
 		}
 	}
@@ -1369,8 +1493,12 @@ func (r *Replicator) count(name string, labels map[string]string, delta float64)
 }
 
 func (r *Replicator) gauge(name string, v float64) {
+	r.gaugeWith(name, nil, v)
+}
+
+func (r *Replicator) gaugeWith(name string, labels map[string]string, v float64) {
 	if r.o.Metrics != nil {
-		r.o.Metrics.Set(name, nil, v)
+		r.o.Metrics.Set(name, labels, v)
 	}
 }
 

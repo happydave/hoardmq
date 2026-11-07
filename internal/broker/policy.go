@@ -114,7 +114,7 @@ func (p *policy) rebuild(force bool) {
 }
 
 // ClientLimits implements conn.Options.ClientLimits: the default namespace's
-// limits for every namespace until namespaces are active (WI 1322).
+// limits for every namespace until namespaces are active.
 func (p *policy) ClientLimits(string) *conn.ClientLimits { return p.limits.Load() }
 
 // Banned implements conn.Options.Banned.

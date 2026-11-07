@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -73,6 +74,27 @@ func buildHello(t *testing.T) string {
 	}
 	t.Logf("built the binary in %s", time.Since(start).Round(time.Millisecond))
 	return bin
+}
+
+// binaryEnv is the test's environment without its HOARDMQ_ variables: the
+// binary reads each as a configuration override and refuses one it does not
+// know, such as a gate's HOARDMQ_SIM_LOG.
+func binaryEnv() []string {
+	// Never nil: an exec.Cmd with a nil Env inherits the whole environment.
+	env := []string{}
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(kv, "HOARDMQ_") {
+			env = append(env, kv)
+		}
+	}
+	return env
+}
+
+// command is exec.Command for the built binary, with binaryEnv.
+func command(bin string, args ...string) *exec.Cmd {
+	cmd := exec.Command(bin, args...)
+	cmd.Env = binaryEnv()
+	return cmd
 }
 
 // freePort is a loopback port nothing held a moment ago.
@@ -234,8 +256,10 @@ func toggle(t *testing.T, adminAddr, token, id string, enable bool) {
 func TestExternalModuleLifecycle(t *testing.T) {
 	bin := buildHello(t)
 	dir := t.TempDir()
+	// A gate may run with the harness's node-log variable set.
+	t.Setenv("HOARDMQ_SIM_LOG", filepath.Join(dir, "sim.log"))
 
-	out, err := exec.Command(bin, "version").CombinedOutput()
+	out, err := command(bin, "version").CombinedOutput()
 	if err != nil || !strings.Contains(string(out), "extension API "+ext.APIVersion) || !strings.Contains(string(out), " hook.hello") {
 		t.Fatalf("version: %v\n%s", err, out)
 	}
@@ -267,10 +291,10 @@ func TestExternalModuleLifecycle(t *testing.T) {
 	writeJSON(t, good, doc(logFile))
 	writeJSON(t, bad, doc(""))
 
-	if out, err := exec.Command(bin, "check", "-config", good).CombinedOutput(); err != nil {
+	if out, err := command(bin, "check", "-config", good).CombinedOutput(); err != nil {
 		t.Fatalf("check of the good configuration: %v\n%s", err, out)
 	}
-	out, err = exec.Command(bin, "check", "-config", bad).CombinedOutput()
+	out, err = command(bin, "check", "-config", bad).CombinedOutput()
 	var exit *exec.ExitError
 	if !errors.As(err, &exit) || exit.ExitCode() != 1 || !strings.Contains(string(out), "/modules/hook.hello") || !strings.Contains(string(out), "log is required") {
 		t.Fatalf("check of the bad configuration: %v\n%s", err, out)
@@ -279,7 +303,7 @@ func TestExternalModuleLifecycle(t *testing.T) {
 		t.Fatalf("check wrote the module's log: %v", err)
 	}
 
-	cmd := exec.Command(bin, "serve", "-config", good)
+	cmd := command(bin, "serve", "-config", good)
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -341,5 +365,47 @@ func TestExternalModuleLifecycle(t *testing.T) {
 	want := "provision\nvalidate\nstart\nconnected c1\npublish t/1\nenabled false\nenabled true\npublish t/3\nstop\n"
 	if string(data) != want {
 		t.Fatalf("the module's log:\n%s\nwant:\n%s", data, want)
+	}
+}
+
+// TestBinaryEnvDropsHarnessVariables: the built binary is given the test's
+// environment without its HOARDMQ_ variables, and with every other variable.
+func TestBinaryEnvDropsHarnessVariables(t *testing.T) {
+	t.Setenv("HOARDMQ_SIM_LOG", "/nonexistent/sim.log")
+	t.Setenv("HOARDMQ_TEST_LOG", "1")
+	t.Setenv("HOARDMQ_TEST_EMPTY", "")
+	t.Setenv("BINARY_ENV_TEST_KEPT", "kept")
+	if !slices.Contains(os.Environ(), "HOARDMQ_TEST_EMPTY=") {
+		t.Fatal("the test's own environment does not hold the variables it set")
+	}
+	env := binaryEnv()
+	if !slices.Contains(env, "BINARY_ENV_TEST_KEPT=kept") {
+		t.Fatalf("the environment lost a variable that is not the broker's: %q", env)
+	}
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "HOARDMQ_") {
+			t.Errorf("the binary would read %q", kv)
+		}
+	}
+}
+
+// TestBinaryEnvOfHarnessVariablesAloneIsEmpty: an environment holding only
+// HOARDMQ_ variables gives the binary none, not the inherited set a nil Env
+// would mean.
+func TestBinaryEnvOfHarnessVariablesAloneIsEmpty(t *testing.T) {
+	saved := os.Environ()
+	t.Cleanup(func() {
+		os.Clearenv()
+		for _, kv := range saved {
+			name, value, _ := strings.Cut(kv, "=")
+			_ = os.Setenv(name, value)
+		}
+	})
+	os.Clearenv()
+	if err := os.Setenv("HOARDMQ_SIM_LOG", "/nonexistent/sim.log"); err != nil {
+		t.Fatal(err)
+	}
+	if env := binaryEnv(); env == nil || len(env) != 0 {
+		t.Fatalf("binaryEnv() = %#v, want an empty, non-nil list", env)
 	}
 }

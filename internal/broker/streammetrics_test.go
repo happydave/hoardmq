@@ -31,10 +31,10 @@ func metricValue(t *testing.T, body, series string) (float64, bool) {
 
 // TestMetricsShowABlockedStreamAndWhatClosedConnections: the two series an
 // operator has no substitute for — whether this node's replication to a peer
-// is carrying barriers *now*, and what closed its clients' connections
-// (WI 1523). The first answers WI 1519's question of the product: a node that
-// refuses QoS 1 publishes after a peer goes is one whose stream to that peer
-// is blocked, and the age says how long it has been.
+// is carrying barriers *now*, and what closed its clients' connections. The
+// first asks the product itself how long a node refuses: a node that refuses
+// QoS 1 publishes after a peer goes is one whose stream to that peer is
+// blocked, and the age says how long it has been.
 func TestMetricsShowABlockedStreamAndWhatClosedConnections(t *testing.T) {
 	nodes := startTrio(t, func(name string, d *config.Document) {
 		d.Cluster.Shards = 8

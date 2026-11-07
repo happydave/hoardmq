@@ -125,6 +125,39 @@ func TestChartMetadata(t *testing.T) {
 	}
 }
 
+// TestImageIsRequired: the project publishes no image, so the chart names
+// none and refuses to render until both parts are given.
+func TestImageIsRequired(t *testing.T) {
+	vals := valuesScalars(t)
+	for _, key := range []string{"image.repository", "image.tag"} {
+		if vals[key] != `""` {
+			t.Errorf("values.yaml %s = %s, want empty", key, vals[key])
+		}
+		want := `{{ required "` + key + ` is required`
+		if !strings.Contains(templates(t)["statefulset.yaml"], want) {
+			t.Errorf("statefulset.yaml lacks %s", want)
+		}
+	}
+}
+
+// TestChartVersionFollowsTheTag: version and appVersion are both the release
+// tag without its "v", so they are always equal.
+func TestChartVersionFollowsTheTag(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join(chartDir, "Chart.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fields := map[string]string{}
+	for _, line := range strings.Split(string(data), "\n") {
+		if name, value, ok := strings.Cut(line, ": "); ok && (name == "version" || name == "appVersion") {
+			fields[name] = strings.Trim(strings.TrimSpace(value), `"`)
+		}
+	}
+	if fields["version"] == "" || fields["version"] != fields["appVersion"] {
+		t.Errorf("Chart.yaml version %q, appVersion %q: want both the release tag without its v", fields["version"], fields["appVersion"])
+	}
+}
+
 // TestDesignedDeploymentProperties: the StatefulSet and Services carry the
 // properties design invariant 10 and the Kubernetes deployment section
 // require, as literal text.
@@ -180,8 +213,8 @@ func TestDesignedDeploymentProperties(t *testing.T) {
 	}
 }
 
-// TestReadinessProbeStaysOnReadyz (WI 1571): the readiness probe reads
-// /readyz, and /servingz is no probe, so a degraded node stays in service.
+// TestReadinessProbeStaysOnReadyz: the readiness probe reads /readyz, and
+// /servingz is no probe, so a degraded node stays in service.
 func TestReadinessProbeStaysOnReadyz(t *testing.T) {
 	sts := templates(t)["statefulset.yaml"]
 	probe := regexp.MustCompile(`(?s)readinessProbe:\s*httpGet:\s*path:\s*(\S+)`).FindStringSubmatch(sts)
@@ -317,20 +350,24 @@ func TestObservabilityDrainIsLoopbackOnly(t *testing.T) {
 	}
 }
 
-// TestChartSetsTheLimits: the broker's own connect-rate, connection and
-// subscription limits are unlimited by default, so the chart sets each to a
-// positive number, carries it into the configuration document, and says in
-// its README why each value is what it is.
+// TestChartSetsTheLimits: the broker's own connect-rate, connection,
+// subscription and keep-alive limits are unlimited by default, and its
+// outbound in-flight cap is the protocol's largest, so the chart sets each to a
+// positive number, the in-flight cap to 1,024, carries each into the
+// configuration document, and says in its README why each value is what it is.
 func TestChartSetsTheLimits(t *testing.T) {
 	values := valuesScalars(t)
-	for _, key := range []string{"limits.connectRate", "limits.maxSubscriptions", "listeners.mqtt.maxConnections", "listeners.mqtts.maxConnections"} {
+	for _, key := range []string{"limits.connectRate", "limits.maxSubscriptions", "limits.maxKeepAlive", "listeners.mqtt.maxConnections", "listeners.mqtts.maxConnections"} {
 		if n, err := strconv.Atoi(values[key]); err != nil || n <= 0 {
 			t.Errorf("values.yaml sets %s to %q, want a positive number", key, values[key])
 		}
 	}
+	if values["limits.maxInflightMessages"] != "1024" {
+		t.Errorf("values.yaml sets limits.maxInflightMessages to %q, want 1024", values["limits.maxInflightMessages"])
+	}
 	cm := templates(t)["configmap.yaml"]
 	for _, want := range []string{
-		`"limits" (dict "connectRate" (int .Values.limits.connectRate) "connectBurst" (int .Values.limits.connectBurst) "maxSubscriptions" (int .Values.limits.maxSubscriptions))`,
+		`"limits" (dict "connectRate" (int .Values.limits.connectRate) "connectBurst" (int .Values.limits.connectBurst) "maxSubscriptions" (int .Values.limits.maxSubscriptions) "maxKeepAlive" (int .Values.limits.maxKeepAlive) "maxInflightMessages" (int .Values.limits.maxInflightMessages))`,
 		`"maxConnections" (int .Values.listeners.mqtt.maxConnections)`,
 		`"maxConnections" (int .Values.listeners.mqtts.maxConnections)`,
 	} {
@@ -343,7 +380,7 @@ func TestChartSetsTheLimits(t *testing.T) {
 		t.Fatal(err)
 	}
 	readme := string(data)
-	for _, want := range []string{"## Limits", "`limits.connectRate`", "`limits.maxSubscriptions`", "`listeners.mqtt.maxConnections`"} {
+	for _, want := range []string{"## Limits", "`limits.connectRate`", "`limits.maxSubscriptions`", "`limits.maxKeepAlive`", "`limits.maxInflightMessages`", "`listeners.mqtt.maxConnections`"} {
 		if !strings.Contains(readme, want) {
 			t.Errorf("the chart README lacks %q", want)
 		}
@@ -373,8 +410,15 @@ func TestClusterTLSPerPodAndScalable(t *testing.T) {
 			t.Errorf("cluster-tls at %s selects %q, want %q", m[1], m[3], want[m[1]])
 		}
 	}
-	if n := len(regexp.MustCompile(`- name: cluster-tls\n +mountPath:`).FindAllString(sts, -1)); n != len(want) {
-		t.Errorf("cluster-tls is mounted %d times, %d of them selecting the pod's files", n, len(want))
+	// The CSI driver's volume holds the pod's own files only, so its one
+	// mount takes the whole volume.
+	_, csiMount, _ := strings.Cut(sts, "{{- else if eq .Values.tls.mode \"certManagerCSI\" }}")
+	csiMount, _, _ = strings.Cut(csiMount, "{{- else }}")
+	if !strings.Contains(csiMount, "- name: cluster-tls\n              mountPath: /etc/hoardmq-tls\n              readOnly: true\n") || strings.Contains(csiMount, "subPath") {
+		t.Error("certManagerCSI does not mount its volume whole at /etc/hoardmq-tls")
+	}
+	if n := len(regexp.MustCompile(`- name: cluster-tls\n +mountPath:`).FindAllString(sts, -1)); n != len(want)+1 {
+		t.Errorf("cluster-tls is mounted %d times, want %d selecting the pod's files and the CSI volume's one", n, len(want))
 	}
 	if strings.Contains(sts, "tlsCASecret") || strings.Contains(sts, "cluster-ca") {
 		t.Error("the StatefulSet references the CA Secret")
@@ -481,5 +525,168 @@ func TestScaleWithinTheMaximumRestartsNothing(t *testing.T) {
 	}
 	if strings.Contains(readme, "needs a hand step") {
 		t.Error("the chart README still asks for a hand step on scale-up")
+	}
+}
+
+// TestContainerHardenedByDefault: the broker container runs with a read-only
+// root, no capabilities, no privilege escalation and the runtime's default
+// seccomp profile unless the operator replaces the value, and the pod keeps
+// the seccomp profile whatever the container's value.
+func TestContainerHardenedByDefault(t *testing.T) {
+	scalars := valuesScalars(t)
+	for key, want := range map[string]string{
+		"containerSecurityContext.readOnlyRootFilesystem":   "true",
+		"containerSecurityContext.allowPrivilegeEscalation": "false",
+		"containerSecurityContext.runAsNonRoot":             "true",
+		"containerSecurityContext.seccompProfile.type":      "RuntimeDefault",
+	} {
+		if got := scalars[key]; got != want {
+			t.Errorf("values %s = %q, want %q", key, got, want)
+		}
+	}
+	values, err := os.ReadFile(filepath.Join(chartDir, "values.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(values), "  capabilities:\n    drop:\n      - ALL\n") {
+		t.Error("values do not drop every capability")
+	}
+	sts := templates(t)["statefulset.yaml"]
+	for _, want := range []string{
+		"{{- with .Values.containerSecurityContext }}\n          securityContext:\n            {{- toYaml . | nindent 12 }}",
+		"fsGroup: 65532\n        seccompProfile:\n          type: RuntimeDefault",
+	} {
+		if !strings.Contains(sts, want) {
+			t.Errorf("statefulset.yaml lacks %q", want)
+		}
+	}
+}
+
+// TestPolicyAndMonitorOffByDefault: the NetworkPolicy and the ServiceMonitor
+// render only when enabled, and neither is enabled by default, since a policy
+// that does not fit a deployment cuts its traffic.
+func TestPolicyAndMonitorOffByDefault(t *testing.T) {
+	scalars := valuesScalars(t)
+	tpl := templates(t)
+	for file, key := range map[string]string{"networkpolicy.yaml": "networkPolicy.enabled", "servicemonitor.yaml": "serviceMonitor.enabled"} {
+		if got := scalars[key]; got != "false" {
+			t.Errorf("values %s = %q, want false", key, got)
+		}
+		body := strings.TrimSpace(tpl[file])
+		if !strings.HasPrefix(body, "{{- if .Values."+key+" }}") || !strings.HasSuffix(body, "{{- end }}") {
+			t.Errorf("%s is not wrapped whole in %s", file, key)
+		}
+	}
+	np := tpl["networkpolicy.yaml"]
+	for _, want := range []string{"- port: cluster", "- port: mqtt", "- port: observability", "range .Values.listeners.extra", "policyTypes:\n    - Ingress\n"} {
+		if !strings.Contains(np, want) {
+			t.Errorf("networkpolicy.yaml lacks %q", want)
+		}
+	}
+}
+
+// TestExtraListenersAppend: listeners.extra reaches the configuration
+// document after the built-in listeners, a container port and a Service port,
+// and an entry without name, type or port, or with a taken name, is refused.
+func TestExtraListenersAppend(t *testing.T) {
+	tpl := templates(t)
+	for file, want := range map[string]string{
+		"configmap.yaml":   `$_ := set $base "listeners" (append (get $base "listeners") $entry)`,
+		"statefulset.yaml": "{{- range .Values.listeners.extra }}\n            - name: {{ .name }}\n              containerPort: {{ .port }}",
+		"service.yaml":     "{{- range .Values.listeners.extra }}\n    - name: {{ .name }}\n      port: {{ .port }}\n      targetPort: {{ .name }}",
+	} {
+		if !strings.Contains(tpl[file], want) {
+			t.Errorf("%s lacks %q", file, want)
+		}
+	}
+	cm := tpl["configmap.yaml"]
+	for _, want := range []string{"needs name, type and port", "is taken", `dict "mqtt" true "mqtts" true`} {
+		if !strings.Contains(cm, want) {
+			t.Errorf("configmap.yaml lacks %q", want)
+		}
+	}
+	if strings.Index(cm, "range $i, $l := .Values.listeners.extra") < strings.Index(cm, `if .Values.listeners.mqtts.enabled`) {
+		t.Error("the extra listeners are not appended after mqtts")
+	}
+}
+
+// TestCertManagerCSIKeepsEachKeyInItsPod: with tls.mode certManagerCSI the
+// cluster TLS volume is the CSI driver's, issuing a certificate named after
+// the pod with both auth usages from the chart's issuer, readable by the
+// pod's fsGroup; no per-ordinal Certificate (and so no node key Secret) is
+// made, and the private CA is.
+func TestCertManagerCSIKeepsEachKeyInItsPod(t *testing.T) {
+	tpl := templates(t)
+	sts := tpl["statefulset.yaml"]
+	_, csi, ok := strings.Cut(sts, "{{- else if eq .Values.tls.mode \"certManagerCSI\" }}\n        {{- /*")
+	if !ok {
+		t.Fatal("statefulset.yaml has no certManagerCSI volume")
+	}
+	csi, _, _ = strings.Cut(csi, "{{- else }}")
+	for _, want := range []string{
+		"- name: cluster-tls\n          csi:\n            driver: csi.cert-manager.io\n            readOnly: true\n",
+		`csi.cert-manager.io/issuer-name: {{ include "hoardmq.tlsIssuerName" . }}`,
+		`csi.cert-manager.io/issuer-kind: {{ include "hoardmq.tlsIssuerKind" . }}`,
+		`csi.cert-manager.io/common-name: "${POD_NAME}"`,
+		`${POD_NAME}.{{ $headless }}.{{ .Release.Namespace }}.svc"`,
+		`csi.cert-manager.io/key-usages: "digital signature,key encipherment,server auth,client auth"`,
+		`csi.cert-manager.io/duration: {{ .Values.tls.certManagerCSI.duration | quote }}`,
+		`csi.cert-manager.io/renew-before: {{ .Values.tls.certManagerCSI.renewBefore | quote }}`,
+	} {
+		if !strings.Contains(csi, want) {
+			t.Errorf("the certManagerCSI volume lacks %q", want)
+		}
+	}
+	group := regexp.MustCompile(`(?m)^ +fsGroup: (\d+)$`).FindStringSubmatch(sts)
+	if group == nil || !strings.Contains(csi, `csi.cert-manager.io/fs-group: "`+group[1]+`"`) {
+		t.Errorf("the CSI volume's fs-group is not the pod's fsGroup %v", group)
+	}
+	if strings.Contains(csi, "secret") {
+		t.Error("the certManagerCSI volume names a Secret")
+	}
+	scalars := valuesScalars(t)
+	for key, want := range map[string]string{
+		"tls.mode":                       "generated",
+		"tls.certManagerCSI.duration":    "2160h",
+		"tls.certManagerCSI.renewBefore": "360h",
+	} {
+		if got := scalars[key]; got != want {
+			t.Errorf("values %s = %q, want %q", key, got, want)
+		}
+	}
+	cert := tpl["certificate.yaml"]
+	ca, ordinals, ok := strings.Cut(cert, "{{- if eq .Values.tls.mode \"certManager\" }}")
+	if !ok || !strings.HasPrefix(cert, `{{- if or (eq .Values.tls.mode "certManager") (eq .Values.tls.mode "certManagerCSI") }}`) {
+		t.Fatal("certificate.yaml does not make the private CA in both cert-manager modes and the per-ordinal Certificates in certManager alone")
+	}
+	if !strings.Contains(ca, "isCA: true") || strings.Contains(ca, "range") {
+		t.Error("the part both cert-manager modes render is not the private CA alone")
+	}
+	if !strings.Contains(ordinals, "range $i := until (int .Values.cluster.maxReplicas)") {
+		t.Error("the per-ordinal Certificates are not under certManager")
+	}
+	helpers := tpl["_helpers.tpl"]
+	for _, want := range []string{
+		`.Values.tls.certManager.issuerRef.name | default (printf "%s-ca" (include "hoardmq.fullname" .))`,
+		`name: {{ $issuerName }}`,
+	} {
+		if !strings.Contains(helpers+cert, want) {
+			t.Errorf("the issuer is not the named one or the private CA's: lacks %q", want)
+		}
+	}
+}
+
+// TestUnknownTLSModeRefused: a tls.mode outside the three is refused at
+// render, naming them, rather than falling through to a volume of Secrets
+// nobody makes. The check sits in the ConfigMap, which every render has.
+func TestUnknownTLSModeRefused(t *testing.T) {
+	cm := templates(t)["configmap.yaml"]
+	for _, want := range []string{
+		`{{- if not (has .Values.tls.mode (list "generated" "certManager" "certManagerCSI")) }}`,
+		`tls.mode %q is not one of generated, certManager, certManagerCSI`,
+	} {
+		if !strings.Contains(cm, want) {
+			t.Errorf("configmap.yaml lacks %q", want)
+		}
 	}
 }

@@ -14,8 +14,8 @@ import (
 // It is the smallest question that distinguishes a node which can make
 // progress from one which cannot: a node whose replication stream is holed, or
 // whose barrier cannot pass, answers a QoS 1 publish with an error code and
-// keeps doing so — the outcome of every one of the four defects WI 1502 was
-// filed from. Success and No Matching Subscribers both mean the node is
+// keeps doing so — the outcome of every one of the four defects this probe
+// was written for. Success and No Matching Subscribers both mean the node is
 // working; the topic is deliberately one nobody subscribes to, so the second
 // is the expected healthy answer.
 func ProbePublish(addr, id, topic string) (packet.ReasonCode, error) {
@@ -157,7 +157,7 @@ func livenessFindingsWith(probes []Probe, counters map[string]string, rec []Node
 
 // barrierNote appends a node's replication barrier failures by peer and
 // reason, so the violation says which stream could not make progress rather
-// than leaving it to be reconstructed by hand as WI 1494's investigation had
+// than leaving it to be reconstructed by hand as an investigation once had
 // to.
 func barrierNote(counters map[string]string, node string) string {
 	if counters == nil {

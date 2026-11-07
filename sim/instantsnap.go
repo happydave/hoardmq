@@ -8,8 +8,7 @@ import (
 	"github.com/happydave/hoardmq/internal/module"
 )
 
-// The failure counters split at the recovery instant (WI 1734, from WI 1709's
-// recommendation 2).
+// The failure counters split at the recovery instant.
 //
 // metrics_before and metrics_after bracket the whole run, so a refusal counted
 // between them cannot be dated against the instant. One metrics snapshot per
@@ -147,8 +146,8 @@ func newInstantRecord(snap counterSnapshot, instant time.Time, begun int, late b
 // complete, and why the replication barrier refused.
 var splitFamilies = []string{"hoardmq_forward_failures_total", "hoardmq_replication_barrier_failures_total"}
 
-// forgottenFamily is WI 1625's forget: a lost owner's routes dropped because
-// its sessions are served elsewhere.
+// forgottenFamily is the forget: a lost owner's routes dropped because its
+// sessions are served elsewhere.
 const forgottenFamily = "hoardmq_route_owners_forgotten_total"
 
 // familySum adds every series of a family in one survivor's snapshot.

@@ -50,8 +50,8 @@ func TestLivenessViolations(t *testing.T) {
 			t.Errorf("%s: property %q, want %q", tc.name, v[0].Property, PropRecovers)
 		}
 		// The node and the code both have to be in the text: "a node refused"
-		// without saying which, or with what, is the reconstruction WI 1494
-		// had to do by hand.
+		// without saying which, or with what, leaves the reconstruction to be
+		// done by hand.
 		if !strings.Contains(v[0].Detail, "n2") || !strings.Contains(v[0].Detail, tc.code.String()) {
 			t.Errorf("%s: %q names neither the node nor the code", tc.name, v[0].Detail)
 		}
@@ -139,7 +139,7 @@ func TestLivenessProbeAnswersOnAHealthyCluster(t *testing.T) {
 	}
 }
 
-// TestPublishFailuresAreAttributedToANode covers B3: the total was already
+// TestPublishFailuresAreAttributedToANode: the total was already
 // reported, the node was not.
 func TestPublishFailuresAreAttributedToANode(t *testing.T) {
 	l := &Ledger{}

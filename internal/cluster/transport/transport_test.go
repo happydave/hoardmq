@@ -693,7 +693,7 @@ func TestUrgentLaneRefusesWhenFull(t *testing.T) {
 	c.nodes["n1"].t.pauseWrites.Store(false)
 }
 
-// TestSlowHandlerDoesNotSilenceThePeer is WI 1340's receiver-side control:
+// TestSlowHandlerDoesNotSilenceThePeer is a receiver-side control:
 // a handler that holds the reader for longer than the silence limit must
 // not make the peer look silent. Before dispatch moved off the reader the
 // heartbeat behind the frame went unread and the peer was declared down.
@@ -923,7 +923,7 @@ func TestSendErrors(t *testing.T) {
 
 // TestPeerInfoShowsFramesQueuedBehindAPausedWriter: frames admitted while the
 // writer is held appear in the sender's queue length, and the queue empties
-// once the writer resumes (WI 1474). Without the figure, a frame that never
+// once the writer resumes. Without the figure, a frame that never
 // left the sender and a frame the peer never read look the same.
 func TestPeerInfoShowsFramesQueuedBehindAPausedWriter(t *testing.T) {
 	const queued = 50

@@ -6,9 +6,9 @@ import (
 	"testing"
 )
 
-// TestFreePortNeverRepeats: one process never hands out a port twice (WI
-// 1488). The window is narrowed so that without the record a repeat is all
-// but certain: 60 draws from 121 ports.
+// TestFreePortNeverRepeats: one process never hands out a port twice. The
+// window is narrowed so that without the record a repeat is all but certain:
+// 60 draws from 121 ports.
 func TestFreePortNeverRepeats(t *testing.T) {
 	saved := portWindowOf
 	portMu.Lock()
@@ -35,7 +35,7 @@ func TestFreePortNeverRepeats(t *testing.T) {
 
 // TestNewStartsAgainWhenADrawnPortIsTaken: a port taken between the draw and
 // the bind makes the first start fail; New stops what it started and starts
-// the cluster again on new addresses (WI 1488).
+// the cluster again on new addresses.
 func TestNewStartsAgainWhenADrawnPortIsTaken(t *testing.T) {
 	held, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

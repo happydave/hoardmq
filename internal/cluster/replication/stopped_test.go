@@ -56,8 +56,8 @@ func assertNoGoroutineStarted(t *testing.T, r *Replicator) {
 
 // TestStoppedReplicatorStartsNoStream: once Stop has run, a peer with no
 // stream gets a closed one that was never recorded and never started a send
-// loop. This is the defect WI 1705's race report named, asserted without
-// needing the race to happen.
+// loop. This is the defect behind a data race between the stream's start and
+// Stop, asserted without needing the race to happen.
 func TestStoppedReplicatorStartsNoStream(t *testing.T) {
 	r, held := stoppedReplicator(t)
 

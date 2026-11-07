@@ -118,6 +118,9 @@ type Store struct {
 	// whose state was read before one does not replace it.
 	checkpointMu sync.Mutex
 	rewrites     uint64
+	// lastPayload, under checkpointMu, is the last checkpoint payload's
+	// length, the next one's buffer size.
+	lastPayload int
 
 	checkpoints         atomic.Int64
 	checkpointNanos     atomic.Int64
@@ -197,7 +200,7 @@ func Open(dir string, opts Options) (*Store, error) {
 	// A power cut inside a repair, after its checkpoint and before its new
 	// segment, leaves the checkpoint past the log's end. Recovery replays from
 	// one past the checkpoint, so the next record must be appended there.
-	if idx, ok := l.CheckpointIndex(); ok && idx > l.LastIndex() {
+	if idx, ahead := checkpointAhead(l); ahead {
 		s.log.Warn("checkpoint is newer than the log; appending after it", "checkpoint", idx, "log", l.LastIndex())
 		if err := l.ContinueAfter(idx); err != nil {
 			_ = l.Close()
@@ -592,30 +595,73 @@ func (s *Store) SetTap(tap func(Record) func()) {
 // after it. An unknown record type, a checksum failure or a record the log no
 // longer holds after the checkpoint is fatal.
 func (s *Store) Recover() (*State, error) {
-	state := NewState()
-	from := uint64(1)
-	var held *heldRecords
-	idx, payload, ok, err := s.wal.RecoveryCheckpoint()
-	if err != nil {
+	state, idx, ok, err := recoverLog(s.wal)
+	var gap *wal.GapError
+	if errors.As(err, &gap) {
 		s.log.Error("refusing to recover the journal", "err", err)
+	}
+	if err != nil {
 		return nil, err
 	}
 	if ok {
+		s.checkpointIdx.Store(idx)
+	}
+	return state, nil
+}
+
+// recoverLog rebuilds the state from l's latest checkpoint and the records
+// after it, returning the checkpoint's index when there is one.
+func recoverLog(l *wal.Log) (*State, uint64, bool, error) {
+	state := NewState()
+	from := uint64(1)
+	var held *heldRecords
+	idx, payload, ok, err := l.RecoveryCheckpoint()
+	if err != nil {
+		return nil, 0, false, err
+	}
+	if ok {
 		if err := json.Unmarshal(payload, state); err != nil {
-			return nil, fmt.Errorf("store: checkpoint %d: %w", idx, err)
+			return nil, 0, false, fmt.Errorf("store: checkpoint %d: %w", idx, err)
 		}
 		from = idx + 1
 		held = heldBy(state)
-		s.checkpointIdx.Store(idx)
 	}
-	err = s.wal.Iterate(from, func(r wal.Record) error {
+	err = l.Iterate(from, func(r wal.Record) error {
 		return replayOnto(state, held, r.Index, r.Type, r.Payload)
 	})
 	if err != nil {
-		return nil, err
+		return nil, 0, false, err
 	}
 	state.Normalize()
-	return state, nil
+	return state, idx, ok, nil
+}
+
+// checkpointAhead reports whether l's newest verified checkpoint is past
+// its last index, which Open answers by appending after the checkpoint.
+func checkpointAhead(l *wal.Log) (uint64, bool) {
+	idx, ok := l.CheckpointIndex()
+	return idx, ok && idx > l.LastIndex()
+}
+
+// Verified is what a start of a store over an inspected log would do after
+// the log's own survey.
+type Verified struct {
+	// AppendAfter is the checkpoint a start appends after, 0 when it does
+	// not need to.
+	AppendAfter uint64
+	// Err is what the start's recovery refuses on.
+	Err error
+}
+
+// VerifyLog runs a start's checks and recovery over l, an inspected log
+// (wal.Inspect), writing nothing.
+func VerifyLog(l *wal.Log) Verified {
+	var v Verified
+	if idx, ahead := checkpointAhead(l); ahead {
+		v.AppendAfter = idx
+	}
+	_, _, _, v.Err = recoverLog(l)
+	return v
 }
 
 // Snapshot is the extension API's: the live state a checkpoint writes.
@@ -655,10 +701,13 @@ func (s *Store) Checkpoint(snapshot Snapshot) error {
 		}
 	}
 	state.Through = through
-	payload, err := json.Marshal(state)
+	// Sized from the last payload with an eighth to spare, so the buffer
+	// does not grow by copying.
+	payload, err := encodeCheckpoint(state, s.lastPayload+s.lastPayload/8)
 	if err != nil {
 		return err
 	}
+	s.lastPayload = len(payload)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -786,11 +835,17 @@ func (s *Store) Dropped(k Key, entrySeq uint64) error {
 }
 
 // Retain records a retained message stored.
-func (s *Store) Retain(m *message.Message) error {
-	return s.appendRecord(extstore.EncodeRetain(m))
+func (s *Store) Retain(m *message.Message, v Version) error {
+	return s.appendRecord(extstore.EncodeRetain(m, v))
 }
 
-// RetainDelete records a retained message removed.
-func (s *Store) RetainDelete(ns, topic string) error {
-	return s.appendRecord(extstore.EncodeRetainDelete(ns, topic))
+// RetainClear records a client's clear of a retained topic: a tombstone at v.
+func (s *Store) RetainClear(ns, topic string, v Version) error {
+	return s.appendRecord(extstore.EncodeRetainClear(ns, topic, v))
+}
+
+// RetainDrop records whatever is held for a retained topic removed: a copy
+// drop.
+func (s *Store) RetainDrop(ns, topic string) error {
+	return s.appendRecord(extstore.EncodeRetainDrop(ns, topic))
 }

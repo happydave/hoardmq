@@ -14,7 +14,7 @@ import (
 // own subscriber. B's application of that forward is held while the
 // subscriber connects to B, which takes the session over from A holding the
 // message. When the forward is applied the subscriber must not be given the
-// message a second time (WI 1521).
+// message a second time.
 func TestHandedOverSessionIsNotGivenALateForwardAgain(t *testing.T) {
 	const topic = "late/t"
 	var hold atomic.Bool

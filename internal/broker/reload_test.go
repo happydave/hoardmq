@@ -292,6 +292,26 @@ func TestReloadKeepsTheAdministeredOverride(t *testing.T) {
 	putLimits(config.LimitsOverride{}, 5)
 }
 
+// TestOfflineQoS0IsPutIntoForceAtStartAndOnReload: the node starts with the
+// configured setting, and a reload changes it without a restart.
+func TestOfflineQoS0IsPutIntoForceAtStartAndOnReload(t *testing.T) {
+	n := startReloadable(t, nil)
+	if n.srv.sessions.CurrentLimits().DropOfflineQoS0 {
+		t.Fatal("the default drops an offline session's QoS 0")
+	}
+	n.rewrite(t, func(d *config.Document) { d.Limits.OfflineQoS0 = "drop" })
+	if r := n.srv.Reload(); !r.Applied {
+		t.Fatalf("reload: %+v", r)
+	}
+	if !n.srv.sessions.CurrentLimits().DropOfflineQoS0 {
+		t.Fatal("the reloaded drop is not in force")
+	}
+	d := startReloadable(t, func(d *config.Document) { d.Limits.OfflineQoS0 = "drop" })
+	if !d.srv.sessions.CurrentLimits().DropOfflineQoS0 {
+		t.Fatal("a node started with drop does not drop")
+	}
+}
+
 // TestReloadPutsEachComponentIntoForce: the expiry cap, the overload limits
 // and the flapping detector each take the reloaded values.
 func TestReloadPutsEachComponentIntoForce(t *testing.T) {

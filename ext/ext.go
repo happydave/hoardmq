@@ -21,7 +21,7 @@ import (
 
 // APIVersion is the extension API's semantic version, independent of the
 // broker's.
-const APIVersion = "0.3.0"
+const APIVersion = "0.9.0"
 
 // ID is a module identifier of the form family.name.
 type ID string
@@ -66,6 +66,11 @@ const (
 	// CapPublishAdmission may refuse a client's publish before any delivery
 	// (PublishAdmission).
 	CapPublishAdmission
+	// CapUnsubscribe sees each filter of an UNSUBSCRIBE
+	// (UnsubscribeInterceptor).
+	CapUnsubscribe
+	// CapCluster is told of cluster events (ClusterListener).
+	CapCluster
 )
 
 // Has reports whether c includes every bit of want.

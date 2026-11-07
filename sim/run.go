@@ -107,7 +107,7 @@ func Run(t testing.TB, o RunOptions) Report {
 	}
 	sampler := newSampler(c)
 	// Every node's view of the workload's topics, so an acknowledged loss
-	// carries the routing state that produced it (WI 1354).
+	// carries the routing state that produced it.
 	routes := newRouteSampler(c, w.Topics)
 	sampler.start()
 	w.Start()
@@ -160,9 +160,9 @@ func Run(t testing.TB, o RunOptions) Report {
 	// takeover that produced it plus one acknowledgement round.
 	routes.stop()
 	// Every fault is healed, every stopped node restarted and the cluster
-	// settled: a node that cannot accept a publish now has no excuse left
-	// (WI 1502). The topic has no subscriber, so the healthy answer is No
-	// Matching Subscribers.
+	// settled: a node that cannot accept a publish now has no excuse left.
+	// The topic has no subscriber, so the healthy answer is No Matching
+	// Subscribers.
 	watch.giveUntil(livenessBound(c))
 	liveness := livenessProbes(c, "liveness/probe")
 	recovery := watch.finish(c)
@@ -182,12 +182,12 @@ func Run(t testing.TB, o RunOptions) Report {
 	}
 	// Why a build refused, from the brokers' own counters rather than the
 	// clients' error strings: a change in the refusal rate is then visible
-	// in every corpus run instead of only on a cluster (WI 1351).
+	// in every corpus run instead of only on a cluster.
 	for reason, n := range refusalsByReason(c) {
 		rep.Stats["refused."+reason] = n
 	}
-	// How often a late forward met a session installed holding its message
-	// (WI 1521): the corpus reaches the path when this is above zero.
+	// How often a late forward met a session installed holding its message:
+	// the corpus reaches the path when this is above zero.
 	rep.Stats["deliveries.duplicateSkipped"] = duplicatesSkipped(c)
 	// Evidence capture only: with the env var unset this is a no-op, and a
 	// failure inside it never changes the verdict.
@@ -302,15 +302,15 @@ func barrierFailuresByNode(c *Cluster) map[string]string {
 				if m.Name == "hoardmq_replication_barrier_failures_total" && m.Value > 0 {
 					parts = append(parts, fmt.Sprintf("%s/%s=%d", m.Labels["peer"], m.Labels["reason"], int(m.Value)))
 				}
-				// WI 1510 investigation: barriers that passed with a refused
-				// sequence inside their window. Not a failure — the opposite,
-				// and the reason it is reported beside them.
+				// Barriers that passed with a refused sequence inside their
+				// window. Not a failure — the opposite, and the reason it is
+				// reported beside them.
 				if m.Name == "hoardmq_replication_barrier_escapes_total" && m.Value > 0 {
 					parts = append(parts, fmt.Sprintf("%s/ESCAPED=%d", m.Labels["peer"], int(m.Value)))
 				}
 				// A refusal that could not be scoped blocks the whole stream,
-				// which is the behaviour WI 1510 removed; its rate says how
-				// much of the scoping holds.
+				// which is the behaviour the scoping removed; its rate says
+				// how much of the scoping holds.
 				if m.Name == "hoardmq_replication_refusal_fallback_total" && m.Value > 0 {
 					parts = append(parts, fmt.Sprintf("%s/FALLBACK-%s=%d", m.Labels["peer"], m.Labels["kind"], int(m.Value)))
 				}

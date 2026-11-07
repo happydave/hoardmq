@@ -10,7 +10,7 @@ import (
 
 // refusingForwarder stands for a routing plane that cannot answer for a
 // publish — because a subscriber's node is down, or because an owner's
-// routes are unknown to this node (WI 1351) — or, with sent above zero and
+// routes are unknown to this node — or, with sent above zero and
 // no error, one that forwarded the message to other nodes.
 type refusingForwarder struct {
 	sent int
@@ -57,7 +57,7 @@ func TestAcceptedForwardStillReportsNoMatchingSubscribers(t *testing.T) {
 
 // TestForwardedMatchIsNotNoMatchingSubscribers: with no local subscriber and
 // a forward sent to another node, the publish reached a subscriber and must
-// be acknowledged Success, not 0x10 (WI 1487).
+// be acknowledged Success, not 0x10.
 func TestForwardedMatchIsNotNoMatchingSubscribers(t *testing.T) {
 	m, _ := newManager(t, func(o *Options) { o.Forwarder = refusingForwarder{sent: 1} })
 	pub := newFake("pub", packet.V5, 100)

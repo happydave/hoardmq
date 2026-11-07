@@ -139,7 +139,7 @@ func importAfterEmptyAnswerOnce(t *testing.T, defect bool) (importRaceOutcome, s
 	})
 	pub, _ := nodes[second].connect("tcp", packet.V5, &packet.Connect{ClientID: "pub", CleanStart: true}, false)
 	// A freshly formed cluster can refuse the first QoS 1 publish forwarded
-	// to a peer (WI 1572): publish until three are accepted.
+	// to a peer: publish until three are accepted.
 	accepted := 0
 	for pid := uint16(1); pid < 60 && accepted < 3; pid++ {
 		pub.send(&packet.Publish{Topic: "t/x", QoS: 1, PacketID: pid, Payload: []byte(fmt.Sprint("m", accepted+1))})

@@ -9,7 +9,7 @@ import (
 	"github.com/happydave/hoardmq/internal/packet"
 )
 
-// TestAWaitingNodeAdmitsNoClient (WI 1735): a node whose data is gone,
+// TestAWaitingNodeAdmitsNoClient: a node whose data is gone,
 // restarted while the group holds its admission, is not ready and refuses a
 // client for as long as it waits, and its wait gauge counts the time; once
 // admitted it becomes ready and the gauge reads zero.
@@ -25,7 +25,7 @@ func TestAWaitingNodeAdmitsNoClient(t *testing.T) {
 	if err := os.RemoveAll(doc.Node.DataDir); err != nil {
 		t.Fatal(err)
 	}
-	srv, err := NewWithHooks(doc, nil, fixtureHooks)
+	srv, err := newFixtureServer(t, doc)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -90,6 +90,30 @@ func TestVersion(t *testing.T) {
 	}
 }
 
+// TestStampedVersion: a version set at link time is what Version and the
+// version command report; unset, the build information decides.
+func TestStampedVersion(t *testing.T) {
+	saved := stampedVersion
+	t.Cleanup(func() { stampedVersion = saved })
+	stampedVersion = ""
+	derived := Version()
+	if derived == "" || derived == "v9.8.7-stamp" {
+		t.Fatalf("unstamped version %q, want one derived from the build information", derived)
+	}
+	stampedVersion = "v9.8.7-stamp"
+	if got := Version(); got != "v9.8.7-stamp" {
+		t.Fatalf("Version() = %q, want the stamp", got)
+	}
+	_, out, _ := run(t, nil, "version")
+	if first, _, _ := strings.Cut(out, "\n"); first != "hoardmq v9.8.7-stamp" {
+		t.Errorf("version's first line %q, want the stamp", first)
+	}
+	stampedVersion = ""
+	if got := Version(); got != derived {
+		t.Errorf("unstamped Version() = %q, want %q", got, derived)
+	}
+}
+
 // TestBuildVersion: the default binary's version is its main module's; a
 // binary hoardmq-build compiled reads the broker's from its dependencies.
 func TestBuildVersion(t *testing.T) {
@@ -103,6 +127,8 @@ func TestBuildVersion(t *testing.T) {
 			Deps: []*debug.Module{{Path: "example.com/m", Version: "v1.0.0"}, {Path: brokerModule, Version: "v0.3.1"}}}, "v0.3.1"},
 		{"custom, a checkout", debug.BuildInfo{Main: debug.Module{Path: "hoardmq-custom", Version: "(devel)"},
 			Deps: []*debug.Module{{Path: brokerModule, Version: "v0.0.0-00010101000000-000000000000", Replace: &debug.Module{Path: "/src/hoardmq"}}}}, "devel (/src/hoardmq)"},
+		{"custom, a checkout as go version -m records it", debug.BuildInfo{Main: debug.Module{Path: "hoardmq-custom", Version: "(devel)"},
+			Deps: []*debug.Module{{Path: brokerModule, Version: "v0.0.0-00010101000000-000000000000", Replace: &debug.Module{Path: "/src", Version: "(devel)"}}}}, "devel (/src)"},
 	} {
 		if got := buildVersion(&c.info); got != c.want {
 			t.Errorf("%s: %q, want %q", c.name, got, c.want)
@@ -384,6 +410,9 @@ func TestNoWorkPathsWriteNothing(t *testing.T) {
 		{"check", "-h"},
 		{"check", "-config", "absent.json"},
 		{"check", "-config", "valid.json"},
+		{"wal", "verify", "-config", "valid.json"},
+		{"wal", "repair", "-config", "valid.json"},
+		{"wal"},
 		{"check", "-config", "invalid.json"},
 		{"check", "-config", "."},
 		{"serve"},

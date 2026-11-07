@@ -264,7 +264,7 @@ func TestGapInForwardsFailsTheBarrier(t *testing.T) {
 
 // TestDataResetFailsBarrierKeepsRoutes: a reset of the data connection
 // fails the barrier over frames in flight and re-syncs the routes, but does
-// not hide the peer's entries — the peer is still up (WI 1340).
+// not hide the peer's entries — the peer is still up.
 func TestDataResetFailsBarrierKeepsRoutes(t *testing.T) {
 	c := newCluster(t, []string{"a", "b"}, dispatch.RoundRobin)
 	a, b := c.nodes["a"], c.nodes["b"]

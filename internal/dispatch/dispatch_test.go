@@ -38,6 +38,7 @@ func (f *fakeConn) Version() packet.Version        { return f.version }
 func (f *fakeConn) Identity() *auth.Identity       { return &f.identity }
 func (f *fakeConn) SessionExpiryOverride() *uint32 { return nil }
 func (f *fakeConn) Send(packet.Packet) error       { return nil }
+func (f *fakeConn) Offer(packet.Packet) error      { return nil }
 func (f *fakeConn) Close(packet.ReasonCode)        {}
 func (f *fakeConn) SendQuota() int                 { return f.quota }
 func (f *fakeConn) Deliver(p *packet.Publish) error {

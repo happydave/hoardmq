@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-// stallWatch is the direct pause observer (WI 1352). It sleeps a fixed
+// stallWatch is the direct pause observer. It sleeps a fixed
 // short period and measures how long the sleep actually took; the excess
 // over the period is how long this process was not running. Its own
 // starvation is the measurement, which is what makes it catch stalls the
@@ -47,7 +47,7 @@ const (
 	stallPeriod = 50 * time.Millisecond
 	// stallThreshold is the excess worth recording as an event: five
 	// periods, an order of magnitude above ordinary scheduling jitter and
-	// two below the 5.8 s silence in WI 1340 round 8 that motivated this.
+	// two below the 5.8 s silence that motivated this.
 	stallThreshold = 250 * time.Millisecond
 	// stallMaxEvents bounds the list; beyond it events are counted, not
 	// kept, and the count is reported so a truncated list cannot read as a
@@ -151,8 +151,8 @@ func readEnvironment() Environment {
 // "nothing happened" is distinguishable from one that means "unknown".
 // It lives here rather than in the test file that fills it because the
 // helpers below consume it, and a non-test file cannot reference a type
-// declared in a _test.go — which broke `go build ./...` in WI 1352 without
-// any documented gate noticing (WI 1354).
+// declared in a _test.go — which once broke `go build ./...` without any
+// documented gate noticing.
 type intervalSample struct {
 	Phase       string  `json:"phase"`
 	AfterSec    float64 `json:"after_sec"`
@@ -160,7 +160,7 @@ type intervalSample struct {
 	SchedMaxSec float64 `json:"sched_max_sec"`
 	StallSec    float64 `json:"stall_sec"`
 	Measured    bool    `json:"measured"`
-	// Host is what the machine was doing over the same interval (WI 1375):
+	// Host is what the machine was doing over the same interval:
 	// the pressure figures say how much of a stall was the machine waiting
 	// on a resource, which the fields above cannot distinguish from the
 	// process being descheduled.

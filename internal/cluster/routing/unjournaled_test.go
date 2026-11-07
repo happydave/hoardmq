@@ -182,8 +182,8 @@ func TestGroupGiveWhoseDeliveryFailedToJournalIsRefused(t *testing.T) {
 }
 
 // TestProvenMoveDoesNotAcceptAForwardThatFailedToJournal: the new owner's
-// forward, numbered from its mark, is accepted on the old node as proven
-// (WI 1806) — unless the delivery it made there failed to journal.
+// forward, numbered from its mark, is accepted on the old node as proven —
+// unless the delivery it made there failed to journal.
 func TestProvenMoveDoesNotAcceptAForwardThatFailedToJournal(t *testing.T) {
 	m := newMoveTrio(t, time.Hour, true)
 	m.newOwnerRoute()

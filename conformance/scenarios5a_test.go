@@ -138,6 +138,36 @@ func TestZeroLengthClientID(t *testing.T) {
 func TestOfflineMessageQueueing(t *testing.T) {
 	Statement(t, Spec5, "MQTT-3.1.2-5", "MQTT-3.1.2-23", "MQTT-3.2.2-2", "MQTT-4.4.0-1", "MQTT-3.3.1-3")
 	n := StartNode(t, nil)
+	a, ack := n.Must5(Connect5{ClientID: "myclientid", CleanStart: true, SessionExpiry: u32(99999)})
+	if ack.SessionPresent {
+		t.Fatal("present after clean start")
+	}
+	a.Sub(wildtopics[5], 2)
+	a.Disconnect(nil)
+	n.WaitOffline("myclientid")
+	b, _ := n.Must5(Connect5{ClientID: "myclientid2", CleanStart: true})
+	b.Pub(topics[1], 0, false, "qos 0", nil)
+	b.Pub(topics[2], 1, false, "qos 1", nil)
+	b.Pub(topics[3], 2, false, "qos 2", nil)
+	b.Disconnect(nil)
+	a, ack = n.Must5(Connect5{ClientID: "myclientid", CleanStart: false, SessionExpiry: u32(99999)})
+	if !ack.SessionPresent {
+		t.Fatal("session not present")
+	}
+	// HoardMQ queues QoS 0 for offline sessions too.
+	ms := a.Expect(3, 3*time.Second)
+	if q := qosSet(ms); !q[0] || !q[1] || !q[2] {
+		t.Fatalf("qos set %v", q)
+	}
+	a.Disconnect(nil)
+}
+
+// TestOfflineQoS0Dropped: with limits.offlineQoS0 "drop", the resumed session
+// is sent the QoS 1 and 2 messages published while it was offline and not the
+// QoS 0 one. MQTT 5.0 lets a server store QoS 0 for an offline session or not.
+func TestOfflineQoS0Dropped(t *testing.T) {
+	Statement(t, Spec5, "MQTT-3.1.2-5")
+	n := StartNode(t, func(d *config.Document) { d.Limits.OfflineQoS0 = "drop" })
 	a, _ := n.Must5(Connect5{ClientID: "myclientid", CleanStart: true, SessionExpiry: u32(99999)})
 	a.Sub(wildtopics[5], 2)
 	a.Disconnect(nil)
@@ -151,11 +181,11 @@ func TestOfflineMessageQueueing(t *testing.T) {
 	if !ack.SessionPresent {
 		t.Fatal("session not present")
 	}
-	// HoardMQ queues QoS 0 for offline sessions too.
-	ms := a.Expect(3, 3*time.Second)
-	if q := qosSet(ms); !q[0] || !q[1] || !q[2] {
-		t.Fatalf("qos set %v", q)
+	ms := a.Expect(2, 3*time.Second)
+	if q := qosSet(ms); q[0] || !q[1] || !q[2] {
+		t.Fatalf("qos set %v, want 1 and 2 only", q)
 	}
+	a.ExpectNone(500 * time.Millisecond)
 	a.Disconnect(nil)
 }
 
@@ -328,5 +358,14 @@ func TestSessionExpiry(t *testing.T) {
 		t.Fatal("override to 0 did not end the session")
 	}
 	a.Disconnect(nil)
+	// A Clean Start over a held session, read through the project codec:
+	// paho ignores CONNACK bits 7-1, the codec refuses them set.
+	a, _ = connect(true, 60)
+	a.Sub(topics[0], 2)
+	a.Disconnect(nil)
+	r := n.DialRaw(packet.V5)
+	if raw := r.Connect(&packet.Connect{ClientID: "myclientid", CleanStart: true}); raw.SessionPresent || raw.ReasonCode != packet.Success {
+		t.Fatalf("clean start over a held session: %+v", raw)
+	}
 	_ = config.Default
 }

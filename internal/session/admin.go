@@ -102,6 +102,23 @@ func (m *Manager) Conn(ns, id string) (Connection, bool) {
 	return s.conn, s.conn != nil
 }
 
+// DropWill discards the Will of the session c is attached to, while c is
+// still its connection, so that closing c publishes none; a client that has
+// reconnected meanwhile keeps its new Will. It reports whether it dropped one.
+func (m *Manager) DropWill(ns, id string, c Connection) bool {
+	s := m.held(ns, id)
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.conn != c || s.will == nil {
+		return false
+	}
+	s.will, s.willArmed = nil, false
+	return true
+}
+
 // InvalidateResult is what Invalidate found and did.
 type InvalidateResult struct {
 	// Found is whether a session was held here; Refused whether admit
@@ -119,9 +136,10 @@ type InvalidateResult struct {
 // journal delete written, the session's end is reported (the lease is
 // released through Options.Ended), and its Will, when one is set on a
 // connected session or armed on an offline one, is published, because the
-// session has ended. admit is called with the session's token under its
-// shard lock before anything changes; a refusal changes nothing.
-func (m *Manager) Invalidate(ns, id string, reason packet.ReasonCode, admit func(token uint64) bool) InvalidateResult {
+// session has ended, unless will is false. admit is called with the
+// session's token under its shard lock before anything changes; a refusal
+// changes nothing.
+func (m *Manager) Invalidate(ns, id string, reason packet.ReasonCode, admit func(token uint64) bool, will bool) InvalidateResult {
 	release := m.admit()
 	defer release()
 	k := key{ns, id}
@@ -149,7 +167,10 @@ func (m *Manager) Invalidate(ns, id string, reason packet.ReasonCode, admit func
 	// A connected session's Will is set and not yet armed; an offline one
 	// still has its Will only while it is armed (a normal DISCONNECT clears
 	// it). Either way the session ends here, so it goes out now.
-	will := s.will
+	ended := s.will
+	if !will {
+		ended = nil
+	}
 	s.will, s.willArmed = nil, false
 	redistribute := m.discardLocked(sh, s)
 	s.mu.Unlock()
@@ -162,8 +183,8 @@ func (m *Manager) Invalidate(ns, id string, reason packet.ReasonCode, admit func
 		res.WasOnline = true
 		old.Close(reason)
 	}
-	if will != nil {
-		m.publishWill(will, s)
+	if ended != nil {
+		m.publishWill(ended, s)
 		res.WillPublished = true
 	}
 	m.redistribute(s, redistribute)
@@ -180,19 +201,39 @@ func (m *Manager) QueryRetained(ns, filter string) []*message.Message {
 
 // DeleteRetained removes the retained message on a topic the way a retained
 // PUBLISH with an empty payload does, without delivering anything to
-// subscribers, and returns the scope a durability wait names. appended is
-// false when the delete was stored here and its record failed to append: no
-// durability wait can then answer for it. A delete handed to the shard
-// leader is answered by the leader's acknowledgement.
+// subscribers, and returns the scope a durability wait names. At the shard's
+// leader it is a clear, a stamped tombstone. appended is false when the delete
+// was to be stored here and was not: the retained-topic limit refused its
+// tombstone, an unversioned delete met a versioned entry, or its record failed
+// to append. No durability wait can then answer for it. A delete handed to the
+// shard leader is answered by the leader's acknowledgement.
 func (m *Manager) DeleteRetained(ns, topic string) (scope store.Scope, appended bool) {
 	msg := &message.Message{Namespace: ns, Topic: topic, Retain: true, Arrived: m.clock.Now()}
 	local := true
+	var epoch uint64
 	if r := m.Replication(); r != nil {
-		local = r.StoreRetained(msg)
+		local, epoch = storeRetainedAt(r, msg, sourceClient)
 	}
 	appended = true
-	if local {
-		m.router.Retain(msg)
+	switch {
+	case local && epoch > 0:
+		// The leader's delete is a clear: a tombstone stamped like a write,
+		// which the retained-topic limit decides as it does a client's.
+		v, ok := m.retainStampedAtLimit(msg, epoch)
+		if !ok {
+			m.limitRefused(msg)
+			return store.Scope{Namespace: ns, Topic: topic}, false
+		}
+		m.stamped("admin")
+		w := m.ackWriter()
+		if c := w.retainAt(msg, v); c > 0 {
+			m.router.MarkRetainedAppended(msg, v, c)
+		}
+		appended = !w.unjournaled()
+	case local:
+		if m.retainUnderLimit(msg, 0, "admin") != store.RetainStored {
+			return store.Scope{Namespace: ns, Topic: topic}, false
+		}
 		w := m.ackWriter()
 		w.retain(msg)
 		appended = !w.unjournaled()

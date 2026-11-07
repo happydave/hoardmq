@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/happydave/hoardmq/ext"
 	"github.com/happydave/hoardmq/internal/cluster/consensus"
 	"github.com/happydave/hoardmq/internal/cluster/lease"
 	"github.com/happydave/hoardmq/internal/conn"
@@ -101,6 +102,7 @@ func (s *Server) Drain() {
 	s.drainer.once.Do(func() {
 		close(s.drainer.draining)
 		s.ready.Store(false)
+		s.clusterEvent(ext.ClusterEvent{Kind: ext.DrainStarted, Member: s.config().Node.Name})
 		go s.drainer.run()
 	})
 }

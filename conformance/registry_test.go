@@ -4,7 +4,11 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/happydave/hoardmq/internal/packet"
 )
@@ -59,6 +63,67 @@ func TestStatementsAndScope(t *testing.T) {
 			}
 			if e.Reason == "" {
 				t.Errorf("scope.json: %s %s has no reason", spec, id)
+			}
+		}
+	}
+}
+
+// sharedInSpec names the statements a specification states in the same
+// words, one per property; any other shared text is an extraction error.
+var sharedInSpec = map[Spec][][]string{
+	Spec5: {
+		{"MQTT-3.2.2-19", "MQTT-3.2.2-20"},
+		{"MQTT-3.4.2-2", "MQTT-3.4.2-3"},
+		{"MQTT-3.5.2-2", "MQTT-3.5.2-3"},
+	},
+}
+
+var statementID = regexp.MustCompile(`^MQTT-\d+\.\d+\.\d+-\d+$`)
+
+// TestStatementTexts checks each statements file's rows: an identifier in
+// the canonical form, a text without U+FFFD, and no text shared by two
+// identifiers unless sharedInSpec names them together.
+func TestStatementTexts(t *testing.T) {
+	for spec, name := range specFiles {
+		data, err := os.ReadFile(filepath.Join("statements", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var list []statement
+		if err := json.Unmarshal(data, &list); err != nil {
+			t.Fatal(err)
+		}
+		text := map[string]string{}
+		byText := map[string][]string{}
+		for _, s := range list {
+			if !statementID.MatchString(s.ID) {
+				t.Errorf("%s: identifier %q is not of the form MQTT-n.n.n-n", name, s.ID)
+			}
+			if strings.ContainsRune(s.Text, utf8.RuneError) {
+				t.Errorf("%s: %s holds U+FFFD: %q", name, s.ID, s.Text)
+			}
+			text[s.ID] = s.Text
+			key := strings.Join(strings.Fields(s.Text), " ")
+			byText[key] = append(byText[key], s.ID)
+		}
+		allowed := map[string]bool{}
+		for _, listed := range sharedInSpec[spec] {
+			group := append([]string(nil), listed...)
+			sort.Strings(group)
+			allowed[strings.Join(group, " ")] = true
+			for _, id := range group[1:] {
+				if text[id] == "" || text[id] != text[group[0]] {
+					t.Errorf("%s: %v are listed as one shared text but %s reads %q and %s reads %q", name, group, group[0], text[group[0]], id, text[id])
+				}
+			}
+		}
+		for _, ids := range byText {
+			if len(ids) < 2 {
+				continue
+			}
+			sort.Strings(ids)
+			if !allowed[strings.Join(ids, " ")] {
+				t.Errorf("%s: %v share one text: %q", name, ids, text[ids[0]])
 			}
 		}
 	}

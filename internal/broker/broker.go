@@ -58,8 +58,11 @@ type Server struct {
 	// audit is installed after the cluster transport is already running —
 	// the transport must bind before anything is created on disk — so the
 	// transport's own goroutines can read it while Start writes it.
-	audit     atomic.Pointer[audit.Log]
-	metrics   hook.Metrics
+	audit   atomic.Pointer[audit.Log]
+	metrics hook.Metrics
+	// dataGuard, when set, is called once the data directory exists and
+	// before anything in it is opened; its error stops the start.
+	dataGuard func() error
 	cluster   *transport.Transport
 	consensus *etcdraft.Core
 	// coreReady and leasesReady are consensus and leases as the routing
@@ -128,7 +131,11 @@ func NewWithHooks(cfg config.Document, log *slog.Logger, seams Hooks) (*Server, 
 	s.drainer = newDrainer(s)
 	s.passwords = auth.NewVerifyCache(time.Duration(cfg.Auth.Cache.TTLSeconds)*time.Second, cfg.Auth.Cache.MaxEntries)
 	auth.SetArgon2MemoryBytes(cfg.Auth.Argon2MemoryBytes)
-	reg, problems := module.New(cfg, moduleContext(cfg, log, services{s: s}, seams, s.passwords), hookPolicy(cfg))
+	mctx := moduleContext(cfg, log, services{s: s}, seams, s.passwords)
+	if cfg.Observability.Audit.Enabled {
+		mctx.Audit = moduleAuditor{s: s}
+	}
+	reg, problems := module.New(cfg, mctx, hookPolicy(cfg))
 	if len(problems) > 0 {
 		msgs := make([]string, 0, len(problems))
 		for _, p := range problems {
@@ -149,6 +156,7 @@ func NewWithHooks(cfg config.Document, log *slog.Logger, seams Hooks) (*Server, 
 		Capabilities:              cfg.MQTT.Capabilities(),
 		MaxPacketSize:             uint32(cfg.Limits.MaxPacketSize),
 		ReceiveMaximum:            uint16(cfg.Limits.ReceiveMaximum),
+		MaxInflight:               uint16(cfg.Limits.MaxInflightMessages),
 		MaxTopicAliasBytes:        cfg.Limits.MaxTopicAliasBytes,
 		MaxKeepAlive:              uint16(cfg.Limits.MaxKeepAlive),
 		ConnectTimeout:            time.Duration(cfg.Limits.ConnectTimeout) * time.Second,
@@ -252,6 +260,7 @@ func moduleContext(cfg config.Document, log *slog.Logger, svc module.Services, h
 			IgnoreChecksum: hooks.Defects.IgnoreChecksum,
 		},
 		Services:      svc,
+		DecisionTTL:   time.Duration(cfg.Auth.DecisionTTLSeconds) * time.Second,
 		Passwords:     passwords,
 		Observability: module.Observability{Address: cfg.Observability.Address, MetricsPath: cfg.Observability.MetricsPath, AdminOwnsDrain: cfg.Admin.Address != ""},
 	}
@@ -393,16 +402,16 @@ func (s *Server) Registry() *module.Registry { return s.registry }
 // without any lock a reconnect storm contends for: the listeners' handshake
 // slots and pause time, and the lease service's work queues. A metrics
 // snapshot walks the session table under its lock and has been seen to wait
-// minutes under a storm (WI 1292); a harness reads this instead.
+// minutes under a storm; a harness reads this instead.
 type StormStats struct {
 	Listeners []listener.Stats  `json:"listeners"`
 	LeaseWork []lease.WorkStats `json:"lease_work,omitempty"`
-	// Sync is the journal's group-commit picture (WI 1292 round 4).
+	// Sync is the journal's group-commit picture.
 	Sync *store.SyncStats `json:"sync,omitempty"`
 	// Lease is the lease service's liveness picture.
 	Lease *lease.LivenessStats `json:"lease,omitempty"`
 	// Takeover divides what a takeover pull waits for, as the requester and
-	// as the previous owner (WI 1691).
+	// as the previous owner.
 	Takeover *lease.TakeoverStats `json:"takeover,omitempty"`
 	// ReplicationFetch is this node's replica fetches, stage by stage, as
 	// the node that asked and as the holder that answered.
@@ -413,28 +422,28 @@ type StormStats struct {
 	// StoreAppend and ReplicaAppend are what each store's lock was held for
 	// by appends; ReplicationTap is the tap's share of the first, by part.
 	// ReplicationDrop is the owned-copy drop, which an upsert asks for inside
-	// that lock and which runs once it is released (WI 1688).
+	// that lock and which runs once it is released.
 	StoreAppend     *store.AppendStats     `json:"store_append,omitempty"`
 	ReplicaAppend   *store.AppendStats     `json:"replica_append,omitempty"`
 	ReplicationTap  *replication.TapStats  `json:"replication_tap,omitempty"`
 	ReplicationDrop *replication.DropStats `json:"replication_drop,omitempty"`
 	// ReplicationMaps is what this node saw of each recent shard-map version
 	// and why its driver checked the basis; RoutingForgets what its served
-	// checks saw of each lost owner (WI 1791).
+	// checks saw of each lost owner.
 	ReplicationMaps *replication.MapTimeline `json:"replication_maps,omitempty"`
 	RoutingForgets  []routing.ForgetEvent    `json:"routing_forgets,omitempty"`
 	// ReplicationStreams is what each replication stream to and from a peer
-	// was sent, refused and failed, over time (WI 1802).
+	// was sent, refused and failed, over time.
 	ReplicationStreams []replication.StreamTrace `json:"replication_streams,omitempty"`
 	// RoutingRefusals samples the forward refusals this node made or was told
-	// of, with the moving filters it knew of then (WI 1803).
+	// of, with the moving filters it knew of then.
 	RoutingRefusals *routing.RefusalTrace `json:"routing_refusals,omitempty"`
 	// OwnerKnowledge is the last spans in which this node lacked an owner's
-	// routes and refused QoS 1 and 2 publishes for it (WI 1571).
+	// routes and refused QoS 1 and 2 publishes for it.
 	OwnerKnowledge []routing.Episode `json:"owner_knowledge,omitempty"`
 	// Displaced is connections closed because a second CONNECT arrived for
 	// the same client identifier on this node — a SessionTakenOver that no
-	// lease movement explains (WI 1495).
+	// lease movement explains.
 	Displaced int64 `json:"displaced"`
 	// Connections this node closed, by the call that closed them. These plus
 	// Displaced account for every SessionTakenOver a client here can see.
@@ -453,31 +462,31 @@ type StormStats struct {
 	ImportWaitsImport int64 `json:"import_waits_import"`
 	// Consensus is the core's view — role, term, leader, commit/applied —
 	// and Peers the transport's, so a storm's timeline shows whether a
-	// leader exists and whether the links are up (WI 1337 round 5c: every
-	// renewal failed for want of a leader and nothing said why).
+	// leader exists and whether the links are up (a storm has seen every
+	// renewal fail for want of a leader and nothing say why).
 	Consensus *consensus.Status    `json:"consensus,omitempty"`
 	Peers     []transport.PeerInfo `json:"peers,omitempty"`
 	// PasswordCache is what the password-verification cache has done, and
 	// ConnectRateRefused the CONNECTs the connect-rate limits refused, by
-	// "<listener>/<limit>" (WI 1283).
+	// "<listener>/<limit>".
 	PasswordCache      auth.VerifyStats `json:"password_cache"`
 	ConnectRateRefused map[string]int64 `json:"connect_rate_refused,omitempty"`
 	// Overload is what the stress controller saw; OverloadRefused the CONNECTs
 	// refused while the cluster was at level 3; BansMet the CONNECTs a ban
 	// refused; FlappingTrips and FlappingBans the detector's trips and the
-	// bans it wrote (WI 1314).
+	// bans it wrote.
 	Overload        overloadStats `json:"overload"`
 	OverloadRefused int64         `json:"overload_refused"`
 	BansMet         int64         `json:"bans_met"`
 	FlappingTrips   int64         `json:"flapping_trips"`
 	FlappingBans    int64         `json:"flapping_bans"`
 	// Tracing is the OpenTelemetry exporter's counters, when traces.otlp is
-	// configured (WI 1313).
+	// configured.
 	Tracing *otel.Stats `json:"tracing,omitempty"`
 	// ReadMs is how long each part of this read took. Most parts are atomic
 	// reads, but the lease liveness read takes the lease table's lock, the
 	// consensus status the core's mutex, and the peers the transport's and
-	// each peer's; a storm can hold any of them for seconds (WI 1474).
+	// each peer's; a storm can hold any of them for seconds.
 	ReadMs map[string]float64 `json:"read_ms,omitempty"`
 }
 
@@ -598,22 +607,24 @@ func (s *Server) openStore() error {
 		metrics = m
 	}
 	sessOpts := session.Options{
-		Router:           s.router,
-		Namespace:        "default",
-		Node:             s.config().Node.Name,
-		MaxQueued:        s.config().Limits.MaxQueuedMessages,
-		DropNewest:       s.config().Limits.QueueDrop == "newest",
-		MaxSessionExpiry: uint32(s.config().Limits.MaxSessionExpiry),
-		MaxSubscriptions: s.config().Limits.MaxSubscriptions,
-		BindPrincipal:    s.config().Auth.SessionBinding != "off",
-		Shards:           s.config().Node.SessionShards,
-		StoreAdmission:   s.config().Node.StoreAdmission,
-		Authorizers:      s.opts.Authorizers,
-		Logger:           s.log,
-		Journal:          provider.Journal(),
-		Observer:         observer,
-		Metrics:          metrics,
-		Tracer:           s.registry.Tracer(),
+		Router:            s.router,
+		Namespace:         "default",
+		Node:              s.config().Node.Name,
+		MaxQueued:         s.config().Limits.MaxQueuedMessages,
+		DropNewest:        s.config().Limits.QueueDrop == "newest",
+		DropOfflineQoS0:   s.config().Limits.OfflineQoS0 == "drop",
+		MaxSessionExpiry:  uint32(s.config().Limits.MaxSessionExpiry),
+		MaxSubscriptions:  s.config().Limits.MaxSubscriptions,
+		MaxRetainedTopics: s.config().Limits.MaxRetainedTopics,
+		BindPrincipal:     s.config().Auth.SessionBinding != "off",
+		Shards:            s.config().Node.SessionShards,
+		StoreAdmission:    s.config().Node.StoreAdmission,
+		Authorizers:       s.opts.Authorizers,
+		Logger:            s.log,
+		Journal:           provider.Journal(),
+		Observer:          observer,
+		Metrics:           metrics,
+		Tracer:            s.registry.Tracer(),
 		Ended: func(ns, id string, epoch uint64) {
 			if s.leases != nil {
 				s.leases.Release(ns, id, epoch)
@@ -716,6 +727,12 @@ func (s *Server) Start() error {
 		unbind()
 		return fmt.Errorf("data directory: %w", err)
 	}
+	if s.dataGuard != nil {
+		if err := s.dataGuard(); err != nil {
+			unbind()
+			return err
+		}
+	}
 	if s.adminAPI != nil {
 		// Read only: the keys it holds go into the cluster's collection once
 		// the core is open.
@@ -777,6 +794,10 @@ func (s *Server) Start() error {
 	s.record("server", "server.start", s.config().Node.Name, "ok", nil)
 	s.wg.Add(1)
 	go s.checkpointLoop()
+	if s.registry.Hooks().Clustering() {
+		s.wg.Add(1)
+		go s.watchMembers()
+	}
 	for _, l := range s.listeners {
 		s.log.Info("listening", "listener", l.Config.Name, "type", l.Config.Type, "address", l.Addr().String())
 		s.wg.Add(1)
@@ -924,6 +945,22 @@ func (a auditor) Audit(actor, action, target, outcome string, detail map[string]
 	_ = a.l.Record(e)
 }
 
+// moduleAuditor is the audit log as modules reach it. Their events are
+// recorded lossy: a module may audit from a client's path, which never waits
+// on the audit log, so a full queue drops the event, counted in the log's own
+// drops, and Audit reports it.
+type moduleAuditor struct{ s *Server }
+
+func (a moduleAuditor) Audit(actor, action, target, outcome string, detail map[string]string) bool {
+	l := a.s.audit.Load()
+	if l == nil {
+		return false
+	}
+	before := l.Stats().Dropped
+	err := l.RecordLossy(audit.Event{Actor: actor, Action: action, Target: target, Outcome: outcome, Detail: detail})
+	return err == nil && l.Stats().Dropped == before
+}
+
 // count adds to a metric when a metrics provider is configured.
 func (s *Server) count(name string, labels map[string]string, delta float64) {
 	if s.metrics != nil {
@@ -1012,6 +1049,10 @@ func (s *Server) registerCollector() {
 			for c, n := range counts {
 				set("hoardmq_records", map[string]string{"collection": c}, float64(n))
 			}
+			set("hoardmq_records_limit", nil, float64(st.MaxRecords()))
+			for c, n := range st.FullRefusals() {
+				set("hoardmq_records_refused_total", map[string]string{"collection": c, "reason": records.RefusedFull}, float64(n))
+			}
 		}
 		if s.consensus != nil {
 			st := s.consensus.Status()
@@ -1042,9 +1083,10 @@ func (s *Server) registerCollector() {
 			take, evict, detach := s.sessions.CloseCounts()
 			fromImport := s.sessions.EvictsFromImport()
 			// The four causes the storm harness already reads, on /metrics:
-			// what closed a deployment's connections, and whether the imports
-			// of WI 1515 still evict any (WI 1523). "evict" excludes the
-			// import's share so the two do not double-count.
+			// what closed a deployment's connections, and whether importing an
+			// adopted session still evicts the client that reconnected while its
+			// state was pulled. "evict" excludes the import's share so the two
+			// do not double-count.
 			set("hoardmq_connections_closed_total", map[string]string{"cause": "take"}, float64(take))
 			set("hoardmq_connections_closed_total", map[string]string{"cause": "evict"}, float64(evict-fromImport))
 			set("hoardmq_connections_closed_total", map[string]string{"cause": "evict-import"}, float64(fromImport))
@@ -1054,8 +1096,7 @@ func (s *Server) registerCollector() {
 			for _, st := range rep.StreamStates() {
 				// A blocked stream is why a QoS 1 or 2 publish that needs
 				// that peer is refused; the age is what says it is happening
-				// now rather than having happened (WI 1519's question, asked
-				// of the product).
+				// now rather than having happened, and for how long.
 				reason, blocked := "none", 0.0
 				if st.Reason != "" {
 					reason, blocked = st.Reason, 1
@@ -1073,6 +1114,9 @@ func (s *Server) registerCollector() {
 		set("hoardmq_replication_retained_shards_short", nil, float64(shortLed))
 		for id, n := range s.registry.Hooks().Failures() {
 			set("hoardmq_hook_failures_total", map[string]string{"module": string(id)}, float64(n))
+		}
+		for id, n := range s.registry.Hooks().ClusterDropped() {
+			set("hoardmq_cluster_events_dropped_total", map[string]string{"module": string(id)}, float64(n))
 		}
 		if a := s.audit.Load(); a != nil {
 			st := a.Stats()
@@ -1165,6 +1209,23 @@ func (s *Server) AuditDir() string {
 		return ""
 	}
 	return s.audit.Load().Dir()
+}
+
+// SetDataDirGuard installs fn, which Start calls once every listener is bound
+// and the data directory exists, before it opens anything in it.
+func (s *Server) SetDataDirGuard(fn func() error) { s.dataGuard = fn }
+
+// SetDataDirLocked publishes whether this process holds its data
+// directory's lock (hoardmq_data_dir_locked, 1 or 0).
+func (s *Server) SetDataDirLocked(held bool) {
+	if s.metrics == nil {
+		return
+	}
+	v := 0.0
+	if held {
+		v = 1
+	}
+	s.metrics.Set("hoardmq_data_dir_locked", nil, v)
 }
 
 // ObservabilityAddr is the bound observability listener, or nil.

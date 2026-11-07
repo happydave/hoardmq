@@ -58,8 +58,8 @@ func takenByAbandonedFirst(t *testing.T, fb func(context.Context, string, string
 	return c, n2, n3
 }
 
-// TestAFirstAcquireThatTookALiveOwnersLeaseIsFetchedFromIt is WI 2206's
-// acceptance test: the client's next CONNECT on n2 gets the session n3 holds.
+// TestAFirstAcquireThatTookALiveOwnersLeaseIsFetchedFromIt: the client's
+// next CONNECT on n2 gets the session n3 holds.
 func TestAFirstAcquireThatTookALiveOwnersLeaseIsFetchedFromIt(t *testing.T) {
 	_, n2, _ := takenByAbandonedFirst(t, nil, true)
 	res, err := acquire(t, n2, "x", nil, 300, false)

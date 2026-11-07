@@ -13,24 +13,64 @@ import (
 // locally when this node leads the topic's shard (the tap then replicates
 // it to the followers) and otherwise handed to the leader, whose
 // acknowledgement the barrier includes. A leader the transport reports down
-// falls back to a local store, counted, so the write is not lost.
+// is counted and sent nothing, and nothing is stored here: the barrier
+// refuses the write, and a copy left on a node outside the shard would be
+// served, over newer writes, once that node led it.
 func (r *Replicator) StoreRetained(msg *message.Message) bool {
+	return r.StoreRetainedFrom(msg, SourceClient)
+}
+
+// StoreRetainedFrom is StoreRetained for a write whose source the session
+// manager names. A forward from a source no barrier waits on (SourceWill,
+// SourceModule, SourceClientQoS0) is held until it is answered, so a
+// misrouted refusal can be forwarded again (misrouted.go).
+func (r *Replicator) StoreRetainedFrom(msg *message.Message, source string) bool {
+	local, _ := r.StoreRetainedAt(msg, source)
+	return local
+}
+
+// LeadsRetained reports the map version under which this node leads a
+// retained topic's shard, for the expiry sweep's tombstones: ok is false when
+// it does not lead it, or there is no map.
+func (r *Replicator) LeadsRetained(ns, topic string) (uint64, bool) {
 	m := r.o.Map.Current()
 	if m.Version == 0 || r.o.Transport == nil {
-		return true
+		return 0, false
+	}
+	shard := r.o.Map.ShardOf(ns, topic)
+	if shard < 0 || shard >= len(m.Shards) || m.Shards[shard].Leader != r.o.Node {
+		return 0, false
+	}
+	return m.Version, true
+}
+
+// StoreRetainedAt is StoreRetainedFrom naming, for a write stored here, the
+// version of the map snapshot that decided this node leads the shard: the
+// epoch the write is stamped with. It is 0 under no map, or no leader, when
+// the write is stored unversioned.
+func (r *Replicator) StoreRetainedAt(msg *message.Message, source string) (local bool, epoch uint64) {
+	m := r.o.Map.Current()
+	if m.Version == 0 || r.o.Transport == nil {
+		return true, 0
 	}
 	shard := r.o.Map.ShardOf(msg.Namespace, msg.Topic)
 	leader := m.Shards[shard].Leader
-	if leader == r.o.Node || leader == "" {
-		return true
+	switch leader {
+	case r.o.Node:
+		return true, m.Version
+	case "":
+		return true, 0
 	}
 	if !r.up(leader) {
 		r.count("hoardmq_retained_forwards_total", map[string]string{"outcome": "leader-down"}, 1)
-		return true
+		return false, 0
 	}
-	r.outboundFor(leader).push(frame{Kind: kindRetainedWrite, Namespace: msg.Namespace, Topic: msg.Topic, Epoch: m.Version, Msg: msg})
+	seq := r.outboundFor(leader).push(frame{Kind: kindRetainedWrite, Namespace: msg.Namespace, Topic: msg.Topic, Epoch: m.Version, Msg: msg})
 	r.count("hoardmq_retained_forwards_total", map[string]string{"outcome": "forwarded"}, 1)
-	return false
+	if source != SourceClient {
+		r.holdForward(leader, seq, msg, source, false)
+	}
+	return false, 0
 }
 
 // QueryRetained implements session.Replication: the union of every shard

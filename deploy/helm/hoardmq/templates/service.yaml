@@ -17,3 +17,8 @@ spec:
       port: {{ .Values.listeners.mqtts.port }}
       targetPort: mqtts
     {{- end }}
+    {{- range .Values.listeners.extra }}
+    - name: {{ .name }}
+      port: {{ .port }}
+      targetPort: {{ .name }}
+    {{- end }}

@@ -29,15 +29,17 @@ const (
 	RetainedWrite Scope = "retained:write"
 	ClusterRead   Scope = "cluster:read"
 	ClusterDrain  Scope = "cluster:drain"
-	ConfigRead    Scope = "config:read"
-	ConfigWrite   Scope = "config:write"
-	TracesRead    Scope = "traces:read"
-	TracesWrite   Scope = "traces:write"
-	ModulesRead   Scope = "modules:read"
-	ModulesWrite  Scope = "modules:write"
-	AuditRead     Scope = "audit:read"
-	APIKeysRead   Scope = "apikeys:read"
-	APIKeysWrite  Scope = "apikeys:write"
+	// ClusterMembers removes consensus members.
+	ClusterMembers Scope = "cluster:members"
+	ConfigRead     Scope = "config:read"
+	ConfigWrite    Scope = "config:write"
+	TracesRead     Scope = "traces:read"
+	TracesWrite    Scope = "traces:write"
+	ModulesRead    Scope = "modules:read"
+	ModulesWrite   Scope = "modules:write"
+	AuditRead      Scope = "audit:read"
+	APIKeysRead    Scope = "apikeys:read"
+	APIKeysWrite   Scope = "apikeys:write"
 	// CredentialsRead and CredentialsWrite read and change the in-broker
 	// database of client credentials.
 	CredentialsRead  Scope = "credentials:read"
@@ -51,7 +53,7 @@ const (
 )
 
 // AllScopes lists every scope a route may declare.
-var AllScopes = []Scope{ClientsRead, ClientsWrite, RetainedRead, RetainedWrite, ClusterRead, ClusterDrain,
+var AllScopes = []Scope{ClientsRead, ClientsWrite, RetainedRead, RetainedWrite, ClusterRead, ClusterDrain, ClusterMembers,
 	ConfigRead, ConfigWrite, TracesRead, TracesWrite, ModulesRead, ModulesWrite, AuditRead, APIKeysRead, APIKeysWrite,
 	CredentialsRead, CredentialsWrite, BansRead, BansWrite, LimitsRead, LimitsWrite}
 

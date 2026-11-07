@@ -13,7 +13,7 @@
  },
  {
   "id": "MQTT-2.2.2-1",
-  "text": "Where a flag bit is marked as �Reserved� in Table 2.2 - Flag Bits, it is reserved for future use and MUST be set to the value listed in that table."
+  "text": "Where a flag bit is marked as “Reserved” in Table 2.2 - Flag Bits, it is reserved for future use and MUST be set to the value listed in that table."
  },
  {
   "id": "MQTT-2.2.2-2",
@@ -29,7 +29,7 @@
  },
  {
   "id": "MQTT-2.3.1-3",
-  "text": "The Packet Identifier becomes available for reuse after the Client has processed the corresponding acknowledgement packet"
+  "text": "If a Client re-sends a particular Control Packet, then it MUST use the same Packet Identifier in subsequent re-sends of that packet. The Packet Identifier becomes available for reuse after the Client has processed the corresponding acknowledgement packet. In the case of a QoS 1 PUBLISH this is the corresponding PUBACK; in the case of QoS 2 it is PUBCOMP. For SUBSCRIBE or UNSUBSCRIBE it is the corresponding SUBACK or UNSUBACK."
  },
  {
   "id": "MQTT-2.3.1-4",
@@ -57,11 +57,11 @@
  },
  {
   "id": "MQTT-3.1.2-1",
-  "text": "If the User Name Flag is set to 1, a user name MUST be present in the payload."
+  "text": "If the protocol name is incorrect the Server MAY disconnect the Client, or it MAY continue processing the CONNECT packet in accordance with some other specification. In the latter case, the Server MUST NOT continue to process the CONNECT packet in line with this specification."
  },
  {
   "id": "MQTT-3.1.2-2",
-  "text": "If the Keep Alive value is non-zero and the Server does not receive a Control Packet from the Client within one and a half times the Keep Alive time period, it MUST disconnect the Network Connection to the Client as if the network had failed."
+  "text": "The Server MUST respond to the CONNECT Packet with a CONNACK return code 0x01 (unacceptable protocol level) and then disconnect the Client if the Protocol Level is not supported by the Server."
  },
  {
   "id": "MQTT-3.1.2-3",
@@ -74,6 +74,10 @@
  {
   "id": "MQTT-3.1.2-6",
   "text": "If CleanSession is set to 1, the Client and Server MUST discard any previous Session and start a new one. This Session lasts as long as the Network Connection. State data associated with this Session MUST NOT be reused in any subsequent Session."
+ },
+ {
+  "id": "MQTT-3.1.2-7",
+  "text": "Retained messages do not form part of the Session state in the Server, they MUST NOT be deleted when the Session ends."
  },
  {
   "id": "MQTT-3.1.2-8",
@@ -145,7 +149,7 @@
  },
  {
   "id": "MQTT-3.1.3-1",
-  "text": "The User Name MUST be a UTF-8 encoded string as defined in Section 1.5.3."
+  "text": "These fields, if present, MUST appear in the order Client Identifier, Will Topic, Will Message, User Name, Password."
  },
  {
   "id": "MQTT-3.1.3-2",
@@ -233,7 +237,7 @@
  },
  {
   "id": "MQTT-3.2.2-6",
-  "text": "If none of the return codes listed in Table 3.1 � Connect Return code values are deemed applicable, then the Server MUST close the Network Connection without sending a CONNACK."
+  "text": "If none of the return codes listed in Table 3.1 – Connect Return code values are deemed applicable, then the Server MUST close the Network Connection without sending a CONNACK."
  },
  {
   "id": "MQTT-3.3.1-2",
@@ -289,7 +293,7 @@
  },
  {
   "id": "MQTT-3.3.2-3",
-  "text": "The Topic Name in a PUBLISH Packet sent by a Server to a subscribing Client MUST match the Subscription�s Topic Filter according to the matching process defined in Section 4.7."
+  "text": "The Topic Name in a PUBLISH Packet sent by a Server to a subscribing Client MUST match the Subscription’s Topic Filter according to the matching process defined in Section 4.7."
  },
  {
   "id": "MQTT-3.3.4-1",
@@ -322,6 +326,10 @@
  {
   "id": "MQTT-3.8.3-3",
   "text": "The payload of a SUBSCRIBE packet MUST contain at least one Topic Filter / QoS pair. A SUBSCRIBE packet with no payload is a protocol violation."
+ },
+ {
+  "id": "MQTT-3.8.3-4",
+  "text": "The Server MUST treat a SUBSCRIBE packet as malformed and close the Network Connection if any of Reserved bits in the payload are non-zero, or QoS is not 0,1 or 2."
  },
  {
   "id": "MQTT-3.8.4-1",
@@ -409,11 +417,11 @@
  },
  {
   "id": "MQTT-4.3.1-1",
-  "text": "In the QoS 0 delivery protocol, the Sender � MUST send a PUBLISH packet with QoS=0, DUP=0."
+  "text": "In the QoS 0 delivery protocol, the Sender · MUST send a PUBLISH packet with QoS=0, DUP=0."
  },
  {
   "id": "MQTT-4.3.2-1",
-  "text": "In the QoS 1 delivery protocol, the Sender � MUST assign an unused Packet Identifier each time it has a new Application Message to publish. � MUST send a PUBLISH Packet containing this Packet Identifier with QoS=1, DUP=0. � MUST treat the PUBLISH Packet as \"unacknowledged\" until it has received the corresponding PUBACK packet from the receiver. See Section 4.4 for a discussion of unacknowledged messages."
+  "text": "In the QoS 1 delivery protocol, the Sender · MUST assign an unused Packet Identifier each time it has a new Application Message to publish. · MUST send a PUBLISH Packet containing this Packet Identifier with QoS=1, DUP=0. · MUST treat the PUBLISH Packet as \"unacknowledged\" until it has received the corresponding PUBACK packet from the receiver. See Section 4.4 for a discussion of unacknowledged messages."
  },
  {
   "id": "MQTT-4.3.2-2",
@@ -513,11 +521,11 @@
  },
  {
   "id": "MQTT-6.0.0-3",
-  "text": "The client MUST include �mqtt� in the list of WebSocket Sub Protocols it offers."
+  "text": "The client MUST include “mqtt” in the list of WebSocket Sub Protocols it offers."
  },
  {
   "id": "MQTT-6.0.0-4",
-  "text": "The WebSocket Sub Protocol name selected and returned by the server MUST be �mqtt�."
+  "text": "The WebSocket Sub Protocol name selected and returned by the server MUST be “mqtt”."
  },
  {
   "id": "MQTT-7.0.0-1",
@@ -541,11 +549,11 @@
  },
  {
   "id": "MQTT-3.3.1-1",
-  "text": "If the RETAIN flag is 0, in a PUBLISH Packet sent by a Client to a Server, the Server MUST NOT store the message and MUST NOT remove or replace any existing retained message."
+  "text": "The DUP flag MUST be set to 1 by the Client or Server when it attempts to re-deliver a PUBLISH Packet."
  },
  {
   "id": "MQTT-3.8.4-3",
-  "text": "If a Server receives a SUBSCRIBE Packet containing a Topic Filter that is identical to an existing Subscription�s Topic Filter then it MUST completely replace that existing Subscription with a new Subscription. The Topic Filter in the new Subscription will be identical to that in the previous Subscription, although its maximum QoS value could be different. Any existing retained messages matching the Topic Filter MUST be re-sent, but the flow of publications MUST NOT be interrupted."
+  "text": "If a Server receives a SUBSCRIBE Packet containing a Topic Filter that is identical to an existing Subscription’s Topic Filter then it MUST completely replace that existing Subscription with a new Subscription. The Topic Filter in the new Subscription will be identical to that in the previous Subscription, although its maximum QoS value could be different. Any existing retained messages matching the Topic Filter MUST be re-sent, but the flow of publications MUST NOT be interrupted."
  },
  {
   "id": "MQTT-3.8.4-5",

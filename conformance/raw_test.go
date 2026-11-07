@@ -34,7 +34,11 @@ func TestRawStatements(t *testing.T) {
 		{"UNSUBSCRIBE flags", []string{"MQTT-3.10.1-1"}, packet.V5, true, []byte{0xA0, 0x06, 0x00, 0x01, 0x00, 0x00, 0x01, 'a'}, packet.MalformedPacket, false},
 		{"PUBREL flags", []string{"MQTT-3.6.1-1"}, packet.V5, true, []byte{0x60, 0x02, 0x00, 0x01}, packet.MalformedPacket, false},
 		{"AUTH flags", []string{"MQTT-3.15.1-1"}, packet.V5, true, []byte{0xF1, 0x00}, packet.MalformedPacket, false},
-		{"Remaining Length five bytes", []string{"MQTT-1.5.5-1"}, packet.V5, true, []byte{0xC0, 0x80, 0x80, 0x80, 0x80, 0x01}, packet.MalformedPacket, false},
+		{"Remaining Length five bytes", nil, packet.V5, true, []byte{0xC0, 0x80, 0x80, 0x80, 0x80, 0x01}, packet.MalformedPacket, false},
+		{"Remaining Length 0 in two bytes", []string{"MQTT-1.5.5-1"}, packet.V5, true, []byte{0xC0, 0x80, 0x00}, packet.MalformedPacket, false},
+		{"Remaining Length 0 in three bytes", []string{"MQTT-1.5.5-1"}, packet.V5, true, []byte{0xC0, 0x80, 0x80, 0x00}, packet.MalformedPacket, false},
+		{"Remaining Length 0 in four bytes", []string{"MQTT-1.5.5-1"}, packet.V5, true, []byte{0xC0, 0x80, 0x80, 0x80, 0x00}, packet.MalformedPacket, false},
+		{"Remaining Length 4 in two bytes", []string{"MQTT-1.5.5-1"}, packet.V5, true, []byte{0x30, 0x84, 0x00, 0x00, 0x01, 't', 0x00}, packet.MalformedPacket, false},
 		{"PUBLISH QoS 3", []string{"MQTT-3.3.1-4"}, packet.V5, true, []byte{0x36, 0x05, 0x00, 0x01, 't', 0x00, 0x01}, packet.MalformedPacket, false},
 		{"PUBLISH DUP on QoS 0", []string{"MQTT-3.3.1-2"}, packet.V5, true, []byte{0x38, 0x04, 0x00, 0x01, 't', 0x00}, packet.MalformedPacket, false},
 		{"QoS 0 with packet identifier is a topic byte", []string{"MQTT-2.2.1-2"}, packet.V5, true, []byte{0x30, 0x03, 0x00, 0x01, 't'}, packet.MalformedPacket, false},
@@ -49,6 +53,9 @@ func TestRawStatements(t *testing.T) {
 		{"Topic Alias 0", []string{"MQTT-3.3.2-8"}, packet.V5, true, []byte{0x30, 0x07, 0x00, 0x01, 't', 0x03, 0x23, 0x00, 0x00}, packet.TopicAliasInvalid, false},
 		{"Topic Alias above maximum", []string{"MQTT-3.3.2-12", "MQTT-3.2.2-17"}, packet.V5, true, []byte{0x30, 0x07, 0x00, 0x01, 't', 0x03, 0x23, 0xFF, 0xFF}, packet.TopicAliasInvalid, false},
 		{"Payload Format 2", []string{"MQTT-3.3.2-4"}, packet.V5, true, []byte{0x30, 0x06, 0x00, 0x01, 't', 0x02, 0x01, 0x02}, packet.ProtocolError, false},
+		{"Property Length in two bytes", []string{"MQTT-1.5.5-1"}, packet.V5, true, []byte{0x30, 0x05, 0x00, 0x01, 't', 0x80, 0x00}, packet.MalformedPacket, false},
+		{"Property Identifier in two bytes", []string{"MQTT-1.5.5-1"}, packet.V5, true, []byte{0x30, 0x07, 0x00, 0x01, 't', 0x03, 0x81, 0x00, 0x01}, packet.MalformedPacket, false},
+		{"Subscription Identifier in two bytes", []string{"MQTT-1.5.5-1"}, packet.V5, true, []byte{0x82, 0x0A, 0x00, 0x01, 0x03, 0x0B, 0x81, 0x00, 0x00, 0x01, 'a', 0x00}, packet.MalformedPacket, false},
 		// Subscribe payload rules.
 		{"SUBSCRIBE without filters", []string{"MQTT-3.8.3-2"}, packet.V5, true, []byte{0x82, 0x03, 0x00, 0x01, 0x00}, packet.ProtocolError, false},
 		{"SUBSCRIBE reserved bits", []string{"MQTT-3.8.3-5"}, packet.V5, true, []byte{0x82, 0x07, 0x00, 0x01, 0x00, 0x00, 0x01, 'a', 0x40}, packet.MalformedPacket, false},
@@ -59,8 +66,12 @@ func TestRawStatements(t *testing.T) {
 		{"PUBREL bad reason", []string{"MQTT-3.6.2-1"}, packet.V5, true, []byte{0x62, 0x03, 0x00, 0x01, 0x10}, packet.ProtocolError, false},
 		{"AUTH outside an exchange", []string{"MQTT-4.12.0-7", "MQTT-4.12.0-6"}, packet.V5, true, []byte{0xF0, 0x00}, packet.ProtocolError, false},
 		// Level 4: the same violations close the connection without a DISCONNECT.
+		// 3.1.1 has no statement on the length's encoding, but its table 2.4
+		// gives each byte count a range a non-minimal encoding falls outside.
+		{"3.1.1 Remaining Length 0 in two bytes", nil, packet.V4, true, []byte{0xC0, 0x80, 0x00}, 0, true},
+		{"3.1.1 Remaining Length 3 in four bytes", nil, packet.V4, true, []byte{0x30, 0x83, 0x80, 0x80, 0x00, 0x00, 0x01, 't'}, 0, true},
 		{"3.1.1 PUBLISH QoS 3", []string{"MQTT-3.3.1-4"}, packet.V4, true, []byte{0x36, 0x05, 0x00, 0x01, 't', 0x00, 0x01}, 0, true},
-		{"3.1.1 SUBSCRIBE reserved bits", nil, packet.V4, true, []byte{0x82, 0x06, 0x00, 0x01, 0x00, 0x01, 'a', 0x04}, 0, true},
+		{"3.1.1 SUBSCRIBE reserved bits", []string{"MQTT-3.8.3-4"}, packet.V4, true, []byte{0x82, 0x06, 0x00, 0x01, 0x00, 0x01, 'a', 0x04}, 0, true},
 		{"3.1.1 SUBSCRIBE without filters", []string{"MQTT-3.8.3-3"}, packet.V4, true, []byte{0x82, 0x02, 0x00, 0x01}, 0, true},
 		{"3.1.1 UNSUBSCRIBE without filters", []string{"MQTT-3.10.3-2"}, packet.V4, true, []byte{0xA2, 0x02, 0x00, 0x01}, 0, true},
 		{"3.1.1 invalid flags", []string{"MQTT-2.2.2-1", "MQTT-2.2.2-2"}, packet.V4, true, []byte{0xC1, 0x00}, 0, true},
@@ -141,6 +152,14 @@ func TestRawConnectRules(t *testing.T) {
 		n := node.For(t)
 		r := n.DialRaw(packet.V5)
 		r.SendBytes(connect("MQTT", 5, 0x82, 0x00, 0x00, 0x00))
+		r.ExpectClosed()
+	})
+	t.Run("CONNECT Remaining Length in two bytes closes without CONNACK", func(t *testing.T) {
+		Statement(t, Spec5, "MQTT-1.5.5-1")
+		n := node.For(t)
+		r := n.DialRaw(packet.V5)
+		raw := connect("MQTT", 5, 0x02, 0x00, 0x00, 0x00)
+		r.SendBytes(append([]byte{raw[0], raw[1] | 0x80, 0x00}, raw[2:]...))
 		r.ExpectClosed()
 	})
 	t.Run("first packet not CONNECT", func(t *testing.T) {

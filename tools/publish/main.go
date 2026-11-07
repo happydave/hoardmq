@@ -1,7 +1,8 @@
 // Command publish builds or advances the local branch that is pushed to the
 // public repository: the source branch's tree without sim/results, as one new
-// commit on that branch, after a term check, an identity check and a licence
-// check. It never pushes; its last line is the push command to run.
+// commit on that branch, after a term check, a work-item citation check, an
+// identity check and a licence check. It never pushes; its last line is the
+// push command to run.
 //
 //	go run ./tools/publish -terms <term list> -identity "<name> <noreply address>"
 package main
@@ -102,8 +103,10 @@ func publish(repo, termsPath, source, branch, remote string, publisher identity,
 	terms := termCheck(pats, allowed, entries, msg)
 	ids := append(identityProblems("author", publisher), identityProblems("committer", publisher)...)
 	ids = append(ids, emailProblems(entries, msg)...)
-	r := results{patterns: terms.patterns, files: terms.files, hits: terms.hits, identity: ids, missing: missingLicences(entries)}
+	cites := citations(entries)
+	r := results{patterns: terms.patterns, files: terms.files, hits: terms.hits, citations: cites, identity: ids, missing: missingLicences(entries)}
 	fprintf(out, "publish: term check: %d hits; allowed matches: %s\n", len(terms.hits), allowedSummary(terms.allowed))
+	fprintf(out, "publish: citation check: %d work-item citations\n", len(cites))
 	fprintf(out, "publish: identity check: %s, %d problems\n", publisher, len(ids))
 	fprintf(out, "publish: licence check: %d of %d missing (%s)\n", len(r.missing), len(licences), strings.Join(licences, ", "))
 	if err := verdict(out, r, "the checks"); err != nil {

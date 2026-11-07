@@ -20,6 +20,7 @@ import (
 	"github.com/happydave/hoardmq/internal/config"
 	"github.com/happydave/hoardmq/internal/packet"
 	"github.com/happydave/hoardmq/internal/testcert"
+	"github.com/happydave/hoardmq/internal/testlog"
 )
 
 type fixture struct {
@@ -57,6 +58,22 @@ func start(t *testing.T, mutate func(*config.Document)) *fixture {
 		t.Fatal(err)
 	}
 	return f
+}
+
+// nodeLogger is a fixture node's debug log: the test's node-log file, kept if
+// the test fails, or stderr when HOARDMQ_TEST_LOG is set.
+func nodeLogger(t *testing.T, name string) *slog.Logger {
+	t.Helper()
+	if os.Getenv("HOARDMQ_TEST_LOG") != "" {
+		return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})).With("node", name)
+	}
+	return testlog.Logger(t, name)
+}
+
+// newFixtureServer builds a fixture node's server, its log to nodeLogger.
+func newFixtureServer(t *testing.T, doc config.Document) (*Server, error) {
+	t.Helper()
+	return NewWithHooks(doc, nodeLogger(t, doc.Node.Name), fixtureHooks)
 }
 
 // tryStart is start returning the server's start error instead of failing
@@ -101,12 +118,7 @@ func tryStart(t *testing.T, mutate func(*config.Document)) (*fixture, error) {
 	if p := doc.Validate(); len(p) != 0 {
 		t.Fatalf("config: %v", p)
 	}
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	if os.Getenv("HOARDMQ_TEST_LOG") != "" {
-		// Debug logs for a failing cluster test, prefixed with the node name.
-		logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})).With("node", doc.Node.Name)
-	}
-	srv, err := NewWithHooks(doc, logger, fixtureHooks)
+	srv, err := newFixtureServer(t, doc)
 	if err != nil {
 		t.Fatal(err)
 	}

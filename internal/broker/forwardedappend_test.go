@@ -11,12 +11,12 @@ import (
 	"github.com/happydave/hoardmq/internal/store/faultdisk"
 )
 
-// TestForwardedAppendFailureRefusesThePublish is WI 1891's defect across
-// nodes: a QoS 1 publish on n1 is forwarded to n2, where the offline durable
-// subscriber's queued record fails to append (its roll's fsync fails on n2).
-// n2 refuses that forward, so the publish is refused on n1; the copy n2 held
-// only in memory is withdrawn, and the publisher's retry is the one copy the
-// subscriber receives.
+// TestForwardedAppendFailureRefusesThePublish is the failed subscriber append
+// across nodes: a QoS 1 publish on n1 is forwarded to n2, where the offline
+// durable subscriber's queued record fails to append (its roll's fsync fails
+// on n2). n2 refuses that forward, so the publish is refused on n1; the copy
+// n2 held only in memory is withdrawn, and the publisher's retry is the one
+// copy the subscriber receives.
 func TestForwardedAppendFailureRefusesThePublish(t *testing.T) {
 	var n2State atomic.Pointer[string]
 	d := faultdisk.New()

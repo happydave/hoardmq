@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-// TestSourceDialLeavesThePortToConnect is WI 1477: a client dialling from a
+// TestSourceDialLeavesThePortToConnect: a client dialling from a
 // source address still dials from it, and its socket carries
 // IP_BIND_ADDRESS_NO_PORT, read back from the kernel.
 func TestSourceDialLeavesThePortToConnect(t *testing.T) {

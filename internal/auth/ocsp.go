@@ -164,10 +164,11 @@ var signatureAlgorithms = map[string]x509.SignatureAlgorithm{
 // AcceptOCSP is the decision on a response to OCSPRequest(leaf, issuer) at
 // now: successful, basic, signed by the issuer or by a responder the issuer
 // delegated to (id-kp-OCSPSigning, valid at now), naming its signer, with a
-// SingleResponse for this CertID that is current: before its nextUpdate, or,
-// without one, no more than maxAge after its thisUpdate. It returns the
-// answer, or why the response cannot be used.
-func AcceptOCSP(der []byte, leaf, issuer *x509.Certificate, now time.Time, maxAge time.Duration) (OCSPAnswer, error) {
+// SingleResponse for this CertID that is current: before its nextUpdate and
+// no more than maxLifetime after its thisUpdate, or, without a nextUpdate, no
+// more than maxAge after its thisUpdate. It returns the answer, or why the
+// response cannot be used.
+func AcceptOCSP(der []byte, leaf, issuer *x509.Certificate, now time.Time, maxAge, maxLifetime time.Duration) (OCSPAnswer, error) {
 	var resp ocspResponseASN1
 	if rest, err := asn1.Unmarshal(der, &resp); err != nil || len(rest) != 0 {
 		return OCSPAnswer{}, errors.New("ocsp: malformed response")
@@ -208,6 +209,9 @@ func AcceptOCSP(der []byte, leaf, issuer *x509.Certificate, now time.Time, maxAg
 		if !r.NextUpdate.IsZero() && !r.NextUpdate.After(now) {
 			return OCSPAnswer{}, errors.New("ocsp: answer past its nextUpdate")
 		}
+		if !r.NextUpdate.IsZero() && !ocspCurrent(r.ThisUpdate, r.NextUpdate, now, maxLifetime) {
+			return OCSPAnswer{}, fmt.Errorf("ocsp: answer more than %s past its thisUpdate", maxLifetime)
+		}
 		// Requests carry no nonce, so an answer without a nextUpdate could
 		// otherwise be replayed at any age.
 		if r.NextUpdate.IsZero() && now.Sub(r.ThisUpdate) > maxAge {
@@ -227,6 +231,13 @@ func AcceptOCSP(der []byte, leaf, issuer *x509.Certificate, now time.Time, maxAg
 		return a, nil
 	}
 	return OCSPAnswer{}, errors.New("ocsp: no answer for this certificate")
+}
+
+// ocspCurrent reports whether an answer with a nextUpdate may be used at now:
+// before its nextUpdate and no more than maxLifetime after its thisUpdate. A
+// responder may sign far-future nextUpdates, and requests carry no nonce.
+func ocspCurrent(thisUpdate, nextUpdate, now time.Time, maxLifetime time.Duration) bool {
+	return nextUpdate.After(now) && now.Sub(thisUpdate) <= maxLifetime
 }
 
 // ocspSigner finds the certificate the response names as its responder: the

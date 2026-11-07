@@ -39,6 +39,8 @@ spec:
         runAsNonRoot: true
         runAsUser: 65532
         fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
@@ -68,9 +70,13 @@ spec:
       {{- end }}
       containers:
         - name: hoardmq
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          image: "{{ required "image.repository is required: the project publishes no image, build one from the reference Dockerfile (chart README)" .Values.image.repository }}:{{ required "image.tag is required: the tag of the image built from the reference Dockerfile (chart README)" .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args: ["serve"]
+          {{- with .Values.containerSecurityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           env:
             - name: HOARDMQ_CONFIG
               value: /etc/hoardmq/config.json
@@ -97,6 +103,10 @@ spec:
             {{- if .Values.listeners.mqtts.enabled }}
             - name: mqtts
               containerPort: {{ .Values.listeners.mqtts.port }}
+            {{- end }}
+            {{- range .Values.listeners.extra }}
+            - name: {{ .name }}
+              containerPort: {{ .port }}
             {{- end }}
             - name: cluster
               containerPort: {{ .Values.cluster.port }}
@@ -166,6 +176,12 @@ spec:
               mountPath: /etc/hoardmq-tls/ca.crt
               subPath: ca.crt
               readOnly: true
+            {{- else if eq .Values.tls.mode "certManagerCSI" }}
+            {{- /* The CSI driver's volume holds this pod's files alone, so
+                   it is mounted whole. */}}
+            - name: cluster-tls
+              mountPath: /etc/hoardmq-tls
+              readOnly: true
             {{- else }}
             - name: cluster-tls
               mountPath: /etc/hoardmq-tls
@@ -195,6 +211,27 @@ spec:
         - name: cluster-tls
           secret:
             secretName: {{ include "hoardmq.tlsSecret" . }}
+        {{- else if eq .Values.tls.mode "certManagerCSI" }}
+        {{- /* The driver makes the key on the node and writes the pair and
+               the CA into this pod's volume only; no Secret holds them. The
+               common name is the pod's name, as the peers check, with both
+               auth usages (a key-usages value replaces the driver's default
+               set). fs-group is the pod's fsGroup, so the broker can read
+               the key. */}}
+        {{- $headless := include "hoardmq.headless" . }}
+        - name: cluster-tls
+          csi:
+            driver: csi.cert-manager.io
+            readOnly: true
+            volumeAttributes:
+              csi.cert-manager.io/issuer-name: {{ include "hoardmq.tlsIssuerName" . }}
+              csi.cert-manager.io/issuer-kind: {{ include "hoardmq.tlsIssuerKind" . }}
+              csi.cert-manager.io/common-name: "${POD_NAME}"
+              csi.cert-manager.io/dns-names: "{{ $headless }},{{ $headless }}.{{ .Release.Namespace }}.svc,${POD_NAME}.{{ $headless }},${POD_NAME}.{{ $headless }}.{{ .Release.Namespace }}.svc"
+              csi.cert-manager.io/key-usages: "digital signature,key encipherment,server auth,client auth"
+              csi.cert-manager.io/duration: {{ .Values.tls.certManagerCSI.duration | quote }}
+              csi.cert-manager.io/renew-before: {{ .Values.tls.certManagerCSI.renewBefore | quote }}
+              csi.cert-manager.io/fs-group: "65532"
         {{- else }}
         - name: cluster-tls
           projected:

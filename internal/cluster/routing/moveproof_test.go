@@ -181,8 +181,8 @@ func TestMoveWithARouteAndNoConfirmationWaitsOutTheGrace(t *testing.T) {
 	m.acceptedOnO("after the grace")
 }
 
-// TestMovedSubscriberBesideOneThatStayed is WI 1628's case after the move
-// is resolved: a third node's forward still reaches the subscriber that
+// TestMovedSubscriberBesideOneThatStayed is the case after the move is
+// resolved: a third node's forward still reaches the subscriber that
 // stayed and is still refused, and the new owner's forward is accepted only
 // from its mark on.
 func TestMovedSubscriberBesideOneThatStayed(t *testing.T) {

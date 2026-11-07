@@ -12,42 +12,45 @@ import (
 
 // The contract is the extension API's; the core names it here.
 type (
-	ID                   = ext.ID
-	Capability           = ext.Capability
-	Module               = ext.Module
-	Validator            = ext.Validator
-	Toggleable           = ext.Toggleable
-	Reloader             = ext.Reloader
-	Factory              = ext.Factory
-	Services             = ext.Services
-	RecordStore          = ext.RecordStore
-	DrainStatus          = ext.DrainStatus
-	Observability        = ext.Observability
-	Collector            = ext.Collector
-	Context              = ext.Context
-	PasswordVerifier     = ext.PasswordVerifier
-	ConnectionInfo       = ext.ConnectionInfo
-	Outcome              = ext.Outcome
-	Action               = ext.Action
-	DeliveryEvent        = ext.DeliveryEvent
-	HookPolicy           = ext.HookPolicy
-	ConnectionHook       = ext.ConnectionHook
-	InboundInterceptor   = ext.InboundInterceptor
-	OutboundInterceptor  = ext.OutboundInterceptor
-	SubscribeInterceptor = ext.SubscribeInterceptor
-	DeliveryListener     = ext.DeliveryListener
-	RetainedListener     = ext.RetainedListener
-	WillListener         = ext.WillListener
-	PublishAccepted      = ext.PublishAcceptedListener
-	PublishAdmission     = ext.PublishAdmission
-	PublishSource        = ext.PublishSource
-	StoreProvider        = ext.StoreProvider
-	MetricsUser          = ext.MetricsUser
-	MetricsProvider      = ext.MetricsProvider
-	Metric               = ext.Metric
-	TraceProvider        = ext.TraceProvider
-	Authenticator        = auth.Authenticator
-	Authorizer           = auth.Authorizer
+	ID                     = ext.ID
+	Capability             = ext.Capability
+	Module                 = ext.Module
+	Validator              = ext.Validator
+	Toggleable             = ext.Toggleable
+	Reloader               = ext.Reloader
+	Factory                = ext.Factory
+	Services               = ext.Services
+	RecordStore            = ext.RecordStore
+	DrainStatus            = ext.DrainStatus
+	Observability          = ext.Observability
+	Collector              = ext.Collector
+	Context                = ext.Context
+	PasswordVerifier       = ext.PasswordVerifier
+	ConnectionInfo         = ext.ConnectionInfo
+	Outcome                = ext.Outcome
+	Action                 = ext.Action
+	DeliveryEvent          = ext.DeliveryEvent
+	HookPolicy             = ext.HookPolicy
+	ConnectionHook         = ext.ConnectionHook
+	InboundInterceptor     = ext.InboundInterceptor
+	OutboundInterceptor    = ext.OutboundInterceptor
+	SubscribeInterceptor   = ext.SubscribeInterceptor
+	UnsubscribeInterceptor = ext.UnsubscribeInterceptor
+	ClusterListener        = ext.ClusterListener
+	ClusterEvent           = ext.ClusterEvent
+	DeliveryListener       = ext.DeliveryListener
+	RetainedListener       = ext.RetainedListener
+	WillListener           = ext.WillListener
+	PublishAccepted        = ext.PublishAcceptedListener
+	PublishAdmission       = ext.PublishAdmission
+	PublishSource          = ext.PublishSource
+	StoreProvider          = ext.StoreProvider
+	MetricsUser            = ext.MetricsUser
+	MetricsProvider        = ext.MetricsProvider
+	Metric                 = ext.Metric
+	TraceProvider          = ext.TraceProvider
+	Authenticator          = auth.Authenticator
+	Authorizer             = auth.Authorizer
 )
 
 // Capabilities, actions and events, by the core's names.
@@ -68,6 +71,8 @@ const (
 	CapTraces           = ext.CapTraces
 	CapPublishAccepted  = ext.CapPublishAccepted
 	CapPublishAdmission = ext.CapPublishAdmission
+	CapUnsubscribe      = ext.CapUnsubscribe
+	CapCluster          = ext.CapCluster
 
 	Continue   = ext.Continue
 	Modify     = ext.Modify
@@ -79,6 +84,11 @@ const (
 	Queued       = ext.Queued
 	Dropped      = ext.Dropped
 	Expired      = ext.Expired
+
+	MemberJoined = ext.MemberJoined
+	MemberLeft   = ext.MemberLeft
+	LeaseMoved   = ext.LeaseMoved
+	DrainStarted = ext.DrainStarted
 )
 
 // OK is the outcome that changes nothing.

@@ -307,8 +307,8 @@ func TestSessionComingBackAtAHigherEpochIsNotHeldByTheOldRefusal(t *testing.T) {
 
 // TestReconnectEpochBumpKeepsTheReplica: a client reconnecting to its own
 // owner bumps the session epoch and the owner journals the meta at the new
-// epoch with no delete. The replica's entries survive it (WI 1563: a rule
-// that replaced the copy on a higher epoch wiped them).
+// epoch with no delete. The replica's entries survive it (a rule that
+// replaced the copy on a higher epoch wiped them).
 func TestReconnectEpochBumpKeepsTheReplica(t *testing.T) {
 	h := newHarness(t, []string{"n1", "n2"}, 2, 2)
 	h.applyMap(shardmap.Compute(1, h.order, 2, 2))

@@ -90,8 +90,9 @@ func TestOneLiveOwnerIsNotVacuous(t *testing.T) {
 	}
 }
 
-// TestRefusedPublishIsNotAnAcknowledgedOne is WI 1308's first and third
-// criteria. The two cases are each other's control: a checker that could not
+// TestRefusedPublishIsNotAnAcknowledgedOne: a refused publish that is not
+// delivered is no acknowledged loss, and an accepted one that is not delivered
+// still is. The two cases are each other's control: a checker that could not
 // tell a refusal from an acknowledgement would fail one of them.
 func TestRefusedPublishIsNotAnAcknowledgedOne(t *testing.T) {
 	at := time.Unix(1_000, 0)
@@ -111,10 +112,10 @@ func TestRefusedPublishIsNotAnAcknowledgedOne(t *testing.T) {
 }
 
 // TestPublishCountedOnce: the harness is one of the suspects whenever it
-// reports a defect, and this is the accounting the original reading of WI
-// 1308 accused it of getting wrong. The presence case is asserted first — a
-// ledger where the same publish is in both — so the absence case cannot pass
-// by the property being dead.
+// reports a defect, and this is the accounting it was once accused of
+// getting wrong. The presence case is asserted first — a ledger where the
+// same publish is in both — so the absence case cannot pass by the property
+// being dead.
 func TestPublishCountedOnce(t *testing.T) {
 	both := &Ledger{}
 	both.addPub(Publication{Publisher: "pub", Topic: "t", QoS: 1, Seq: 7, Code: packet.Success, Node: "n1"})
@@ -182,10 +183,10 @@ func TestNoRefusalWithoutFaults(t *testing.T) {
 	}
 }
 
-// TestRefusalsReachTheRunStatisticsByNode is WI 1308's second criterion: a
-// change in what a build refuses has to be visible in the corpus, not only on
-// a cluster, and by node — one node refusing everything and every node
-// refusing a little are different findings under the same total (WI 1502).
+// TestRefusalsReachTheRunStatisticsByNode: a change in what a build refuses
+// has to be visible in the corpus, not only on a cluster, and by node — one
+// node refusing everything and every node refusing a little are different
+// findings under the same total.
 func TestRefusalsReachTheRunStatisticsByNode(t *testing.T) {
 	l := &Ledger{}
 	l.addPub(Publication{Publisher: "pub", Topic: "t", QoS: 1, Seq: 1, Code: packet.Success, Node: "n1"})

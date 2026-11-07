@@ -72,7 +72,7 @@ func runAdoptionScenario(t *testing.T, defects broker.Defects) adoptionOutcome {
 		// A publish is refused while this node's stream to a peer is repairing
 		// — the first frame to a peer can be lost as the cluster forms, and
 		// the gap is only discovered when the next one arrives, after which
-		// the resync takes a moment (WI 1570). These five are the scenario's
+		// the resync takes a moment. These five are the scenario's
 		// setup, not what it tests, so they are retried the way a client
 		// would rather than failing the run.
 		code, err := publishWithRetry(ctx, pub, "adopt/t", 1, i, 5)

@@ -42,13 +42,13 @@ type Table struct {
 	// sessions behind them have gone. It is a separate index because this
 	// node cannot see its own routes through the ones above — Match skips
 	// self and HiddenMatch reports only hidden peers — which is exactly how
-	// the old owner came to answer for a session it no longer had (WI 1353).
+	// the old owner came to answer for a session it no longer had.
 	moving      map[string]*node // namespace → matcher over moving filters
 	movingCount map[entryKey]int
 	// liveLocal and liveRemote are the non-tombstoned entries owned by this
 	// node and by others, kept as entries change so Count does not walk the
 	// table: the gauge that reads it runs on every route update, and a walk
-	// there took a third of a 100k storm's CPU (WI 1481).
+	// there took a third of a 100k storm's CPU.
 	liveLocal, liveRemote int
 }
 

@@ -80,6 +80,12 @@ func (s *Service) holdReconcile() {
 	s.log.Info("below the cluster's level: sessions owned elsewhere sealed, nothing else reconciled", "sealed", sealed)
 }
 
+// TransferTarget is transferTarget over the core's members and this table's
+// levels, for a leader handing leadership over before its own removal.
+func (s *Service) TransferTarget() string {
+	return transferTarget(s.o.Node, s.o.Core.Members(), s.table.MemberBelow)
+}
+
 // transferTarget picks the voter a node that holds the log hands leadership
 // to: a caught-up voter other than itself whose latest advertisement is at the
 // cluster's level, else any caught-up voter other than itself, else none.

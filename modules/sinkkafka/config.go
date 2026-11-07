@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sort"
 	"strings"
 	"time"
 
@@ -44,16 +45,49 @@ type saslConfig struct {
 }
 
 type routeConfig struct {
-	Filter      string `json:"filter"`
-	Topic       string `json:"topic"`
-	Key         string `json:"key"`
-	KeyProperty string `json:"keyProperty"`
-	Namespace   string `json:"namespace"`
+	Filter      string            `json:"filter"`
+	Topic       string            `json:"topic"`
+	Key         keyConfig         `json:"key"`
+	KeyProperty string            `json:"keyProperty"`
+	Namespace   string            `json:"namespace"`
+	Headers     map[string]string `json:"headers"`
+}
+
+// keyConfig is a route's key as written: a source's name, or an object
+// naming a topic segment and what to use when the topic has none.
+type keyConfig struct {
+	Name     string
+	Segment  *int
+	Fallback string
+	object   bool
+}
+
+// UnmarshalJSON reads either form, refusing unknown members of the object.
+func (k *keyConfig) UnmarshalJSON(b []byte) error {
+	if string(b) == "null" {
+		return nil
+	}
+	if len(b) > 0 && b[0] == '"' {
+		return json.Unmarshal(b, &k.Name)
+	}
+	var o struct {
+		Segment  *int   `json:"segment"`
+		Fallback string `json:"fallback"`
+	}
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&o); err != nil {
+		return fmt.Errorf("key: %w", err)
+	}
+	k.Segment, k.Fallback, k.object = o.Segment, o.Fallback, true
+	return nil
 }
 
 type headersConfig struct {
-	Metadata       *bool `json:"metadata"`
-	UserProperties *bool `json:"userProperties"`
+	Metadata           *bool   `json:"metadata"`
+	UserProperties     *bool   `json:"userProperties"`
+	Prefix             *string `json:"prefix"`
+	UserPropertyPrefix string  `json:"userPropertyPrefix"`
 }
 
 type bufferConfig struct {
@@ -69,6 +103,8 @@ const (
 	keyClientID     = "clientId"
 	keyUserProperty = "userProperty"
 	keyNone         = "none"
+	// keySegment is the object form's source: a level of the MQTT topic.
+	keySegment = "segment"
 )
 
 // The buffer policies.
@@ -89,6 +125,12 @@ const (
 	defaultFlushMs    = 5000
 	maxFlushMs        = 60_000
 	maxTopicLen       = 249
+	maxSegment        = 127
+	maxPrefixLen      = 64
+	maxStaticHeaders  = 32
+	maxHeaderNameLen  = 128
+	maxHeaderValueLen = 1024
+	defaultPrefix     = "mqtt."
 )
 
 // route is one validated route.
@@ -98,7 +140,15 @@ type route struct {
 	key         string
 	keyProperty string
 	namespace   string
+	// segment and fallback are the segment key's: the level's index, and the
+	// source used when a topic has no such level.
+	segment  int
+	fallback string
+	// headers are the route's static headers, in name order.
+	headers []staticHeader
 }
+
+type staticHeader struct{ name, value string }
 
 // settings is the configuration once validated, with every default applied
 // and the files it names read.
@@ -112,6 +162,8 @@ type settings struct {
 	routes         []route
 	metadata       bool
 	userProperties bool
+	prefix         string
+	propertyPrefix string
 	leaderAcks     bool
 	compression    string
 	linger         time.Duration
@@ -160,7 +212,7 @@ func validate(c config, node, namespace string, readFile func(string) ([]byte, e
 	bad := func(field, format string, args ...any) {
 		errs = append(errs, fmt.Errorf("%s: %s", field, fmt.Sprintf(format, args...)))
 	}
-	s := &settings{namespace: namespace, metadata: true, userProperties: true}
+	s := &settings{namespace: namespace, metadata: true, userProperties: true, prefix: defaultPrefix}
 	if len(c.Brokers) == 0 {
 		bad("brokers", "at least one broker is required")
 	}
@@ -182,7 +234,7 @@ func validate(c config, node, namespace string, readFile func(string) ([]byte, e
 	}
 	for i, r := range c.Routes {
 		field := fmt.Sprintf("routes[%d]", i)
-		rt := route{filter: r.Filter, topic: r.Topic, key: r.Key, keyProperty: r.KeyProperty, namespace: r.Namespace}
+		rt := route{filter: r.Filter, topic: r.Topic, key: r.Key.Name, keyProperty: r.KeyProperty, namespace: r.Namespace}
 		if msg := mqtt.ValidateTopicFilter(r.Filter); msg != "" {
 			bad(field+".filter", "%s", msg)
 		} else if mqtt.IsSharedFilter(r.Filter) {
@@ -191,10 +243,14 @@ func validate(c config, node, namespace string, readFile func(string) ([]byte, e
 		if !validTopic(r.Topic) {
 			bad(field+".topic", "%q is not a valid Kafka topic name", r.Topic)
 		}
-		if rt.key == "" {
+		if r.Key.object {
+			rt.key = keySegment
+		} else if rt.key == "" {
 			rt.key = keyTopic
 		}
 		switch rt.key {
+		case keySegment:
+			rt.segment, rt.fallback = segmentKey(r, field, bad)
 		case keyTopic, keyClientID, keyNone:
 			if r.KeyProperty != "" {
 				bad(field+".keyProperty", "is only for key %q", keyUserProperty)
@@ -204,11 +260,12 @@ func validate(c config, node, namespace string, readFile func(string) ([]byte, e
 				bad(field+".keyProperty", "is required with key %q", keyUserProperty)
 			}
 		default:
-			bad(field+".key", "%q is not one of topic, clientId, userProperty, none", r.Key)
+			bad(field+".key", "%q is not one of topic, clientId, userProperty, none", r.Key.Name)
 		}
 		if rt.namespace == "" {
 			rt.namespace = namespace
 		}
+		rt.headers = staticHeaders(r.Headers, field, bad)
 		s.routes = append(s.routes, rt)
 	}
 	if c.Headers.Metadata != nil {
@@ -216,6 +273,16 @@ func validate(c config, node, namespace string, readFile func(string) ([]byte, e
 	}
 	if c.Headers.UserProperties != nil {
 		s.userProperties = *c.Headers.UserProperties
+	}
+	if c.Headers.Prefix != nil {
+		s.prefix = *c.Headers.Prefix
+	}
+	if len(s.prefix) > maxPrefixLen {
+		bad("headers.prefix", "is longer than %d bytes", maxPrefixLen)
+	}
+	s.propertyPrefix = c.Headers.UserPropertyPrefix
+	if len(s.propertyPrefix) > maxPrefixLen {
+		bad("headers.userPropertyPrefix", "is longer than %d bytes", maxPrefixLen)
 	}
 	switch c.Acks {
 	case "", "all":
@@ -338,4 +405,53 @@ func tlsFrom(c tlsConfig, readFile func(string) ([]byte, error)) (*tls.Config, e
 		cfg.Certificates = []tls.Certificate{cert}
 	}
 	return cfg, nil
+}
+
+// segmentKey validates a route's segment key: the index within bounds, the
+// fallback one of topic, clientId or none, and, when the filter fixes its
+// topics' level count, a level the topics have.
+func segmentKey(r routeConfig, field string, bad func(field, format string, args ...any)) (int, string) {
+	if r.KeyProperty != "" {
+		bad(field+".keyProperty", "is only for key %q", keyUserProperty)
+	}
+	if r.Key.Segment == nil {
+		bad(field+".key.segment", "is required in the object form")
+		return 0, keyTopic
+	}
+	n := *r.Key.Segment
+	if n < 0 || n > maxSegment {
+		bad(field+".key.segment", "%d is outside 0–%d", n, maxSegment)
+	}
+	fallback := r.Key.Fallback
+	switch fallback {
+	case "":
+		fallback = keyTopic
+	case keyTopic, keyClientID, keyNone:
+	default:
+		bad(field+".key.fallback", "%q is not one of topic, clientId, none", r.Key.Fallback)
+	}
+	if levels := strings.Split(r.Filter, "/"); levels[len(levels)-1] != "#" && n >= len(levels) {
+		bad(field+".key.segment", "%d is past the topic's last level: the filter %q has %d levels", n, r.Filter, len(levels))
+	}
+	return n, fallback
+}
+
+// staticHeaders validates a route's static headers and returns them in name
+// order.
+func staticHeaders(h map[string]string, field string, bad func(field, format string, args ...any)) []staticHeader {
+	if len(h) > maxStaticHeaders {
+		bad(field+".headers", "at most %d", maxStaticHeaders)
+	}
+	out := make([]staticHeader, 0, len(h))
+	for name, value := range h {
+		if name == "" || len(name) > maxHeaderNameLen {
+			bad(field+".headers", "a name is 1 to %d bytes", maxHeaderNameLen)
+		}
+		if len(value) > maxHeaderValueLen {
+			bad(field+".headers."+name, "is longer than %d bytes", maxHeaderValueLen)
+		}
+		out = append(out, staticHeader{name, value})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].name < out[j].name })
+	return out
 }

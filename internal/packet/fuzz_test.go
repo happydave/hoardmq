@@ -6,17 +6,19 @@ import (
 	"io"
 	"reflect"
 	"testing"
+
+	"github.com/happydave/hoardmq/internal/fuzzseed"
 )
 
 func fuzzSeeds(f *testing.F, v Version) {
 	for _, g := range goldens() {
 		if g.v == v || v == 0 {
-			f.Add(g.raw)
+			fuzzseed.Add(f, g.raw)
 		}
 	}
 	for _, p := range samplePackets(v) {
 		if raw, err := (&Encoder{Version: v}).Bytes(p); err == nil {
-			f.Add(raw)
+			fuzzseed.Add(f, raw)
 		}
 	}
 }
@@ -65,14 +67,14 @@ func FuzzDecodeV3(f *testing.F) {
 func FuzzConnect(f *testing.F) {
 	for _, g := range goldens() {
 		if g.pkt.Type() == CONNECT {
-			f.Add(g.raw)
+			fuzzseed.Add(f, g.raw)
 		}
 	}
 	for _, v := range []Version{V3, V4, V5} {
 		for _, p := range samplePackets(v) {
 			if p.Type() == CONNECT {
 				raw, _ := (&Encoder{Version: v}).Bytes(p)
-				f.Add(raw)
+				fuzzseed.Add(f, raw)
 			}
 		}
 	}

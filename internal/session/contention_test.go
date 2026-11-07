@@ -9,10 +9,11 @@ import (
 
 	"github.com/happydave/hoardmq/internal/message"
 	"github.com/happydave/hoardmq/internal/packet"
+	"github.com/happydave/hoardmq/internal/store"
 )
 
 // mutexWaitSeconds is the process's cumulative time blocked on mutexes. It
-// is the figure WI 1329's research identified as the contention tripwire and
+// is the figure thundering-herd research identified as the contention tripwire and
 // the one the simulation harness reports per operation.
 func mutexWaitSeconds() float64 {
 	s := []metrics.Sample{{Name: "/sync/mutex/wait/total:seconds"}}
@@ -40,12 +41,30 @@ func (lockFreeRouter) MatchGroup(string, string, *message.Message, *Session) (Ma
 	return Match{}, false
 }
 func (lockFreeRouter) Retain(*message.Message) {}
+func (lockFreeRouter) RetainUnder(*message.Message, int) store.RetainRefusal {
+	return store.RetainStored
+}
 func (lockFreeRouter) RetainedFor(string, string, time.Time) []*message.Message {
 	return nil
 }
 func (lockFreeRouter) Sweep(time.Time)                 {}
 func (lockFreeRouter) AllRetained() []*message.Message { return nil }
-func (lockFreeRouter) LoadRetained([]*message.Message) {}
+func (lockFreeRouter) RetainStamped(*message.Message, uint64, int) (store.Version, bool) {
+	return store.Version{}, true
+}
+func (lockFreeRouter) MergeRetained(*message.Message, store.Version, bool) (bool, RetainedEntry) {
+	return true, RetainedEntry{}
+}
+func (lockFreeRouter) MarkRetainedAppended(*message.Message, store.Version, uint64) {}
+func (lockFreeRouter) HeldRetained(string, string) (RetainedEntry, bool) {
+	return RetainedEntry{}, false
+}
+func (lockFreeRouter) DropTombstoneIf(string, string, store.Version) bool { return false }
+func (lockFreeRouter) RetainedEntries() []RetainedEntry                   { return nil }
+func (lockFreeRouter) SeedRetainedVersion(uint64)                         {}
+func (lockFreeRouter) SweepLeading(time.Time, func(string, string) (uint64, bool)) []RetainedEntry {
+	return nil
+}
 
 // connectStorm runs concurrent connect/disconnect cycles against a manager
 // with the given shard count and returns the mutex wait it accumulated.
@@ -74,9 +93,8 @@ func connectStorm(t *testing.T, shards, workers, each int) float64 {
 	return mutexWaitSeconds() - before
 }
 
-// TestShardingReducesConnectContention is WI 1292's third acceptance
-// criterion: something that fails without the fix, rather than the
-// hundred-thousand-client measurement alone.
+// TestShardingReducesConnectContention is something that fails without the
+// fix, rather than the hundred-thousand-client measurement alone.
 //
 // One shard *is* the old manager — a single mutex over both maps — so the
 // two halves of this test are the before and the after, run back to back in
@@ -101,7 +119,7 @@ func TestShardingReducesConnectContention(t *testing.T) {
 	//
 	// This is a repeatability check, not a looser bar: the bar below is
 	// unchanged, and a machine that cannot support the measurement now says
-	// so instead of failing (WI 1507).
+	// so instead of failing.
 	//
 	// It is not free, and the trade is worth stating. Taking the lower of two
 	// sharded readings biases towards passing — a noisy *single*-shard

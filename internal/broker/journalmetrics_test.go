@@ -29,10 +29,10 @@ func metricsOn(d *config.Document) {
 	d.Modules["metrics.prometheus"] = json.RawMessage(`{}`)
 }
 
-// TestJournalFailuresReachTheScrape (criterion 3; WI 1817): the node's own
-// journal failing under a session, by its fsync and by the roll an append
-// makes, is refused to the client and read back from /metrics: the store's
-// failed fsyncs and repair, and the session's failed operations by kind.
+// TestJournalFailuresReachTheScrape: the node's own journal failing under a
+// session, by its fsync and by the roll an append makes, is refused to the
+// client and read back from /metrics: the store's failed fsyncs and repair,
+// and the session's failed operations by kind.
 func TestJournalFailuresReachTheScrape(t *testing.T) {
 	d := faultdisk.New()
 	d.Match = onPath("/data/logs/state/")
@@ -135,11 +135,10 @@ func fillToRoll(t *testing.T, publish func(uint16, []byte) packet.ReasonCode, fi
 	}
 }
 
-// TestSubscriberAppendFailureRefusesThePublish is WI 1891's defect: a QoS 1
-// publish into an offline durable subscriber's queue whose record fails to
-// append (its roll's fsync fails) is refused, the copy that exists only in
-// memory is withdrawn, and the publisher's retry is the one copy the
-// subscriber receives.
+// TestSubscriberAppendFailureRefusesThePublish: a QoS 1 publish into an
+// offline durable subscriber's queue whose record fails to append (its roll's
+// fsync fails) is refused, the copy that exists only in memory is withdrawn,
+// and the publisher's retry is the one copy the subscriber receives.
 func TestSubscriberAppendFailureRefusesThePublish(t *testing.T) {
 	d := faultdisk.New()
 	d.Match = onPath("/data/logs/state/")
@@ -199,7 +198,7 @@ func TestSubscriberAppendFailureRefusesThePublish(t *testing.T) {
 	}
 }
 
-// TestReplicaJournalFailuresReachTheScrape (WI 1817): a replica store's
+// TestReplicaJournalFailuresReachTheScrape: a replica store's
 // failed fsync and its repair are counted under store="replica", and the
 // node's own journal reads none.
 func TestReplicaJournalFailuresReachTheScrape(t *testing.T) {

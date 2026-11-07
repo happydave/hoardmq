@@ -216,8 +216,8 @@ var adminGroups = map[string][]adminVerb{
 			q.Set("topic", a[0])
 			return "GET", "/subscriptions", nil, nil
 		}},
-		{name: "disconnect", args: "CLIENT-ID", nargs: 1, request: fixed("POST", func(a []string) string { return "/clients/" + escape(a[0]) + "/disconnect" })},
-		{name: "invalidate", args: "CLIENT-ID", nargs: 1, request: fixed("DELETE", func(a []string) string { return "/clients/" + escape(a[0]) + "/session" })},
+		{name: "disconnect", args: "CLIENT-ID", nargs: 1, flags: noWillFlag, request: fixed("POST", func(a []string) string { return "/clients/" + escape(a[0]) + "/disconnect" })},
+		{name: "invalidate", args: "CLIENT-ID", nargs: 1, flags: noWillFlag, request: fixed("DELETE", func(a []string) string { return "/clients/" + escape(a[0]) + "/session" })},
 	},
 	"retained": {
 		{name: "list", flags: func(fs *flag.FlagSet) func() url.Values {
@@ -233,6 +233,7 @@ var adminGroups = map[string][]adminVerb{
 		{name: "status", request: get(func([]string) string { return "/cluster" })},
 		{name: "shards", request: get(func([]string) string { return "/cluster/shards" })},
 		{name: "lease", args: "CLIENT-ID", nargs: 1, request: get(func(a []string) string { return "/cluster/leases/" + escape(a[0]) })},
+		{name: "remove", args: "NODE", nargs: 1, request: fixed("DELETE", func(a []string) string { return "/cluster/members/" + escape(a[0]) })},
 	},
 	"traces": {
 		{name: "start", args: "CLIENT-ID", nargs: 1, flags: func(fs *flag.FlagSet) func() url.Values {
@@ -392,6 +393,19 @@ func get(path func([]string) string) func([]string, url.Values) (string, string,
 
 func fixed(method string, path func([]string) string) func([]string, url.Values) (string, string, []byte, error) {
 	return func(a []string, _ url.Values) (string, string, []byte, error) { return method, path(a), nil, nil }
+}
+
+// noWillFlag adds -no-will, which asks the API not to publish the client's
+// Will (will=false).
+func noWillFlag(fs *flag.FlagSet) func() url.Values {
+	noWill := fs.Bool("no-will", false, "do not publish the client's Will")
+	return func() url.Values {
+		q := url.Values{}
+		if *noWill {
+			q.Set("will", "false")
+		}
+		return q
+	}
 }
 
 // pagingFlags adds -after and -limit and returns the query builder.

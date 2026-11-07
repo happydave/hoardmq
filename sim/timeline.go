@@ -4,7 +4,7 @@ package sim
 // run's JSON embedded at write time, because a file:// page cannot fetch a
 // sibling file. No server, no build step, no external reference — the
 // design priority is reading a violation against the faults and connection
-// events around it, which is the shape every WI 1273 diagnosis took.
+// events around it, which is the shape every diagnosis took.
 //
 // The product never compiles this: sim is a test-only package.
 const timelineHTML = `<!DOCTYPE html>

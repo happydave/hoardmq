@@ -56,7 +56,7 @@ type servedBeforeImport struct {
 // x reconnects to the third node, whose CONNECT takes the lease from the
 // adopter and is held between its fetch and its import. The adopter's worker
 // then finds the lease moved and ends its adoption. While the import is held,
-// a QoS 1 publish to x's filter is made on the adopter (WI 1833). With
+// a QoS 1 publish to x's filter is made on the adopter. With
 // takerFactFirst the third node's served fact for the node loss is in the log
 // before x reconnects; otherwise it can only come later.
 //
@@ -322,7 +322,7 @@ func reassignedOwner(t *testing.T, nodes map[string]*fixture, observer, id, vict
 // publish to a lost node's client, made while that client's session is
 // between the adopter and the node that took its lease from the adopter, is
 // either refused or reaches the session: never acknowledged while nobody
-// holds it (WI 1833).
+// holds it.
 func TestPublishDuringATakeoverFromTheAdopterIsNotAcknowledgedUnheld(t *testing.T) {
 	for _, first := range []bool{false, true} {
 		name := map[bool]string{false: "the taker's fact after the takeover", true: "the taker's fact already in the log"}[first]

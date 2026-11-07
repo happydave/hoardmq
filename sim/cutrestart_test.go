@@ -17,7 +17,7 @@ import (
 	"github.com/happydave/hoardmq/internal/packet"
 )
 
-// A drain cut at the termination grace (WI 2259): a follower of the consensus
+// A drain cut at the termination grace: a follower of the consensus
 // core, called n1 below, is stopped within 2 s, as the kubelet stops a pod at
 // the end of its grace, while it still owns the leases of the clients
 // connected to it, and restarted at once, well inside the lease ttl, so

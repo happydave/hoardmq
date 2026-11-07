@@ -12,7 +12,7 @@ import (
 
 // TestMeasureInboundQoS2Exchange times inbound QoS 2 exchanges on a three-node
 // cluster: PUBLISH to PUBREC, and PUBREL to PUBCOMP, for a durable publisher
-// whose session replicates to its peers (WI 2031). It runs only when
+// whose session replicates to its peers. It runs only when
 // HOARDMQ_MEASURE_PUBCOMP names a file, to which it appends one JSON line.
 func TestMeasureInboundQoS2Exchange(t *testing.T) {
 	out := os.Getenv("HOARDMQ_MEASURE_PUBCOMP")

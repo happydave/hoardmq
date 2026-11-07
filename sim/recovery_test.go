@@ -13,7 +13,7 @@ import (
 // TestRestartNeedsSnapshot: a node crashed for long enough that the leader
 // compacts past its log rejoins through a snapshot, and no acknowledged
 // message is lost across the restart. This is the case an index guard on
-// the snapshot install starved (WI 1291); the fixed schedule keeps it in
+// the snapshot install starved; the fixed schedule keeps it in
 // the gate.
 func TestRestartNeedsSnapshot(t *testing.T) {
 	var logFile *os.File

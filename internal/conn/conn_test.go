@@ -26,6 +26,8 @@ type fakeCore struct {
 		reason   packet.ReasonCode
 		will     bool
 	}
+	// open is the inbound QoS 2 identifiers InboundOpen reports held.
+	open          map[uint16]bool
 	connectResult ConnectResult
 	publishReason packet.ReasonCode
 	acks          []string
@@ -35,8 +37,13 @@ type fakeCore struct {
 	// holdPubrec answers a refused QoS 2 PUBLISH with send = false, as a
 	// session holding the error PUBREC for its release does.
 	holdPubrec bool
+	// reidentified is every identity Reidentify was handed.
+	reidentified []auth.Identity
 	// unsubReason answers every filter of every UNSUBSCRIBE.
 	unsubReason packet.ReasonCode
+	// publishTakes holds every PUBLISH this long, as a journal sync or a
+	// replication barrier does.
+	publishTakes time.Duration
 }
 
 func (f *fakeCore) Connect(c *Conn, p *packet.Connect) ConnectResult {
@@ -48,6 +55,10 @@ func (f *fakeCore) Connect(c *Conn, p *packet.Connect) ConnectResult {
 func (f *fakeCore) Connected(*Conn)  {}
 func (f *fakeCore) Subscribed(*Conn) {}
 func (f *fakeCore) Publish(c *Conn, p *packet.Publish) (packet.ReasonCode, bool) {
+	f.mu.Lock()
+	takes := f.publishTakes
+	f.mu.Unlock()
+	time.Sleep(takes)
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.publishes = append(f.publishes, p)
@@ -70,6 +81,12 @@ func (f *fakeCore) Pubrec(c *Conn, id uint16, r packet.ReasonCode) (packet.Reaso
 	f.mu.Unlock()
 	return packet.Success, true
 }
+func (f *fakeCore) InboundOpen(_ *Conn, id uint16) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.open[id]
+}
+
 func (f *fakeCore) Pubcomp(c *Conn, id uint16, r packet.ReasonCode) {
 	f.mu.Lock()
 	f.acks = append(f.acks, "pubcomp")
@@ -95,6 +112,18 @@ func (f *fakeCore) Unsubscribe(c *Conn, u *packet.Unsubscribe) []packet.ReasonCo
 	}
 	return out
 }
+func (f *fakeCore) Reidentify(_ *Conn, id auth.Identity) {
+	f.mu.Lock()
+	f.reidentified = append(f.reidentified, id)
+	f.mu.Unlock()
+}
+
+func (f *fakeCore) handed() []auth.Identity {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]auth.Identity(nil), f.reidentified...)
+}
+
 func (f *fakeCore) Disconnect(c *Conn, graceful bool, reason packet.ReasonCode, will bool) {
 	f.mu.Lock()
 	f.disconnects = append(f.disconnects, struct {
@@ -944,10 +973,10 @@ type goneConn struct {
 
 func (g goneConn) PeerGone() bool { return g.gone }
 
-// TestHandshakeRefusesAnAbandonedConnect is WI 1485: a CONNECT whose client
-// has already closed the connection ends the handshake before the core is
-// asked to connect it, so no lease moves for a client that cannot hear the
-// answer; a client still present is connected as before.
+// TestHandshakeRefusesAnAbandonedConnect: a CONNECT whose client has already
+// closed the connection ends the handshake before the core is asked to connect
+// it, so no lease moves for a client that cannot hear the answer; a client
+// still present is connected as before.
 func TestHandshakeRefusesAnAbandonedConnect(t *testing.T) {
 	for _, gone := range []bool{true, false} {
 		core := &fakeCore{connectResult: ConnectResult{Reason: packet.Success}}

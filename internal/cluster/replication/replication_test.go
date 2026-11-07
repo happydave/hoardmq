@@ -147,10 +147,15 @@ type fakeSessions struct {
 	mu       sync.Mutex
 	own      *store.Store
 	sessions []*store.SessionState
-	retained map[string]*message.Message
+	retained map[string]*message.Message // a tombstone has an empty payload
+	vers     map[string]store.Version
+	n        uint64 // the stamp counter
 	// unjournaled makes InjectRetained report its record not durable, as a
 	// session layer whose journal append or sync failed does.
 	unjournaled atomic.Bool
+	// full makes InjectRetainedWrite refuse every write, as a namespace at
+	// its retained-topic limit does.
+	full atomic.Bool
 	// lock stands for the sessions' own mutexes: WholeState holds it while its
 	// function runs, and a test's write of a session's record takes it, as the
 	// manager writes every record of a session under that session's mutex.
@@ -196,29 +201,167 @@ func (s *fakeSessions) Export(ns, id string) (*store.SessionState, bool) {
 	}
 	return nil, false
 }
-func (s *fakeSessions) InjectRetained(m *message.Message) bool {
+func (s *fakeSessions) InjectRetained(m *message.Message) (bool, store.RetainRefusal) {
 	// The store is set, then journaled with the lock released, as the
 	// manager's router is set before its journal record is tapped: the tap
 	// waits on a whole push that reads this store.
 	s.mu.Lock()
-	if len(m.Payload) == 0 {
-		delete(s.retained, m.Namespace+"/"+m.Topic)
-	} else {
-		s.retained[m.Namespace+"/"+m.Topic] = m
+	k := m.Namespace + "/" + m.Topic
+	if _, held := s.retained[k]; len(m.Payload) > 0 && store.UnversionedRefused(s.vers[k], held) {
+		s.mu.Unlock()
+		return false, store.RetainVersionedHeld
 	}
+	if len(m.Payload) == 0 {
+		delete(s.retained, k)
+	} else {
+		s.retained[k] = m
+	}
+	delete(s.vers, k)
 	s.mu.Unlock()
 	var err error
 	if len(m.Payload) == 0 {
-		err = s.own.RetainDelete(m.Namespace, m.Topic)
+		err = s.own.RetainDrop(m.Namespace, m.Topic)
 	} else {
-		err = s.own.Retain(m)
+		err = s.own.Retain(m, store.Version{})
 	}
-	return errors.Join(err, s.own.Sync()) == nil && !s.unjournaled.Load()
+	return errors.Join(err, s.own.Sync()) == nil && !s.unjournaled.Load(), store.RetainStored
+}
+
+// InjectRetainedAt merges a copy at a version, as the manager does, and
+// journals what is held after.
+func (s *fakeSessions) InjectRetainedAt(m *message.Message, v store.Version, handOver bool) (installed, durable bool, heldRV store.Version) {
+	k := m.Namespace + "/" + m.Topic
+	s.mu.Lock()
+	if len(m.Payload) == 0 && v.Zero() {
+		delete(s.retained, k)
+		delete(s.vers, k)
+		s.mu.Unlock()
+		return true, errors.Join(s.own.RetainDrop(m.Namespace, m.Topic), s.own.Sync()) == nil && !s.unjournaled.Load(), store.Version{}
+	}
+	_, exists := s.retained[k]
+	installed = store.MergeRetained(s.vers[k], exists, v, handOver)
+	if installed {
+		s.retained[k] = m
+		if v.Zero() {
+			delete(s.vers, k)
+		} else {
+			s.vers[k] = v
+		}
+		if v.N > s.n {
+			s.n = v.N
+		}
+	}
+	held, hv := s.retained[k], s.vers[k]
+	s.mu.Unlock()
+	return installed, errors.Join(s.journal(held, hv), s.own.Sync()) == nil && !s.unjournaled.Load(), hv
+}
+
+// journal appends an entry's record: a message at its version, or a clear.
+func (s *fakeSessions) journal(m *message.Message, v store.Version) error {
+	switch {
+	case len(m.Payload) > 0:
+		return s.own.Retain(m, v)
+	case v.Zero():
+		return s.own.RetainDrop(m.Namespace, m.Topic)
+	}
+	return s.own.RetainClear(m.Namespace, m.Topic, v)
+}
+
+// InjectRetainedWriteAt stamps a forwarded write at epoch, as the shard
+// leader's manager does.
+func (s *fakeSessions) InjectRetainedWriteAt(m *message.Message, epoch uint64) (durable bool, refusal store.RetainRefusal) {
+	if s.full.Load() {
+		return false, store.RetainOverLimit
+	}
+	if epoch == 0 {
+		return s.InjectRetained(m)
+	}
+	s.mu.Lock()
+	s.n++
+	v := store.Version{E: epoch, N: s.n}
+	k := m.Namespace + "/" + m.Topic
+	s.retained[k] = m
+	s.vers[k] = v
+	s.mu.Unlock()
+	return errors.Join(s.journal(m, v), s.own.Sync()) == nil && !s.unjournaled.Load(), store.RetainStored
+}
+
+// DropRetainedTombstone removes a topic's tombstone while it is the one at
+// v.
+func (s *fakeSessions) DropRetainedTombstone(ns, topic string, v store.Version) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	k := ns + "/" + topic
+	if m, ok := s.retained[k]; !ok || len(m.Payload) != 0 || s.vers[k] != v {
+		return false
+	}
+	delete(s.retained, k)
+	delete(s.vers, k)
+	return true
+}
+
+// reload rebuilds the retained store from the node's own journal, as a
+// restart's load does: each message and tombstone at its version, and the
+// stamp counter above every number they carry.
+func (s *fakeSessions) reload() error {
+	st, err := s.own.Recover()
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.retained = map[string]*message.Message{}
+	s.vers = map[string]store.Version{}
+	versions := map[string]store.Version{}
+	for _, rv := range st.RetainedVersions {
+		versions[rv.Namespace+"/"+rv.Topic] = rv.RV
+	}
+	keep := func(k string, m *message.Message, v store.Version) {
+		s.retained[k] = m
+		if !v.Zero() {
+			s.vers[k] = v
+		}
+		s.n = max(s.n, v.N)
+	}
+	for _, m := range st.Retained {
+		k := m.Namespace + "/" + m.Topic
+		keep(k, m, versions[k])
+	}
+	for _, t := range st.RetainedTombstones {
+		keep(t.Namespace+"/"+t.Topic, &message.Message{Namespace: t.Namespace, Topic: t.Topic, Retain: true}, t.RV)
+	}
+	return nil
+}
+
+// HeldRetained is what is held for a topic, tombstone included.
+func (s *fakeSessions) HeldRetained(ns, topic string) (store.RetainedEntry, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	k := ns + "/" + topic
+	m, ok := s.retained[k]
+	if !ok {
+		return store.RetainedEntry{}, false
+	}
+	return store.RetainedEntry{Msg: m, RV: s.vers[k], Tombstone: len(m.Payload) == 0, Appended: 1}, true
+}
+
+// RetainedEntries lists every held entry, tombstones included.
+func (s *fakeSessions) RetainedEntries() []store.RetainedEntry {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]store.RetainedEntry, 0, len(s.retained))
+	for k, m := range s.retained {
+		out = append(out, store.RetainedEntry{Msg: m, RV: s.vers[k], Tombstone: len(m.Payload) == 0, Appended: 1})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Msg.Topic < out[j].Msg.Topic })
+	return out
 }
 func (s *fakeSessions) all() []*message.Message {
 	var out []*message.Message
 	for _, m := range s.retained {
-		out = append(out, m)
+		if len(m.Payload) > 0 {
+			out = append(out, m)
+		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Topic < out[j].Topic })
 	return out
@@ -248,6 +391,9 @@ func (s *fakeSessions) has(ns, t string) (*message.Message, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	m, ok := s.retained[ns+"/"+t]
+	if ok && len(m.Payload) == 0 {
+		return nil, false // a tombstone: held, never served
+	}
 	return m, ok
 }
 
@@ -339,7 +485,7 @@ func newHarnessWith(t *testing.T, names []string, shards, replicas int, mutate f
 		}
 		n := &tnode{name: name, tr: tr, table: shardmap.New(shards), own: own, replica: replica,
 			leases:   &fakeLeases{leases: map[string]lease.Lease{}, nodes: map[string]lease.NodeInfo{}},
-			sessions: &fakeSessions{own: own, retained: map[string]*message.Message{}}}
+			sessions: &fakeSessions{own: own, retained: map[string]*message.Message{}, vers: map[string]store.Version{}}}
 		n.core = &fakeCore{h: h, node: name, role: "follower"}
 		opts := Options{Node: name, Transport: tr, Map: n.table, Core: n.core, Leases: n.leases, Sessions: n.sessions, Local: n.sessions,
 			Replica: replica, Replicas: replicas, AckTimeout: 2 * time.Second, TTL: 2 * time.Second, Interval: 100 * time.Millisecond, Logger: quiet.With("node", name)}
@@ -556,10 +702,10 @@ func TestStaleEpochIsRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The follower refuses the record, so the copy is not held and the
-	// barrier covering it fails (1273's owner question 3).
+	// barrier covering it fails.
 	//
 	// Each call names the session it is about. The barrier scopes a refusal to
-	// what it belongs to (WI 1510), so a wait that named both sessions would
+	// what it belongs to, so a wait that named both sessions would
 	// fail for the first session's refusal and could never show that the
 	// second is accepted. Both assertions are the ones this test has always
 	// made.
@@ -932,7 +1078,7 @@ func TestReconcileIsOrderedAndCoalesced(t *testing.T) {
 // The tap runs inside the store's lock, and the store's lock is reached with
 // the session manager's lock held on the connect path. So a tap that reads the
 // lease table hands every connect the lease table's contention — which is
-// exactly what a failover storm produces (WI 1292). The epoch now rides on the
+// exactly what a failover storm produces. The epoch now rides on the
 // record, and this asserts the lookup is gone rather than merely cheap: a
 // Leases whose Lookup fails the test.
 func TestTapDoesNotReadTheLeaseTable(t *testing.T) {
@@ -967,7 +1113,7 @@ func TestTapDoesNotReadTheLeaseTable(t *testing.T) {
 // the resync cooldown has its resync refused, and nothing else asks again when
 // the link carries on without another failure or state change. Barriers must
 // not fail for that peer indefinitely: the hole is repaired once the cooldown
-// has passed (WI 1491).
+// has passed.
 func TestHoleOpenedDuringResyncCooldownIsRepaired(t *testing.T) {
 	h := newHarness(t, []string{"n1", "n2"}, 2, 2)
 	h.applyMap(shardmap.Compute(1, h.order, 2, 2))
@@ -1001,7 +1147,7 @@ func TestHoleOpenedDuringResyncCooldownIsRepaired(t *testing.T) {
 
 // TestCooldownRetryIsArrangedOnce: however many times a holed stream asks for
 // a resync during one cooldown, one retry is arranged, and a replicator
-// stopped with it pending stops promptly (WI 1491).
+// stopped with it pending stops promptly.
 func TestCooldownRetryIsArrangedOnce(t *testing.T) {
 	h := newHarness(t, []string{"n1", "n2"}, 2, 2)
 	h.applyMap(shardmap.Compute(1, h.order, 2, 2))
@@ -1040,8 +1186,7 @@ func TestCooldownRetryIsArrangedOnce(t *testing.T) {
 // frames for a session this node no longer holds, and the resync finds
 // nothing to send the peer. Every frame sent was marked failed, and if nothing
 // is pushed afterwards a barrier's target never passes the failed mark: every
-// barrier for that peer fails until some unrelated write happens to go to it
-// (WI 1494).
+// barrier for that peer fails until some unrelated write happens to go to it.
 func TestBreakWithNothingToResendDoesNotPinTheBarrier(t *testing.T) {
 	h := newHarness(t, []string{"n1", "n2"}, 2, 2)
 	h.applyMap(shardmap.Compute(1, h.order, 2, 2))
@@ -1075,7 +1220,7 @@ func TestBreakWithNothingToResendDoesNotPinTheBarrier(t *testing.T) {
 }
 
 // TestBarrierFailureReasons: each way a barrier's wait fails is counted under
-// its own reason (WI 1494).
+// its own reason.
 func TestBarrierFailureReasons(t *testing.T) {
 	fresh := func() *outbound {
 		p := &outbound{name: "peer"}
@@ -1097,7 +1242,7 @@ func TestBarrierFailureReasons(t *testing.T) {
 		// A refusal that could not be scoped blocks the stream whole, and is
 		// counted under its own reason so it is never read as a broken send.
 		"unscoped": func() error { p := fresh(); p.streamBlocked = true; return p.wait(quick(), up, probeScope) },
-		// A named key this peer refused (WI 1510): the record is not held.
+		// A named key this peer refused: the record is not held.
 		"not-held": func() error {
 			p := fresh()
 			p.refused = map[store.Scope]refusal{probeScope[0].Bare(): {epoch: 0, class: "stale-epoch"}}
@@ -1126,7 +1271,7 @@ func TestBarrierFailureReasons(t *testing.T) {
 // TestLostAckWithNoFurtherFramesDoesNotPinTheBarrier: the peer applies the
 // last frame but its acknowledgement is lost, and no later frame follows to
 // carry a cumulative acknowledgement. Barriers must not time out for that
-// peer indefinitely once acknowledgements get through again (WI 1494).
+// peer indefinitely once acknowledgements get through again.
 func TestLostAckWithNoFurtherFramesDoesNotPinTheBarrier(t *testing.T) {
 	h := newHarness(t, []string{"n1", "n2"}, 2, 2)
 	h.applyMap(shardmap.Compute(1, h.order, 2, 2))

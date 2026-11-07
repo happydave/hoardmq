@@ -7,8 +7,7 @@ import (
 	"time"
 )
 
-// The failover measurement's definition of recovered, owner-decided
-// 2026-09-21 (WI 1618).
+// The failover measurement's definition of recovered.
 //
 // A client is recovered while it holds a live connection whose CONNACK was
 // Success and every filter it holds was granted on that same connection
@@ -20,16 +19,15 @@ import (
 // population that does not stay up moves the instant out to where it belongs,
 // and no separate pass rule is needed. A measurement that stops at the first
 // reading where everyone is online cannot see what the cluster still owes
-// them — WI 1515's adoption queue closed connections after the number had
-// been published.
+// them — an adoption queue closed connections after the number had been
+// published.
 const (
 	// recoveryReached is the verdict's reason when an instant was settled.
 	recoveryReached = ""
 	// A reading below the target after the crash is what makes a later
 	// reading at the target a return rather than a start. Without it a run
 	// where nothing ever dropped reports its first pass as a recovery: the
-	// remote driver has required this since WI 1480 and the in-process mode
-	// did not, which is WI 1698.
+	// remote driver has required this and the in-process mode did not.
 	recoveryNeverFell    = "the recovered count was never seen below the target, so nothing recovered"
 	recoveryNeverBack    = "the recovered count fell and never returned to the target"
 	recoveryLate         = "the recovered count returned only after the window closed"
@@ -111,7 +109,7 @@ func (w *holdWatch) holdStart() time.Time {
 }
 
 // holdDefault is H: the interval a recovered population must hold for before
-// the instant counts (owner decision, 2026-09-21).
+// the instant counts.
 //
 // It is two timings, not a round number. A lease lives 30 s
 // (internal/cluster/lease/service.go) and the routing plane's full sync runs

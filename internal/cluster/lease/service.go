@@ -66,12 +66,17 @@ type Sessions interface {
 }
 
 // Requester describes the connection asking for a lease, carried on a
-// takeover request so the previous owner can attribute it (WI 1338): how
-// long ago it was accepted, and whether its CONNECT was already buffered at
-// accept — a socket that waited in the listen backlog.
+// takeover request so the previous owner can attribute it: how long ago it
+// was accepted, and whether its CONNECT was already buffered at accept — a
+// socket that waited in the listen backlog.
 type Requester struct {
 	ConnAge     time.Duration
 	Prebuffered bool
+	// Principal is the CONNECT's PrincipalDigest, and Bind whether a session
+	// is bound to its principal (auth.sessionBinding): a lease recorded under
+	// another principal is then refused before it is acquired.
+	Principal uint64
+	Bind      bool
 }
 
 // Transport is what the service needs from the cluster transport; nil for a
@@ -157,6 +162,20 @@ type Options struct {
 	// records the adoption, so a test can hold the hook there. Nil outside
 	// tests.
 	AdoptGate func(ns, id string)
+	// RenewalGate is called by a renewal that succeeded, once its result has
+	// reached this node and before the node records it, so a test can hold
+	// the renewal's return trip there. Nil outside tests.
+	RenewalGate func()
+	// FenceGate is called by a fence check that finds this node's record
+	// lapsed, before it decides, so a test can make the fence late. Nil
+	// outside tests.
+	FenceGate func()
+	// Moved is called by this node's change hook when a lease's owner
+	// changes from another node to this one, whether the client took it over
+	// or the lease was reassigned here. A first grant, a release and a
+	// re-grant to the same owner are not moves. It runs on consensus apply,
+	// so it must not block. Nil calls nothing.
+	Moved func(ns, id, from, to string)
 	// SealTimeout is how long a seal nothing confirms waits before its check,
 	// and between checks (default twice TTL).
 	SealTimeout time.Duration
@@ -348,7 +367,16 @@ type Service struct {
 	timers   map[key]*adopted
 	nextReq  atomic.Uint64
 
-	lastAlive atomic.Int64 // unix nanos of the last successful alive
+	// lastAlive is when the latest successful renewal was sent, in steady unix
+	// nanos: the leader applied that record later, so a fence counted from
+	// here cannot come after the leader's count of the same silence.
+	lastAlive atomic.Int64
+	// aliveMoved wakes the fence timer when lastAlive moves; fenceMu makes
+	// the tick loop and the fence timer one writer of the fence's state, the
+	// leader's tenure clock among it; fenceDone closes when the timer ends.
+	aliveMoved chan struct{}
+	fenceMu    sync.Mutex
+	fenceDone  chan struct{}
 	// contactIndex is the highest log index a successful renewal's alive
 	// record applied at, and contactAt the steady time of that success.
 	contactMu    sync.Mutex
@@ -362,7 +390,7 @@ type Service struct {
 	ctx    context.Context // cancelled by Stop, bounds every proposal and forward
 	cancel context.CancelFunc
 
-	// Bounded work in place of a goroutine per event (WI 1292 round 3):
+	// Bounded work in place of a goroutine per event:
 	// takeover requests from peers, leases this node lost, adoptions.
 	takeovers  *workQueue
 	lost       *workQueue
@@ -387,9 +415,9 @@ type Service struct {
 	waitNotes  *waitNotes
 	race       claimRace
 
-	// Liveness counters, lock-free, for the harness (WI 1292 round 4: a
-	// full recovery that collapsed minutes later needed the lease service's
-	// own timeline — fences, adoptions, lost leases, failed renewals).
+	// Liveness counters, lock-free, for the harness (a full recovery that
+	// collapsed minutes later needed the lease service's own timeline —
+	// fences, adoptions, lost leases, failed renewals).
 	fences       atomic.Int64
 	adoptions    atomic.Int64
 	lostLeases   atomic.Int64
@@ -398,9 +426,10 @@ type Service struct {
 	aliveTotalNs atomic.Int64
 	aliveCount   atomic.Int64
 
-	// Renewal path (WI 1337): renewals run on their own lane, several per
-	// ttl, bounded in flight; the counters are the plan's observability.
+	// Renewal path: renewals run on their own lane, several per ttl,
+	// bounded in flight; the counters are its observability.
 	renewInflight atomic.Int32
+	renewPeak     atomic.Int32 // the most renewals in flight at once
 	renewSkipped  atomic.Int64 // launches skipped for the in-flight bound
 	renewFallback atomic.Int64 // renewals that took the batched path (Version 1 peer)
 	renewStreak   atomic.Int64 // consecutive failures, reset on success
@@ -408,13 +437,21 @@ type Service struct {
 	leaderSince   atomic.Int64 // unix nanos this node became leader; 0 when not leader
 	// heard is, per node, when this node last applied its alive record, and
 	// observingSince when it began watching, both on the steady clock.
-	heard          sync.Map // string -> int64
+	heard sync.Map // string -> int64
+	// adoptMu makes adopt one pass at a time: the tick loop and a re-check
+	// both run it. rechecks, under recheckMu, holds each node's one-off
+	// re-check for the end of its declaration margin; declaring, each
+	// node's last declaration proposed, by its alive index and steady time.
+	adoptMu        sync.Mutex
+	recheckMu      sync.Mutex
+	rechecks       map[string]*time.Timer
+	declaring      sync.Map // string -> declareMark
 	observingSince atomic.Int64
 	timeline       livenessTimeline
 	renewMu        sync.Mutex
 	renewCur       *renewal     // the attempt concurrent alive() callers share
 	renewFailedAt  atomic.Int64 // unix nanos of the last failed attempt, for the connect path's floor
-	// Fence deferrals (WI 1341): a lapsed record does not fence while the
+	// Fence deferrals: a lapsed record does not fence while the
 	// group has no leader and this node has a reachable quorum.
 	fencesDeferred   atomic.Int64
 	deferring        atomic.Bool  // a deferral streak is in progress (one warning per streak)
@@ -432,7 +469,7 @@ type Service struct {
 	renewTimeouts atomic.Int64
 	renewNoLeader atomic.Int64
 	// renewUnreachable counts renewals that failed with a leader known and
-	// unreachable, which renewNoLeader used to absorb (WI 1357).
+	// unreachable, which renewNoLeader used to absorb.
 	renewUnreachable atomic.Int64
 	renewLaneFull    atomic.Int64
 	renewOther       atomic.Int64
@@ -444,7 +481,7 @@ type Service struct {
 	leaderlessSince atomic.Int64
 	leaderlessMax   atomic.Int64
 
-	// Takeover attribution (WI 1338): requests for a key this node still
+	// Takeover attribution: requests for a key this node still
 	// serves live, where the live connection is older than the requester's
 	// (olderTakeovers), and of those, where the requester's CONNECT was
 	// prebuffered — the signature of a backlog-delayed socket (stale).
@@ -452,7 +489,7 @@ type Service struct {
 	staleTakeovers atomic.Int64
 
 	// What a takeover costs, split by whether this node still had the client
-	// connected when it served one (WI 1495). The published batches can say
+	// connected when it served one. The published batches can say
 	// how many leases a node lost and how many connections the run dropped,
 	// but not whether those are the same events: a lease move costs a live
 	// connection only when the losing node still had one, and that ratio is
@@ -462,7 +499,7 @@ type Service struct {
 	// live ones, takeoversLiveAdopted counts those whose lease this node had
 	// adopted during this outage rather than held all along — the case that
 	// distinguishes an adoption racing a client from an unrelated re-home.
-	// The other detach path (WI 1495). lostLease runs asynchronously after a
+	// The other detach path. lostLease runs asynchronously after a
 	// lease has gone and closes the client here; it fires once per lost lease
 	// and is a different act from the one serveTakeover performs — a client
 	// that arrived after the takeover was served is still connected when this
@@ -471,7 +508,7 @@ type Service struct {
 	lostDetachLive atomic.Int64
 	lostDetachGone atomic.Int64
 
-	// The deferred reclaim after a lost lease (WI 1513). evictDeferrals counts
+	// The deferred reclaim after a lost lease. evictDeferrals counts
 	// times the eviction was held off because a client was connected here;
 	// evictBoundHit counts evictions that went ahead with a client still here
 	// because the bound ran out. Without the second, a fix that silently
@@ -635,8 +672,7 @@ type Service struct {
 	// an *online* one from another owner, which is a client acquiring its own
 	// lease here. Unix milliseconds, so they compare across nodes; the three
 	// nodes share a process in the measurement, which is what makes that
-	// sound, and a cross-host version of this would need a different basis
-	// (WI 1514).
+	// sound, and a cross-host version of this would need a different basis.
 	//
 	// Zero means the event did not happen, which is a real outcome for a node
 	// that adopts nothing.
@@ -650,12 +686,12 @@ type Service struct {
 	// about the lease ttl in every run whatever the adoption regime — so it
 	// measured which node won the election rather than when the crashed node's
 	// leases started moving. The per-owner map is what lets the analysis ask
-	// about the crashed node specifically (WI 1514).
+	// about the crashed node specifically.
 	firstClientTakeMs atomic.Int64
 	takeFromMu        sync.Mutex
 	firstTakeFrom     map[string]int64
 
-	// What a takeover pull waits for, both sides (WI 1691).
+	// What a takeover pull waits for, both sides.
 	takeoverTimes takeoverCounters
 
 	takeoversServed    atomic.Int64
@@ -665,7 +701,7 @@ type Service struct {
 	detachedAgeTotalMs atomic.Int64
 	detachedAgeMaxMs   atomic.Int64
 	// The interval between this node adopting a lease and losing it to a
-	// takeover (WI 1495, B3). If a client that arrives while the adoption is
+	// takeover. If a client that arrives while the adoption is
 	// still settling is sent elsewhere, these are short; if the re-home has
 	// nothing to do with the adoption, they are not. No counter in the
 	// published artifacts can tell those apart, which is why this exists.
@@ -696,7 +732,7 @@ type Service struct {
 	// said it was, and that was wrong.
 	adoptedAt sync.Map // key -> time.Time
 
-	// Fence evidence (WI 1474): which condition allowed each fence, the
+	// Fence evidence: which condition allowed each fence, the
 	// decision records, and the tick loop's own timing.
 	fencesLeaderSettled atomic.Int64
 	fencesNoQuorum      atomic.Int64
@@ -710,8 +746,14 @@ type Service struct {
 }
 
 // renewInflightMax bounds concurrent renewals: a slow attempt does not stop
-// the next launch, and a wedged peer does not pile them up.
-const renewInflightMax = 2
+// the next launch, and a wedged peer does not pile them up. The fence counts
+// from a successful renewal's send, so the bound sets the latency a node
+// tolerates: with three slots and a launch every tick, a renewal faster than
+// three ticks never meets a full set, successful sends stay a tick apart, and
+// the record is a tick plus the latency old at each success, inside the ttl.
+// Past three ticks launches are skipped, sends come two ticks apart, and the
+// node fences.
+const renewInflightMax = 3
 
 // renewWarnStreak is the consecutive-failure count that logs a warning,
 // before the ttl runs out.
@@ -726,12 +768,13 @@ type LivenessStats struct {
 	AliveFails   int64   `json:"alive_failures"`
 	AliveMaxMs   float64 `json:"alive_max_ms"`
 	AliveAvgMs   float64 `json:"alive_avg_ms"`
-	AliveAgeMs   float64 `json:"alive_age_ms"` // since the last successful renewal
+	AliveAgeMs   float64 `json:"alive_age_ms"` // since the last successful renewal was sent
 	Fenced       bool    `json:"fenced"`
 	LeasesActive int     `json:"leases_active"`
-	// Renewal path (WI 1337).
+	// Renewal path.
 	RenewOK        int64   `json:"renew_ok"`
 	RenewInflight  int32   `json:"renew_inflight"`
+	RenewPeak      int32   `json:"renew_inflight_peak"` // the most renewals in flight at once since start
 	RenewSkipped   int64   `json:"renew_skipped"`
 	RenewFallback  int64   `json:"renew_fallback"`
 	RenewStreak    int64   `json:"renew_fail_streak"`
@@ -741,14 +784,14 @@ type LivenessStats struct {
 	RenewNoLeader  int64   `json:"renew_no_leader"`
 	// RenewUnreachable is renewals that failed with a leader known and
 	// unreachable; LeaderlessMaxMs is the longest this node went with no
-	// leader at all (WI 1357).
+	// leader at all.
 	RenewUnreachable int64   `json:"renew_leader_unreachable"`
 	LeaderlessMaxMs  float64 `json:"leaderless_max_ms"`
 	RenewLaneFull    int64   `json:"renew_lane_full"`
 	RenewOther       int64   `json:"renew_other_failures"`
-	StaleTakeovers   int64   `json:"stale_takeovers"` // WI 1338 attribution
+	StaleTakeovers   int64   `json:"stale_takeovers"` // takeover attribution
 	OlderTakeovers   int64   `json:"older_takeovers"` // live connection older than the requester's
-	// WI 1495: what a takeover cost. Served partitions into Live and Gone;
+	// What a takeover cost. Served partitions into Live and Gone;
 	// LiveAdopted is the subset of Live whose lease this node had adopted.
 	TakeoversServed    int64   `json:"takeovers_served"`
 	TakeoversLive      int64   `json:"takeovers_live"`
@@ -757,17 +800,17 @@ type LivenessStats struct {
 	DetachedAgeAvgMs   float64 `json:"detached_age_avg_ms"`
 	DetachedAgeMaxMs   int64   `json:"detached_age_max_ms"`
 	// How long an adopted lease stayed here before a takeover took it, and a
-	// capped sample of the individual intervals (WI 1495).
+	// capped sample of the individual intervals.
 	AdoptTakeovers   int64             `json:"adopt_takeovers"`
 	AdoptTakeAvgMs   float64           `json:"adopt_takeover_avg_ms"`
 	AdoptTakeMaxMs   int64             `json:"adopt_takeover_max_ms"`
 	AdoptTakeSample  []AdoptedTakeover `json:"adopt_takeover_sample,omitempty"`
 	AdoptTakeDropped int64             `json:"adopt_takeover_sample_dropped"`
 	// The lost-lease detach, which runs after the lease has already gone and
-	// is a separate cost from the takeover's own (WI 1495).
+	// is a separate cost from the takeover's own.
 	LostDetachLive int64 `json:"lost_detach_live"`
 	LostDetachGone int64 `json:"lost_detach_gone"`
-	// The deferred reclaim (WI 1513): evictions held off because a client was
+	// The deferred reclaim: evictions held off because a client was
 	// here, and evictions that went ahead anyway once the bound ran out.
 	EvictDeferrals int64 `json:"evict_deferrals"`
 	EvictBoundHit  int64 `json:"evict_bound_hit"`
@@ -966,7 +1009,7 @@ type LivenessStats struct {
 	// its fetch or import), and a CONNECT's (answered Server Busy).
 	AdoptImportRefused   int64 `json:"adopt_import_refused"`
 	ConnectImportRefused int64 `json:"connect_import_refused"`
-	// The race the adoption regime turns on (WI 1514): when the bulk
+	// The race the adoption regime turns on: when the bulk
 	// reassignment landed here, and when the first client took its own lease
 	// from another owner. Unix ms; 0 means it did not happen.
 	FirstAdoptMs int64 `json:"first_adopt_ms"`
@@ -991,14 +1034,14 @@ type LivenessStats struct {
 	FenceEvidence
 	ImportTraceStats
 	// Transit counts the sessions of a lost node taken from their adopter
-	// before its import (WI 1833).
+	// before its import.
 	Transit TransitStats `json:"transit"`
 }
 
 func (s *Service) LivenessStats() LivenessStats {
 	st := LivenessStats{Fences: s.fences.Load(), Adoptions: s.adoptions.Load(), LostLeases: s.lostLeases.Load(),
 		AliveFails: s.aliveFails.Load(), AliveMaxMs: float64(s.aliveMaxNs.Load()) / 1e6, Fenced: s.fenced.Load(),
-		LeasesActive: s.table.Count(), RenewOK: s.aliveCount.Load(), RenewInflight: s.renewInflight.Load(),
+		LeasesActive: s.table.Count(), RenewOK: s.aliveCount.Load(), RenewInflight: s.renewInflight.Load(), RenewPeak: s.renewPeak.Load(),
 		RenewSkipped: s.renewSkipped.Load(), RenewFallback: s.renewFallback.Load(), RenewStreak: s.renewStreak.Load(),
 		StaleTakeovers: s.staleTakeovers.Load(), OlderTakeovers: s.olderTakeovers.Load(),
 		TakeoversServed: s.takeoversServed.Load(), TakeoversLive: s.takeoversLive.Load(),
@@ -1179,9 +1222,9 @@ var ErrNoLeader = errors.New("lease: no leader reachable")
 // could not send to it. It wraps ErrNoLeader deliberately: everything that
 // tests for ErrNoLeader — including retryable, and therefore the renewal's
 // retry — keeps working unchanged, while the two causes become countable
-// apart. They were not, and 18 of the 20 renewal failures behind round 10b's
-// one fence sat in the same bucket as a genuinely leaderless view while raft
-// had a stable leader (WI 1357).
+// apart. They were not, and 18 of the 20 renewal failures behind the one
+// fence in a 100,000-client failover sat in the same bucket as a genuinely
+// leaderless view while raft had a stable leader.
 var ErrLeaderUnreachable = fmt.Errorf("%w: the leader is known but this node could not reach it", ErrNoLeader)
 
 // New registers the lease component with the machine and prepares the
@@ -1237,7 +1280,7 @@ func New(o Options) (*Service, error) {
 	// group-committed journal sync, so passes for different clients overlap
 	// rather than serialize, and the worker count is what bounds the queue a
 	// storm's takeovers wait in. At 100,000 clients that queue was 88-93% of
-	// what a pull waited for, against 2-4 ms for the pass itself (WI 1691).
+	// what a pull waited for, against 2-4 ms for the pass itself.
 	// Lost-lease passes are on no handshake's path and keep their handful.
 	s.takeovers = s.newQueue("takeover", takeoverWorkers, s.serveTakeover)
 	s.lost = s.newQueue("lost-lease", 4, func(k key, _ []any) { s.lostLease(k) })
@@ -1246,7 +1289,7 @@ func New(o Options) (*Service, error) {
 	// A confirmation that acts waits for the journal's group fsync covering
 	// its delete; that wait is nearly all of its pass, so the passes waiting
 	// at once are how many a fsync releases. A node loss sends the adopter
-	// them in a burst (WI 1834).
+	// them in a burst.
 	s.confirmed = s.newQueue("confirmed", confirmWorkers, s.serveConfirmed)
 	s.sealChecks = s.newQueue("seal-check", sealCheckWorkers, s.serveSealCheck)
 	s.confirmOut.wake = make(chan struct{}, 1)
@@ -1254,6 +1297,8 @@ func New(o Options) (*Service, error) {
 	s.transit = newTransitSet()
 	s.connecting = newConnecting()
 	s.transitDone = make(chan struct{})
+	s.aliveMoved = make(chan struct{}, 1)
+	s.fenceDone = make(chan struct{})
 	s.abandoned = newAbandonedAcquires()
 	s.firsts = newFirstAcquires()
 	s.waitNotes = newWaitNotes()
@@ -1302,6 +1347,7 @@ func (s *Service) Tokens() *Tokens { return s.tokens }
 func (s *Service) Start() {
 	go s.flushLoop()
 	go s.tickLoop()
+	go s.fenceLoop()
 	s.takeovers.start()
 	s.lost.start()
 	s.adopts.start()
@@ -1359,6 +1405,13 @@ func (s *Service) Stop() {
 	s.sealChecks.stopAndWait()
 	<-s.confirmDone
 	<-s.transitDone
+	<-s.fenceDone
+	s.recheckMu.Lock()
+	for node, t := range s.rechecks {
+		t.Stop()
+		delete(s.rechecks, node)
+	}
+	s.recheckMu.Unlock()
 	s.mu.Lock()
 	for k, a := range s.timers {
 		a.cancel()
@@ -1434,11 +1487,17 @@ func (s *Service) AcquireFrom(ctx context.Context, ns, id string, will *store.Wi
 			return AcquireResult{}, s.refusal()
 		}
 	}
-	op := Op{Kind: OpAcquire, Namespace: ns, ClientID: id, Node: s.o.Node, Will: will, ExpiryInterval: expiryInterval, Now: s.o.Clock()}
+	op := Op{Kind: OpAcquire, Namespace: ns, ClientID: id, Node: s.o.Node, Will: will, ExpiryInterval: expiryInterval, Now: s.o.Clock(), Principal: from.Principal}
 	if g := s.o.LookupGate; g != nil {
 		g(ns, id)
 	}
 	l, existed := s.table.Lookup(ns, id)
+	if existed && principalRefusedEarly(from.Bind, l.Principal, from.Principal) {
+		// Before any takeover: refusing after the pull would already have
+		// closed the rightful client's connection.
+		s.count("hoardmq_lease_ops_total", map[string]string{"op": "acquire", "outcome": "principal"}, 1)
+		return AcquireResult{}, &Refusal{Reason: packet.NotAuthorized}
+	}
 	// The command that put the lease where the lookup found it is at or below
 	// this index; its hooks, which record an adoption, may not have run yet.
 	looked := s.table.AppliedIndex()
@@ -2271,9 +2330,14 @@ func (s *Service) serveForward(peer string, m forwardMsg, class transport.Class)
 	if s.o.Core.Status().Role != "leader" {
 		out.Error = "not leader"
 	} else {
-		// Times are the leader's, so alive records compare on one clock.
+		// Times are the leader's, so alive records compare on one clock. A
+		// disconnect's expiry was set on the owner's clock, a duration after
+		// the owner's own stamp; it keeps that duration from the leader's.
 		now := s.o.Clock()
 		for i := range m.Ops {
+			if op := &m.Ops[i]; op.Kind == OpDisconnected && !op.ExpiresAt.IsZero() {
+				op.ExpiresAt = now.Add(op.ExpiresAt.Sub(op.Now))
+			}
 			m.Ops[i].Now = now
 		}
 		if g := s.o.ForwardedGate; g != nil {
@@ -2408,7 +2472,7 @@ func (s *Service) serveCommand(peer string, m commandMsg, class transport.Class)
 // renewInflightMax at a time, sooner after a failure — fences the node when
 // its alive record has lapsed, and, on the leader, adopts dead owners'
 // leases. A renewal runs on its own goroutine so a slow one never delays
-// the next launch or the fence check (WI 1337).
+// the next launch or the fence check.
 func (s *Service) tickLoop() {
 	interval := s.o.TTL / 4
 	retry := s.renewRetry()
@@ -2429,9 +2493,11 @@ func (s *Service) tickLoop() {
 			next = interval
 		}
 		s.markLoop(time.Now())
+		s.fenceMu.Lock()
 		st := s.trackLeader()
 		s.launchRenewal()
 		s.checkFence(st)
+		s.fenceMu.Unlock()
 		s.adopt()
 		s.raiseLevel()
 		s.noteLevel()
@@ -2468,6 +2534,12 @@ func (s *Service) launchRenewal() {
 			return
 		}
 		if s.renewInflight.CompareAndSwap(n, n+1) {
+			for {
+				p := s.renewPeak.Load()
+				if n+1 <= p || s.renewPeak.CompareAndSwap(p, n+1) {
+					break
+				}
+			}
 			break
 		}
 	}
@@ -2599,6 +2671,10 @@ func reachableAt(p transport.PeerInfo, ttl time.Duration) bool {
 	return p.State == transport.Up || time.Duration(p.DownForMs*float64(time.Millisecond)) < ttl/2
 }
 
+// PeerReachable reports whether this node reaches a peer as the fence and the
+// adoption grace read it: its link up, or down for less than half a ttl.
+func (s *Service) PeerReachable(node string) bool { return s.peerReachable(node) }
+
 // peerReachable is reachable by name.
 func (s *Service) peerReachable(node string) bool {
 	if s.o.Transport == nil {
@@ -2626,8 +2702,8 @@ type renewal struct {
 // proposals a second kept both survivors fenced). An attempt that has just
 // failed is not repeated inside the retry floor either: with no leader an
 // attempt fails in microseconds, and a thousand handshakes retrying it
-// back to back is a storm on the core's own lock instead (seen at 100k
-// round 5c: 8,000 no-leader failures a second, and no election).
+// back to back is a storm on the core's own lock instead (seen at 100k:
+// 8,000 no-leader failures a second, and no election).
 func (s *Service) alive() bool {
 	if s.renewalsPaused.Load() {
 		return false
@@ -2670,6 +2746,7 @@ func (s *Service) renew() bool {
 	ctx, cancel := context.WithTimeout(s.ctx, s.o.TTL)
 	defer cancel()
 	start := time.Now()
+	sent := s.steady()
 	op := Op{Kind: OpAlive, Node: s.o.Node, Advertise: s.o.Advertise, Now: s.o.Clock(), Level: s.BuildLevel()}
 	results, err := s.proposeVia(ctx, []Op{op}, transport.LeaseAlive)
 	var res Result
@@ -2704,6 +2781,9 @@ func (s *Service) renew() bool {
 		}
 		return false
 	}
+	if g := s.o.RenewalGate; g != nil {
+		g()
+	}
 	s.renewStreak.Store(0)
 	took := int64(time.Since(start))
 	s.aliveTotalNs.Add(took)
@@ -2714,7 +2794,11 @@ func (s *Service) renew() bool {
 			break
 		}
 	}
-	s.lastAlive.Store(s.steady().UnixNano())
+	storeMax(&s.lastAlive, sent.UnixNano())
+	select {
+	case s.aliveMoved <- struct{}{}:
+	default:
+	}
 	s.noteContact(res.Index)
 	if s.fenced.Swap(false) {
 		s.log.Info("lease renewals resumed; node unfenced")
@@ -2758,22 +2842,25 @@ func (s *Service) TTL() time.Duration { return s.o.TTL }
 // component's applied index moves only on that component's own entries.
 func (s *Service) Applied() uint64 { return s.o.Machine.Applied() }
 
-// checkFence fences the node when it has not renewed within the ttl —
-// unless this node can reach a quorum and the group has had no leader, or
-// a leader for less than a ttl (WI 1341, owner decision): with no leader
-// nothing can be adopted or taken over, so no second live owner can appear
-// while the fence waits, and a fresh leader gives every reachable owner a
-// ttl before adopting (the grace in adopt), so deferring for that same ttl
-// is covered by the same argument; fencing would only disconnect every
-// client for an election's duration. A leader known for a full ttl that
-// this node still could not renew with, or a lost quorum (a partition),
-// fences as before.
+// checkFence fences the node when a ttl has passed since its last successful
+// renewal was sent — unless this node can reach a quorum and the group has had
+// no leader, or a leader for less than a ttl: with no leader nothing can be
+// adopted or taken over, so no second live owner can appear while the fence
+// waits, and a fresh leader gives every reachable owner a ttl before adopting
+// (the grace in adopt), so deferring for that same ttl is covered by the same
+// argument; fencing would only disconnect every client for an election's
+// duration. A leader known for a full ttl that this node still could not renew
+// with, or a lost quorum (a partition), fences as before.
 func (s *Service) checkFence(st consensus.Status) {
 	now := s.steady()
 	last := time.Unix(0, s.lastAlive.Load())
 	if now.Sub(last) <= s.o.TTL || s.fenced.Load() || s.renewalsPaused.Load() {
 		s.deferring.Store(false)
 		return
+	}
+	if g := s.o.FenceGate; g != nil {
+		g()
+		now = s.steady()
 	}
 	var peers []transport.PeerInfo
 	if s.o.Transport != nil {
@@ -2815,6 +2902,52 @@ func (s *Service) checkFence(st consensus.Status) {
 	s.o.Sessions.FenceAll(reason)
 }
 
+// fenceLoop runs the fence check when the ttl since the last successful
+// renewal's send has passed, on its own timer: the tick loop checks only every
+// quarter ttl, or at the retry floor after a failure, and with every slot held
+// by a hung renewal it neither launches nor retries, so a fence left to it
+// could come up to a tick after the leader declared this node. It checks once
+// per record; a deferral or a pause is re-judged by the tick loop.
+func (s *Service) fenceLoop() {
+	defer close(s.fenceDone)
+	checked := int64(0)
+	timer := time.NewTimer(time.Hour)
+	defer timer.Stop()
+	for {
+		last := s.lastAlive.Load()
+		wait := time.Duration(-1)
+		if last != checked {
+			wait = time.Unix(0, last).Add(s.o.TTL).Sub(s.steady())
+		}
+		if wait < 0 && last != checked {
+			s.fenceMu.Lock()
+			s.checkFence(s.trackLeader())
+			s.fenceMu.Unlock()
+			checked = last
+			continue
+		}
+		var due <-chan time.Time
+		if wait >= 0 {
+			// One nanosecond past the deadline: decideFence fences only a record
+			// older than the ttl.
+			timer.Reset(wait + time.Nanosecond)
+			due = timer.C
+		}
+		select {
+		case <-s.stop:
+			return
+		case <-s.aliveMoved:
+		case <-due:
+		}
+		if due != nil && !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+	}
+}
+
 // FenceOutcome is what one fence check decided.
 type FenceOutcome string
 
@@ -2828,7 +2961,7 @@ const (
 // FenceRecord is the inputs one fence or deferral was decided on. A
 // collapse in which both survivors fence says nothing about which condition
 // allowed it without this: a leader this node judged settled, or a quorum it
-// judged unreachable (WI 1474, from WI 1470's twelve runs).
+// judged unreachable.
 type FenceRecord struct {
 	AtUnixMs         int64        `json:"at_unix_ms"`
 	Outcome          FenceOutcome `json:"outcome"`
@@ -2888,9 +3021,9 @@ func decideFence(now, lastAlive time.Time, ttl time.Duration, st consensus.Statu
 // fenceRecordsMax bounds the records kept; fenceRecordsTotal keeps counting.
 const fenceRecordsMax = 16
 
-// recordFence publishes a decision record. Only the tick loop writes, and
-// it replaces the slice rather than appending to a shared one, so a reader
-// holding an earlier slice never sees it change.
+// recordFence publishes a decision record. Its callers hold fenceMu, so
+// there is one writer, and it replaces the slice rather than appending to a
+// shared one, so a reader holding an earlier slice never sees it change.
 func (s *Service) recordFence(rec FenceRecord) {
 	var next []FenceRecord
 	if cur := s.fenceRecords.Load(); cur != nil {
@@ -2938,22 +3071,25 @@ func storeMax(a *atomic.Int64, v int64) {
 }
 
 // adopt, on the leader, declares dead every node it has heard no alive
-// record from for a ttl, and moves that node's leases here. The judgement is
-// this node's own: how long ago, on its steady clock, it last applied an
-// alive record from the node, never a comparison of any clock with the stamp
-// in the record, which another leader may have written on another clock and
-// which a step of this one would misread. A follower applies the same records,
-// so a new leader judges from what it saw itself. It judges nobody until it
-// has watched the log for a ttl: a restart, the end of recovery and a snapshot
-// restore each begin the watch again.
+// record from for a ttl and the declaration margin, and moves that node's
+// leases here. The judgement is this node's own: how long ago, on its steady
+// clock, it last applied an alive record from the node, never a comparison of
+// any clock with the stamp in the record, which another leader may have
+// written on another clock and which a step of this one would misread. A
+// follower applies the same records, so a new leader judges from what it saw
+// itself. It judges nobody until it has watched the log for as long: a
+// restart, the end of recovery and a snapshot restore each begin the watch
+// again.
 //
 // An owner this node can still reach is given a grace after an election: a
 // full ttl from when this node took the lead, so a live node whose renewals
 // were lost with the old leader is not judged on records it had no leader to
-// send (WI 1337). An owner whose link is down cannot renew with anyone, and
+// send. An owner whose link is down cannot renew with anyone, and
 // waiting would only leave its sessions' subscriptions invisible to the rest
 // of the cluster for another ttl.
 func (s *Service) adopt() {
+	s.adoptMu.Lock()
+	defer s.adoptMu.Unlock()
 	if s.o.Core.Status().Role != "leader" {
 		return
 	}
@@ -2976,12 +3112,20 @@ func (s *Service) adopt() {
 		if known && info.DeadAt != 0 && !owns[node] {
 			continue // declared, and nothing left to move
 		}
-		if !silent(now, s.observingSince.Load(), s.lastHeard(node), s.o.TTL) {
+		watching, heard := s.observingSince.Load(), s.lastHeard(node)
+		if !declarable(now, watching, heard, s.o.TTL) {
+			if wait, ok := recheckIn(now, watching, heard, s.o.TTL); ok {
+				s.armRecheck(node, wait)
+			}
 			continue
 		}
 		if grace && s.peerReachable(node) {
 			continue
 		}
+		if m, ok := s.declaring.Load(node); ok && redeclare(m.(declareMark), info.AliveIndex, now, s.o.TTL) {
+			continue
+		}
+		s.declaring.Store(node, declareMark{alive: info.AliveIndex, at: now.UnixNano()})
 		s.timeline.of(node).proposed.Store(wallNs())
 		s.submitAsync(Op{Kind: OpReassign, Node: node, To: s.o.Node, SeenAliveIndex: info.AliveIndex, Now: s.o.Clock()})
 		s.count("hoardmq_lease_declarations_total", nil, 1)
@@ -3017,6 +3161,88 @@ func silent(now time.Time, watchingSince, heard int64, ttl time.Duration) bool {
 	return now.Sub(time.Unix(0, from)) > ttl
 }
 
+// declarationMarginDivisor sets the margin the leader adds to a node's ttl
+// before declaring it: ttl/32, the renewal-retry floor. The node fences at its
+// last successful renewal's send plus the ttl, before the leader's apply of
+// that record plus the ttl; the margin lets that fence be late by up to the
+// retry floor and still come first.
+const declarationMarginDivisor = 32
+
+// declarationMargin is the time past a ttl of silence the leader waits before
+// declaring a node.
+func declarationMargin(ttl time.Duration) time.Duration { return ttl / declarationMarginDivisor }
+
+// declarable reports whether the leader may declare a node it last heard at
+// heard, having watched since watchingSince: silent for the ttl and the
+// declaration margin.
+func declarable(now time.Time, watchingSince, heard int64, ttl time.Duration) bool {
+	return silent(now, watchingSince, heard, ttl+declarationMargin(ttl))
+}
+
+// recheckIn reports, for a node silent past the ttl but not yet past the
+// declaration margin, how long until it is: the leader looks again then
+// rather than at its next tick, which would declare it up to a tick late.
+func recheckIn(now time.Time, watchingSince, heard int64, ttl time.Duration) (time.Duration, bool) {
+	if !silent(now, watchingSince, heard, ttl) || declarable(now, watchingSince, heard, ttl) {
+		return 0, false
+	}
+	from := time.Unix(0, max(watchingSince, heard))
+	return from.Add(ttl + declarationMargin(ttl) + time.Nanosecond).Sub(now), true
+}
+
+// declareMark is the alive index a declaration was proposed against, and
+// when, on the steady clock.
+type declareMark struct {
+	alive uint64
+	at    int64
+}
+
+// redeclare reports whether a declaration proposed at m is still in flight:
+// against the same alive index and less than a tick ago. A re-check and the
+// next tick can both find the node declarable before the first proposal
+// applies.
+func redeclare(m declareMark, alive uint64, now time.Time, ttl time.Duration) bool {
+	return m.alive == alive && now.Sub(time.Unix(0, m.at)) < ttl/4
+}
+
+// armRecheck runs adopt once after wait, unless a re-check is already armed
+// for node or an alive record from node cancels it first.
+func (s *Service) armRecheck(node string, wait time.Duration) {
+	s.recheckMu.Lock()
+	defer s.recheckMu.Unlock()
+	if s.rechecks == nil {
+		s.rechecks = map[string]*time.Timer{}
+	}
+	if _, armed := s.rechecks[node]; armed {
+		return
+	}
+	var t *time.Timer
+	t = time.AfterFunc(wait, func() {
+		s.recheckMu.Lock()
+		if s.rechecks[node] == t {
+			delete(s.rechecks, node)
+		}
+		s.recheckMu.Unlock()
+		select {
+		case <-s.stop:
+			return
+		default:
+		}
+		s.adopt()
+	})
+	s.rechecks[node] = t
+}
+
+// cancelRecheck stops node's re-check, if one is armed.
+func (s *Service) cancelRecheck(node string) {
+	s.recheckMu.Lock()
+	defer s.recheckMu.Unlock()
+	if t, ok := s.rechecks[node]; ok {
+		t.Stop()
+		delete(s.rechecks, node)
+	}
+}
+
 // steady is Options.Steady, or the wall clock for a Service built without
 // New.
 func (s *Service) steady() time.Time {
@@ -3030,6 +3256,7 @@ func (s *Service) steady() time.Time {
 // node was applied.
 func (s *Service) heardFrom(node string) {
 	s.heard.Store(node, s.steady().UnixNano())
+	s.cancelRecheck(node)
 	s.timeline.of(node).lastAlive.Store(wallNs())
 }
 
@@ -3048,7 +3275,7 @@ func (s *Service) observeAfresh() {
 
 // changed runs on every node after a lease changes. This node acts when it
 // lost a lease it served (evict) or gained an offline lease (adopt).
-func (s *Service) changed(before, after *Lease) {
+func (s *Service) changed(before, after *Lease, at time.Time) {
 	switch {
 	case after != nil:
 		s.tokens.Note(after.Namespace, after.ClientID, after.Epoch)
@@ -3092,7 +3319,7 @@ func (s *Service) changed(before, after *Lease) {
 		if g := s.o.AdoptGate; g != nil {
 			g(k.ns, k.id)
 		}
-		s.startTimers(*after)
+		s.startTimers(*after, at)
 		s.adoptions.Add(1)
 		now := s.o.Clock().UnixMilli()
 		s.firstAdoptMs.CompareAndSwap(0, now)
@@ -3115,7 +3342,7 @@ func (s *Service) changed(before, after *Lease) {
 			// A client acquired its own lease here, taking it from another
 			// owner. Recorded per previous owner as well as in aggregate: only
 			// the entry for the *crashed* node is the one the bulk
-			// reassignment is racing (WI 1514).
+			// reassignment is racing.
 			now := s.o.Clock().UnixMilli()
 			s.firstClientTakeMs.CompareAndSwap(0, now)
 			s.noteTakeFrom(before.Owner, now)
@@ -3125,6 +3352,15 @@ func (s *Service) changed(before, after *Lease) {
 	case isMine && after == nil:
 		s.cancelTimers(k)
 	}
+	if moved(before, after, me) && s.o.Moved != nil {
+		s.o.Moved(k.ns, k.id, before.Owner, me)
+	}
+}
+
+// moved reports whether a lease change hands the lease to me from another
+// owner.
+func moved(before, after *Lease, me string) bool {
+	return after != nil && after.Owner == me && before != nil && before.Owner != "" && before.Owner != me
 }
 
 // adoptState is the adoption worker's pass: it installs an adopted session's
@@ -3592,7 +3828,7 @@ func (s *Service) recovered() {
 		if l.Online {
 			continue
 		}
-		s.startTimers(l)
+		s.startTimers(l, time.Time{})
 		owned++
 		// A reassignment replayed during recovery gave this node the lease and
 		// queued nothing, since replay runs no hook. Without this the session
@@ -3626,7 +3862,7 @@ func (s *Service) recovered() {
 			// The new owner may not have fetched it yet: this node's journal can
 			// hold the only copy (a drain whose receiver's pull came after the
 			// node stopped). The copy answers that pull, and ends as any sealed
-			// copy does (WI 1742).
+			// copy does.
 			if res := s.o.Sessions.Seal(ns, id, packet.SessionTakenOver, l.Epoch); res.Outcome == SealSealed {
 				sealed++
 				s.sealsMade.Add(1)
@@ -3673,7 +3909,7 @@ func (s *Service) lostLease(k key) {
 		return
 	}
 	// Whether this detach costs a live connection, the same question
-	// serveTakeover answers for its own detach (WI 1495).
+	// serveTakeover answers for its own detach.
 	if _, live := s.o.Sessions.ConnAge(k.ns, k.id); live {
 		s.lostDetachLive.Add(1)
 	} else {
@@ -3690,7 +3926,7 @@ func (s *Service) lostLease(k key) {
 // It re-arms rather than evicting while a client is connected here. The client
 // is one that reconnected to this node after the lease left — lostLease has
 // already detached whoever was here at the time — so evicting closes a
-// connection made since, and the client has to start again (WI 1513).
+// connection made since, and the client has to start again.
 func (s *Service) scheduleEvict(k key, deferred int) {
 	time.AfterFunc(s.o.TakeoverTimeout*2, func() {
 		l, ok := s.table.Lookup(k.ns, k.id)
@@ -3736,10 +3972,18 @@ func (s *Service) cancelTimers(k key) {
 	}
 }
 
-// startTimers runs an adopted offline lease's Will and expiry.
-func (s *Service) startTimers(l Lease) {
+// startTimers runs an adopted offline lease's Will and expiry. The lease's
+// times are stamps on the clock of the leader that wrote them, and moved is
+// the stamp of the record that moved the lease here, on the leader's clock too:
+// each timer runs for the difference, measured on this node's own timer from
+// now, the apply. With no stamp (a replay after a restart) the times are read
+// against this node's wall clock, off by its skew from that leader's.
+func (s *Service) startTimers(l Lease, moved time.Time) {
 	k := key{l.Namespace, l.ClientID}
-	now := s.o.Clock()
+	now := moved
+	if now.IsZero() {
+		now = s.o.Clock()
+	}
 	a := &adopted{}
 	if l.Will != nil && l.Will.Armed {
 		at := l.DisconnectedAt.Add(time.Duration(l.Will.Delay) * time.Second)
@@ -3783,7 +4027,7 @@ func (s *Service) audit(action, target, outcome string, detail map[string]string
 
 // avgMs is the mean of a total over a count, reported as 0 rather than NaN
 // when nothing was counted: a run with no live detaches has no average, and a
-// NaN in the artifact is a value a reader has to special-case (WI 1495).
+// NaN in the artifact is a value a reader has to special-case.
 func avgMs(totalMs, n int64) float64 {
 	if n <= 0 {
 		return 0
@@ -3794,7 +4038,7 @@ func avgMs(totalMs, n int64) float64 {
 // AdoptedTakeover is one lease this node adopted and then lost to a takeover,
 // with how long it held it. The sample is capped; the count of what did not
 // fit is reported beside it, because a truncated capture that says nothing
-// reads as a complete one (WI 1511, where a sample reached 937 MB unremarked).
+// reads as a complete one (one run's sample reached 937 MB unremarked).
 type AdoptedTakeover struct {
 	Namespace string `json:"namespace"`
 	ClientID  string `json:"client_id"`

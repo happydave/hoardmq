@@ -18,6 +18,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 
 	"github.com/happydave/hoardmq/internal/jsonschema"
 	"github.com/happydave/hoardmq/internal/packet"
@@ -232,13 +234,12 @@ type Node struct {
 	WALSegmentBytes    int64 `json:"walSegmentBytes"`
 	// SessionShards is how many slices the session map is split into,
 	// rounded up to a power of two. One lock for the whole map made every
-	// connect, disconnect and inbound packet queue behind every other
-	// (WI 1292 round 5).
+	// connect, disconnect and inbound packet queue behind every other.
 	SessionShards int `json:"sessionShards"`
 	// StoreAdmission bounds how many connects and disconnects are inside the
 	// store's write path at once. Before the session map was sharded its
 	// single lock bounded this at one as a side effect, and removing that
-	// bound entirely was measured catastrophic at 100,000 clients (round 2),
+	// bound entirely was measured catastrophic at 100,000 clients,
 	// so it is set deliberately here.
 	StoreAdmission int `json:"storeAdmission"`
 }
@@ -266,7 +267,7 @@ type Listener struct {
 // DefaultMaxHandshakes is the in-flight handshake bound when a listener
 // sets none: enough concurrency to keep the connect path busy, few enough
 // waiters that its lock hands off in the regime where it is cheap
-// (WI 1292 round 2: the same lock with a million waiters served none).
+// (the same lock with a million waiters served none).
 const DefaultMaxHandshakes = 512
 
 // IsTLS reports whether the listener terminates TLS.
@@ -305,7 +306,17 @@ type Cluster struct {
 	Replication     Replication `json:"replication"`
 	Drain           Drain       `json:"drain"`
 	Readiness       Readiness   `json:"readiness"`
+	Records         Records     `json:"records"`
 	Advertise       string      `json:"advertise,omitempty"` // client address other nodes hand out in Server Reference
+}
+
+// Records tunes the replicated records store: credentials, API keys, bans
+// and administered limits.
+type Records struct {
+	// MaxPerCollection is the most records a put from this node may leave a
+	// collection holding; the cap travels with the put, so every node decides
+	// it alike.
+	MaxPerCollection int `json:"maxPerCollection"`
 }
 
 // Drain tunes the graceful leave.
@@ -392,19 +403,34 @@ type ClusterTLS struct {
 
 // Limits are the per-node protocol limits.
 type Limits struct {
-	MaxPacketSize     int    `json:"maxPacketSize"`
-	ReceiveMaximum    int    `json:"receiveMaximum"`
-	MaxQueuedMessages int    `json:"maxQueuedMessages"`
-	MaxKeepAlive      int    `json:"maxKeepAlive"`
-	ConnectTimeout    int    `json:"connectTimeout"`
-	QueueDrop         string `json:"queueDrop"`
-	MaxSessionExpiry  int64  `json:"maxSessionExpiry"`
+	MaxPacketSize     int `json:"maxPacketSize"`
+	ReceiveMaximum    int `json:"receiveMaximum"`
+	MaxQueuedMessages int `json:"maxQueuedMessages"`
+	MaxKeepAlive      int `json:"maxKeepAlive"`
+	// MaxInflightMessages bounds the QoS 1 and 2 messages in flight to one
+	// client, below what its Receive Maximum allows.
+	MaxInflightMessages int    `json:"maxInflightMessages"`
+	ConnectTimeout      int    `json:"connectTimeout"`
+	QueueDrop           string `json:"queueDrop"`
+	// OfflineQoS0 is what a QoS 0 delivery to a session with no connection
+	// does: "queue" it like any other, or "drop" it, counted.
+	OfflineQoS0      string `json:"offlineQoS0"`
+	MaxSessionExpiry int64  `json:"maxSessionExpiry"`
 	// MaxTopicAliasBytes bounds the topic bytes one connection's inbound
 	// topic aliases hold; 0 is unlimited.
 	MaxTopicAliasBytes int `json:"maxTopicAliasBytes"`
 	// MaxSubscriptions bounds the topic filters one client's session holds;
 	// a SUBSCRIBE filter past it is refused. 0 is unlimited.
 	MaxSubscriptions int `json:"maxSubscriptions"`
+	// MaxRetainedTopics bounds the retained topics one namespace holds on a
+	// node, a cleared topic's tombstone counted while it is kept; a retained
+	// write or clear of a new topic past it is refused. 0 is unlimited.
+	MaxRetainedTopics int `json:"maxRetainedTopics"`
+	// RetainedTombstoneHold is the least number of seconds a shard's leader
+	// keeps a retained topic's tombstone (a clear's, or an expiry's) before it
+	// may drop it; the drop also waits for the followers to hold it and for
+	// every old holder of the shard to be released.
+	RetainedTombstoneHold int `json:"retainedTombstoneHold"`
 	// ConnectRate and ConnectBurst are the node's connect-rate limit across
 	// every listener, as Listener's are for one.
 	ConnectRate  int `json:"connectRate"`
@@ -420,7 +446,7 @@ type Limits struct {
 
 // LimitsCollection is the replicated records collection administered limits
 // live in, one record per namespace; only DefaultLimitsKey exists until
-// namespaces do (WI 1322).
+// namespaces do.
 const (
 	LimitsCollection = "limits"
 	DefaultLimitsKey = "default"
@@ -553,8 +579,9 @@ func Default() Document {
 			Routing:     Routing{SyncMs: 30000},
 			Replication: Replication{AckTimeoutMs: 2000},
 			Drain:       Drain{RatePerSecond: 100, TimeoutMs: 30000, ConfirmTimeoutMs: 30000},
-			Readiness:   Readiness{StableMs: 5000}},
-		Limits:        Limits{MaxPacketSize: 1048576, ReceiveMaximum: 1024, MaxQueuedMessages: 1000, ConnectTimeout: 10, QueueDrop: "oldest", MaxTopicAliasBytes: 1 << 20},
+			Readiness:   Readiness{StableMs: 5000},
+			Records:     Records{MaxPerCollection: 100000}},
+		Limits:        Limits{MaxPacketSize: 1048576, ReceiveMaximum: 1024, MaxInflightMessages: 65535, MaxQueuedMessages: 1000, ConnectTimeout: 10, QueueDrop: "oldest", OfflineQoS0: "queue", MaxTopicAliasBytes: 1 << 20, RetainedTombstoneHold: 3600},
 		Auth:          Auth{SessionBinding: "principal", DecisionTTLSeconds: 3600, Argon2MemoryBytes: 256 << 20, Cache: AuthCache{TTLSeconds: 60, MaxEntries: 100000}},
 		Log:           Log{Level: "info", Format: "text"},
 		Hooks:         Hooks{Fallback: "continue"},
@@ -577,9 +604,17 @@ func Default() Document {
 // Problem is one thing wrong with a document.
 type Problem = jsonschema.Problem
 
-var compiled = mustCompile()
+// compiled is the published schema, compiled on first use: only serve, check
+// and a reload validate a document, and compiling it allocates about 800 kB,
+// which every other command (the preStop's drain among them) need not pay.
+var compiled = sync.OnceValue(mustCompile)
+
+// compilations counts mustCompile's runs, for the test that nothing compiles
+// at init.
+var compilations atomic.Int32
 
 func mustCompile() *jsonschema.Schema {
+	compilations.Add(1)
 	s, err := jsonschema.Compile(schema.Bytes)
 	if err != nil {
 		panic(err)
@@ -588,7 +623,7 @@ func mustCompile() *jsonschema.Schema {
 }
 
 // Schema returns the compiled published schema.
-func Schema() *jsonschema.Schema { return compiled }
+func Schema() *jsonschema.Schema { return compiled() }
 
 // Load reads the document at path, applies overrides from environ (in the
 // os.Environ form), validates, and returns the document together with every
@@ -620,7 +655,7 @@ func Parse(data []byte, environ []string) (Document, []Problem) {
 	if tree, ok := raw.(map[string]any); ok {
 		problems = append(problems, applyEnv(tree, environ)...)
 	}
-	problems = append(problems, compiled.Validate(raw)...)
+	problems = append(problems, compiled().Validate(raw)...)
 
 	doc := Default()
 	merged, err := json.Marshal(raw)
@@ -673,7 +708,7 @@ func (d Document) Validate() []Problem {
 	if err != nil {
 		return []Problem{{Pointer: "/", Message: err.Error()}}
 	}
-	problems := compiled.Validate(raw)
+	problems := compiled().Validate(raw)
 	problems = append(problems, d.semantic()...)
 	return sorted(problems)
 }
@@ -1081,6 +1116,7 @@ var overrides = map[string]struct {
 	"CLUSTER_HEARTBEAT_MS":               {path: []string{"cluster", "heartbeatMs"}, integer: true},
 	"CLUSTER_HEARTBEAT_MISSES":           {path: []string{"cluster", "heartbeatMisses"}, integer: true},
 	"CLUSTER_MAX_FRAME_BYTES":            {path: []string{"cluster", "maxFrameBytes"}, integer: true},
+	"CLUSTER_RECORDS_MAX_PER_COLLECTION": {path: []string{"cluster", "records", "maxPerCollection"}, integer: true},
 	"CLUSTER_RAFT_TICK_MS":               {path: []string{"cluster", "raft", "tickMs"}, integer: true},
 	"CLUSTER_RAFT_ELECTION_TICKS":        {path: []string{"cluster", "raft", "electionTicks"}, integer: true},
 	"CLUSTER_RAFT_HEARTBEAT_TICKS":       {path: []string{"cluster", "raft", "heartbeatTicks"}, integer: true},
@@ -1107,8 +1143,10 @@ var overrides = map[string]struct {
 	"LIMITS_RECEIVE_MAXIMUM":             {path: []string{"limits", "receiveMaximum"}, integer: true},
 	"LIMITS_MAX_QUEUED_MESSAGES":         {path: []string{"limits", "maxQueuedMessages"}, integer: true},
 	"LIMITS_MAX_KEEP_ALIVE":              {path: []string{"limits", "maxKeepAlive"}, integer: true},
+	"LIMITS_MAX_INFLIGHT_MESSAGES":       {path: []string{"limits", "maxInflightMessages"}, integer: true},
 	"LIMITS_CONNECT_TIMEOUT":             {path: []string{"limits", "connectTimeout"}, integer: true},
 	"LIMITS_QUEUE_DROP":                  {path: []string{"limits", "queueDrop"}},
+	"LIMITS_OFFLINE_QOS0":                {path: []string{"limits", "offlineQoS0"}},
 	"LIMITS_MAX_SESSION_EXPIRY":          {path: []string{"limits", "maxSessionExpiry"}, integer: true},
 	"OBSERVABILITY_ADDRESS":              {path: []string{"observability", "address"}},
 	"LOG_LEVEL":                          {path: []string{"log", "level"}},

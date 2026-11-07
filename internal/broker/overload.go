@@ -196,7 +196,7 @@ var heapSample = []metrics.Sample{{Name: "/gc/heap/live:bytes"}}
 func (o *overload) indicators() Indicators {
 	var ind Indicators
 	if o.s.sessions != nil {
-		ind.Queued = o.s.sessions.Queued()
+		ind.Queued = o.s.sessions.Held()
 	}
 	if o.s.repl != nil {
 		ind.Lag = o.s.repl.Backlog()

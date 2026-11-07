@@ -292,17 +292,26 @@ func (m *Manager) rewrite(s *Session) rewriteResult {
 	return rewritten
 }
 
-// retain records a retained store change; retained messages are always
-// persistent, so this bypasses the session rule.
-func (w *journalWriter) retain(m *message.Message) {
+// retain records a retained store change unversioned; retained messages are
+// always persistent, so this bypasses the session rule.
+func (w *journalWriter) retain(m *message.Message) { w.retainAt(m, store.Version{}) }
+
+// retainAt records a retained store change at version v: a message, a clear
+// (an empty payload at a stamped version: a tombstone) or a copy drop (an
+// empty payload unversioned). It returns the journal's append count after
+// the record, 0 when the append failed.
+func (w *journalWriter) retainAt(m *message.Message, v store.Version) uint64 {
 	if w == nil {
-		return
+		return 0
 	}
 	var err error
-	if len(m.Payload) == 0 {
-		err = w.j.RetainDelete(m.Namespace, m.Topic)
-	} else {
-		err = w.j.Retain(m)
+	switch {
+	case len(m.Payload) > 0:
+		err = w.j.Retain(m, v)
+	case v.Zero():
+		err = w.j.RetainDrop(m.Namespace, m.Topic)
+	default:
+		err = w.j.RetainClear(m.Namespace, m.Topic, v)
 	}
 	if err != nil {
 		if w.refusing {
@@ -310,15 +319,15 @@ func (w *journalWriter) retain(m *message.Message) {
 		}
 		w.mgr.log.Error("journal append failed", "topic", m.Topic, "err", err)
 		w.mgr.count("hoardmq_journal_failures_total", opAppend, 1)
-		return
+		return 0
 	}
-	w.journaled.Add(1)
+	return w.journaled.Add(1)
 }
 
 // syncIfDirty makes the caller's journaled records durable. It returns at
 // once only when a Sync that started after the caller's last write has
 // returned nil: a Sync still in flight may fail, and a caller that did not
-// wait for it would acknowledge over records it dropped (WI 1812). It returns
+// wait for it would acknowledge over records it dropped. It returns
 // false on failure.
 func (m *Manager) syncIfDirty() bool {
 	if m.opts.Journal == nil {
@@ -386,7 +395,7 @@ func (s *Session) snapshot() *store.SessionState {
 func (m *Manager) Snapshot() *store.State {
 	st := store.NewState()
 	// A snapshot must see a set of sessions that existed, so it takes every
-	// shard rather than walking them one at a time (WI 1292 round 5, I3). It
+	// shard rather than walking them one at a time. It
 	// copies the pointers and releases at once; the per-session snapshots
 	// below are taken under each session's own mutex.
 	sessions := m.listSessions(nil)
@@ -397,7 +406,7 @@ func (m *Manager) Snapshot() *store.State {
 		}
 		s.mu.Unlock()
 	}
-	st.Retained = append(st.Retained, m.router.AllRetained()...)
+	m.retainedInto(st)
 	return st
 }
 
@@ -469,7 +478,7 @@ func (m *Manager) listSessions(sealed func(key, *sealedCopy)) []*Session {
 // The store reads its index before calling this, and sessions are journaled
 // while it runs, so each session's entry in Through is the journal's last
 // index read while nothing could be journaled for it: under its lock, or for
-// a sealed copy under its shard's (WI 1818).
+// a sealed copy under its shard's.
 func (m *Manager) CheckpointState(appended func() uint64) *store.State {
 	st := store.NewState()
 	// A key is listed once: it is in its shard's sessions or its sealed
@@ -492,7 +501,7 @@ func (m *Manager) CheckpointState(appended func() uint64) *store.State {
 	for _, s := range sessions {
 		m.checkpointSession(s, appended, put)
 	}
-	st.Retained = append(st.Retained, m.router.AllRetained()...)
+	m.retainedInto(st)
 	return st
 }
 
@@ -538,7 +547,7 @@ func (m *Manager) Load(st *store.State) { m.load(st, false) }
 // remember the messages they arrive holding.
 func (m *Manager) load(st *store.State, handedOver bool) {
 	now := m.clock.Now()
-	m.router.LoadRetained(st.Retained)
+	m.loadRetained(st)
 	var wills []struct {
 		w *Will
 		s *Session
@@ -665,3 +674,51 @@ func (m *Manager) rebuild(ss *store.SessionState, now time.Time) (s *Session, ex
 	lapsed := s.expiryInterval != NeverExpires && !s.expiresAt.IsZero() && !now.Before(s.expiresAt)
 	return s, s.expiryInterval == 0 || lapsed
 }
+
+// retainedInto writes the router's retained entries into st: messages, their
+// versions, and tombstones.
+func (m *Manager) retainedInto(st *store.State) {
+	for _, e := range m.router.RetainedEntries() {
+		if e.Tombstone {
+			if !e.RV.Zero() {
+				st.RetainedTombstones = append(st.RetainedTombstones, store.Tombstone{Namespace: e.Msg.Namespace, Topic: e.Msg.Topic, RV: e.RV})
+			}
+			continue
+		}
+		st.Retained = append(st.Retained, e.Msg)
+		if !e.RV.Zero() {
+			st.RetainedVersions = append(st.RetainedVersions, store.RetainedVersion{Namespace: e.Msg.Namespace, Topic: e.Msg.Topic, RV: e.RV})
+		}
+	}
+}
+
+// loadRetained installs a recovered state's retained entries at their
+// versions, tombstones included, and seeds the stamp counter above every
+// number they carry and the wall clock's nanoseconds now, so a stamp after a
+// restart outranks every stamp before it.
+func (m *Manager) loadRetained(st *store.State) {
+	versions := make(map[[2]string]store.Version, len(st.RetainedVersions))
+	high := uint64(time.Now().UnixNano()) //nolint:gosec // the clock is past 1970
+	for _, rv := range st.RetainedVersions {
+		versions[[2]string{rv.Namespace, rv.Topic}] = rv.RV
+		high = max(high, rv.RV.N)
+	}
+	reloaded := func(installed bool, held RetainedEntry, v store.Version) {
+		m.count("hoardmq_retained_merges_total", map[string]string{"path": "reload", "outcome": store.MergeOutcome(installed, held.RV, v)}, 1)
+	}
+	for _, msg := range st.Retained {
+		v := versions[[2]string{msg.Namespace, msg.Topic}]
+		installed, held := m.router.MergeRetained(msg, v, false)
+		reloaded(installed, held, v)
+	}
+	for _, t := range st.RetainedTombstones {
+		installed, held := m.router.MergeRetained(&message.Message{Namespace: t.Namespace, Topic: t.Topic, Retain: true}, t.RV, false)
+		reloaded(installed, held, t.RV)
+		high = max(high, t.RV.N)
+	}
+	m.router.SeedRetainedVersion(high)
+}
+
+// SeedRetainedVersion makes later retained stamps take numbers above n: the
+// replicator passes the highest number its replica store holds.
+func (m *Manager) SeedRetainedVersion(n uint64) { m.router.SeedRetainedVersion(n) }

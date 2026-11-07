@@ -36,7 +36,7 @@ func handOver(p *Plane, filter string) {
 	p.Observe("default", filter, 0)
 }
 
-// TestPublishRefusedWhileTheSessionIsMovingAway is WI 1353's defect: the old
+// TestPublishRefusedWhileTheSessionIsMovingAway pins a defect: the old
 // owner answered its own publishes as though the route it is still
 // advertising did not exist. On the unchanged tree Forward returns nil.
 func TestPublishRefusedWhileTheSessionIsMovingAway(t *testing.T) {

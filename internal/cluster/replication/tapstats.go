@@ -17,7 +17,7 @@ type TapStats struct {
 }
 
 // DropStats is the replica-copy drop an owner's session upsert asks for.
-// It runs after the store's lock is released (WI 1688), so these seconds are
+// It runs after the store's lock is released, so these seconds are
 // the appending goroutine's own and not a second of anyone else's wait.
 type DropStats struct {
 	// Checks are the session upserts this node wrote as owner, each of which

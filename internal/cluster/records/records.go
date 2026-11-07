@@ -28,8 +28,12 @@ const (
 	MaxCollection = 64
 	MaxKey        = 256
 	MaxValue      = 8 << 10
-	// DefaultMaxRecords bounds a collection.
+	// DefaultMaxRecords bounds a collection for a write that carries no cap of
+	// its own, as every write did before writes carried one, so the log
+	// written then replays as it applied.
 	DefaultMaxRecords = 100000
+	// MaxRecordsCeiling is the largest cap a write may carry.
+	MaxRecordsCeiling = 1000000
 )
 
 // The record values are the extension API's.
@@ -50,6 +54,10 @@ type Op struct {
 	If *uint64   `json:"if,omitempty"`
 	By string    `json:"by,omitempty"`
 	At time.Time `json:"at"`
+	// Max is the most records a put may leave its collection holding: the
+	// proposing node's cap, carried in the entry so every node and every
+	// replay decides the put alike. 0 is DefaultMaxRecords.
+	Max int `json:"max,omitempty"`
 }
 
 // Refusals.
@@ -63,20 +71,37 @@ const (
 
 // Component is the replicated state.
 type Component struct {
+	// maxRecords is the cap this node's puts carry (Op.Max); an applied put
+	// is decided by the cap it carries, not by this.
 	maxRecords int
 
 	mu          sync.RWMutex
 	collections map[string]map[string]Record
 	applied     uint64
 	changed     chan struct{}
+	// full counts, per collection, the puts this node applied as refused
+	// full since it started.
+	full map[string]uint64
 }
 
-// New builds an empty component; maxRecords of zero is DefaultMaxRecords.
+// New builds an empty component whose node writes with the cap maxRecords;
+// zero is DefaultMaxRecords.
 func New(maxRecords int) *Component {
 	if maxRecords <= 0 {
 		maxRecords = DefaultMaxRecords
 	}
-	return &Component{maxRecords: maxRecords, collections: map[string]map[string]Record{}, changed: make(chan struct{})}
+	return &Component{maxRecords: maxRecords, collections: map[string]map[string]Record{}, changed: make(chan struct{}), full: map[string]uint64{}}
+}
+
+// MaxRecords is the cap this node's puts carry.
+func (c *Component) MaxRecords() int { return c.maxRecords }
+
+// capOf is the cap a put is decided by.
+func capOf(op Op) int {
+	if op.Max == 0 {
+		return DefaultMaxRecords
+	}
+	return op.Max
 }
 
 // ValidName reports whether a collection name is well formed: dot-separated
@@ -103,10 +128,14 @@ func ValidName(c string) bool {
 }
 
 // Decide is the decision on one write against the collection's current
-// state: whether it applies, and why not. It reads nothing but its
+// state: whether it applies, and why not. A new key is refused full once the
+// collection holds the write's cap (capOf). It reads nothing but its
 // arguments.
-func Decide(op Op, current Record, exists bool, count, maxRecords int) string {
+func Decide(op Op, current Record, exists bool, count int) string {
 	if !ValidName(op.Collection) || op.Key == "" || len(op.Key) > MaxKey || !utf8.ValidString(op.Key) {
+		return RefusedInvalid
+	}
+	if op.Max < 0 || op.Max > MaxRecordsCeiling {
 		return RefusedInvalid
 	}
 	if op.If != nil {
@@ -129,7 +158,7 @@ func Decide(op Op, current Record, exists bool, count, maxRecords int) string {
 	if len(op.Value) > MaxValue || !isObject(op.Value) {
 		return RefusedInvalid
 	}
-	if !exists && count >= maxRecords {
+	if !exists && count >= capOf(op) {
 		return RefusedFull
 	}
 	return ""
@@ -155,7 +184,10 @@ func (c *Component) Apply(index uint64, payload []byte) (any, error) {
 	coll := c.collections[op.Collection]
 	cur, exists := coll[op.Key]
 	res := Result{Index: index, Version: cur.Version}
-	if why := Decide(op, cur, exists, len(coll), c.maxRecords); why != "" {
+	if why := Decide(op, cur, exists, len(coll)); why != "" {
+		if why == RefusedFull {
+			c.full[op.Collection]++
+		}
 		res.Reason = why
 		return res, nil
 	}
@@ -235,6 +267,18 @@ func (c *Component) Counts() map[string]int {
 	return out
 }
 
+// FullRefusals counts, per collection, the puts this node applied as
+// refused full since it started.
+func (c *Component) FullRefusals() map[string]uint64 {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	out := make(map[string]uint64, len(c.full))
+	for name, n := range c.full {
+		out[name] = n
+	}
+	return out
+}
+
 // Applied is the last log index applied to this component.
 func (c *Component) Applied() uint64 {
 	c.mu.RLock()
@@ -303,9 +347,10 @@ type Store struct {
 	Propose Proposer
 }
 
-// Put writes a record; ifVersion, when not nil, is its condition.
+// Put writes a record under this node's cap; ifVersion, when not nil, is its
+// condition.
 func (s *Store) Put(ctx context.Context, collection, key string, value json.RawMessage, ifVersion *uint64, by string, at time.Time) (Result, error) {
-	return s.write(ctx, Op{Collection: collection, Key: key, Value: value, If: ifVersion, By: by, At: at})
+	return s.write(ctx, Op{Collection: collection, Key: key, Value: value, If: ifVersion, By: by, At: at, Max: s.maxRecords})
 }
 
 // Delete removes a record; ifVersion, when not nil, is its condition.

@@ -1,14 +1,12 @@
-{{- if eq .Values.tls.mode "certManager" }}
-{{- $issuerName := .Values.tls.certManager.issuerRef.name }}
-{{- $issuerKind := .Values.tls.certManager.issuerRef.kind }}
-{{- if not $issuerName }}
+{{- if or (eq .Values.tls.mode "certManager") (eq .Values.tls.mode "certManagerCSI") }}
+{{- $issuerName := include "hoardmq.tlsIssuerName" . }}
+{{- $issuerKind := include "hoardmq.tlsIssuerKind" . }}
+{{- if not .Values.tls.certManager.issuerRef.name }}
 {{- /* Without an issuer of its own the chart makes a private CA: a
        self-signed issuer signs one CA certificate, and a CA issuer signs the
        nodes'. A self-signed issuer signing the nodes' directly would give
        each node its own root, and no peer would verify. */}}
 {{- $selfSigned := printf "%s-selfsigned" (include "hoardmq.fullname" .) }}
-{{- $issuerName = printf "%s-ca" (include "hoardmq.fullname" .) }}
-{{- $issuerKind = "Issuer" }}
 apiVersion: cert-manager.io/v1
 kind: Issuer
 metadata:
@@ -47,6 +45,7 @@ spec:
     secretName: {{ include "hoardmq.tlsCASecret" . }}
 ---
 {{- end }}
+{{- if eq .Values.tls.mode "certManager" }}
 {{- /* One Certificate per ordinal: the common name is the node name, which is
        what a peer checks against the hello it receives. A peer also needs
        both auth usages, which cert-manager adds only when asked. Every
@@ -79,5 +78,6 @@ spec:
     name: {{ $issuerName }}
     kind: {{ $issuerKind }}
 ---
+{{- end }}
 {{- end }}
 {{- end }}

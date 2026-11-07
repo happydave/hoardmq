@@ -39,6 +39,22 @@ prefix of one Secret per ordinal).
 {{- end -}}
 
 {{/*
+The issuer that signs the node certificates in the cert-manager modes: the
+named one, or else the chart's private CA Issuer (certificate.yaml).
+*/}}
+{{- define "hoardmq.tlsIssuerName" -}}
+{{- .Values.tls.certManager.issuerRef.name | default (printf "%s-ca" (include "hoardmq.fullname" .)) -}}
+{{- end -}}
+
+{{- define "hoardmq.tlsIssuerKind" -}}
+{{- if .Values.tls.certManager.issuerRef.name -}}
+{{- .Values.tls.certManager.issuerRef.kind -}}
+{{- else -}}
+Issuer
+{{- end -}}
+{{- end -}}
+
+{{/*
 The Secret holding the cluster CA; with tls.mode generated, its key too. No
 pod mounts it.
 */}}

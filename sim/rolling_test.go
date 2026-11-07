@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -18,7 +19,7 @@ import (
 )
 
 // TestRollingRestart drains, stops and restarts each node in turn, highest
-// name first, with the publish probe running (WI 2208). The gate runs 300
+// name first, with the publish probe running. The gate runs 300
 // clients at the harness's timings and checks the arm's structure;
 // HOARDMQ_SIM_ROLL=<clients> runs the measurement at the product's timings
 // and writes roll.json and report.md to HOARDMQ_SIM_ARTIFACT's directory. A
@@ -66,6 +67,11 @@ func TestRollingRestart(t *testing.T) {
 			opts.Log = f
 			defer func() { _ = f.Close() }()
 		}
+	}
+	if record && opts.Log == nil {
+		// A measurement keeps node logs only on request (above): at its
+		// scale the default file is enormous.
+		opts.Log = io.Discard
 	}
 	c := New(t, opts)
 	prov := readProvenance(os.Args, os.Environ(), ".")

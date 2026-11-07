@@ -87,6 +87,10 @@ func TestAuthModuleConfiguration(t *testing.T) {
 		{"ocspMaxAgeSeconds 60", `{"ocspMaxAgeSeconds":60}`, ""},
 		{"ocspMaxAgeSeconds 2592000", `{"ocspMaxAgeSeconds":2592000}`, ""},
 		{"ocspMaxAgeSeconds 2592001", `{"ocspMaxAgeSeconds":2592001}`, "ocspMaxAgeSeconds must be 60 to 2592000"},
+		{"ocspMaxLifetimeSeconds 3599", `{"ocspMaxLifetimeSeconds":3599}`, "ocspMaxLifetimeSeconds must be 3600 to 31622400"},
+		{"ocspMaxLifetimeSeconds 3600", `{"ocspMaxLifetimeSeconds":3600}`, ""},
+		{"ocspMaxLifetimeSeconds 31622400", `{"ocspMaxLifetimeSeconds":31622400}`, ""},
+		{"ocspMaxLifetimeSeconds 31622401", `{"ocspMaxLifetimeSeconds":31622401}`, "ocspMaxLifetimeSeconds must be 3600 to 31622400"},
 		{"an unknown member", `{"failClosed":true}`, "unknown field"},
 	} {
 		err := provision(t, &x509Auth{}, c.doc)
@@ -126,6 +130,20 @@ func TestX509OCSPMaxAgeProvisioned(t *testing.T) {
 		}
 		if x.inner.OCSPMaxAge != want {
 			t.Errorf("%s: OCSPMaxAge %v, want %v", doc, x.inner.OCSPMaxAge, want)
+		}
+	}
+}
+
+// ocspMaxLifetimeSeconds reaches the authenticator, and its absence is ten
+// days.
+func TestX509OCSPMaxLifetimeProvisioned(t *testing.T) {
+	for doc, want := range map[string]time.Duration{`{}`: 240 * time.Hour, `{"ocspMaxLifetimeSeconds":7200}`: 2 * time.Hour} {
+		x := &x509Auth{}
+		if err := provision(t, x, doc); err != nil {
+			t.Fatal(err)
+		}
+		if x.inner.OCSPMaxLifetime != want {
+			t.Errorf("%s: OCSPMaxLifetime %v, want %v", doc, x.inner.OCSPMaxLifetime, want)
 		}
 	}
 }

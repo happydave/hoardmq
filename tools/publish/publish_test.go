@@ -164,6 +164,7 @@ func TestPublishRefusesAndLeavesTheBranch(t *testing.T) {
 	}{
 		{"a term outside sim/results", map[string]*string{"docs/x.md": s("one\nhost-2025-alpha\n")}, "term hit: docs/x.md:2: term-list line 2"},
 		{"a term in a path", map[string]*string{"docs/secret-word.md": s("clean\n")}, "term hit: docs/secret-word.md (path): term-list line 6"},
+		{"a work-item citation", map[string]*string{"internal/x.go": s("package x\n\n// a reason (" + wi + " 1292)\n")}, "citation: internal/x.go:3: work-item citation"},
 		{"a personal email", map[string]*string{"docs/y.md": s("mail " + "someone" + "@" + "mail.isp-domain.net\n")}, "identity: docs/y.md:1: email at mail.isp-domain.net"},
 		{"a missing licence", map[string]*string{"LICENSE-APACHE": nil}, "licence check: LICENSE-APACHE missing"},
 		{"no exceptions file", map[string]*string{allowedPath: nil}, allowedPath + " is not in the source tree"},
@@ -193,7 +194,7 @@ func TestPublishRefusesAndLeavesTheBranch(t *testing.T) {
 		t.Fatalf("a personal identity: exit %d, tip %s\n%s", code, tipOf(t, dir), both)
 	}
 
-	commitFiles(t, dir, "a term under sim/results", map[string]*string{"sim/results/r3.md": s("secret-word\n"), "README.md": s("Measured again on alpha.\n")})
+	commitFiles(t, dir, "a term under sim/results", map[string]*string{"sim/results/r3.md": s("secret-word\n" + wi + " 1292\n"), "README.md": s("Measured again on alpha.\n")})
 	if code, out := publishT(t, dir, terms); code != 0 || tipOf(t, dir) == tip {
 		t.Fatalf("a term only under sim/results: exit %d\n%s", code, out)
 	}

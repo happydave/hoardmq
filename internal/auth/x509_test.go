@@ -90,7 +90,10 @@ func TestAcceptOCSP(t *testing.T) {
 		{"no nextUpdate, a second past the maximum age", spec(func(s *testcert.ResponseSpec) {
 			s.NextUpdate, s.ThisUpdate = time.Time{}, now.Add(-time.Hour-time.Second)
 		}), 0, "without nextUpdate older than 1h0m0s"},
-		{"nextUpdate ahead, thisUpdate past the maximum age", spec(func(s *testcert.ResponseSpec) { s.ThisUpdate = now.Add(-2 * time.Hour) }), StatusGood, ""},
+		{"nextUpdate ahead, thisUpdate past the maximum age, the maximum lifetime old", spec(func(s *testcert.ResponseSpec) { s.ThisUpdate = now.Add(-2 * time.Hour) }), StatusGood, ""},
+		{"nextUpdate ahead, a second past the maximum lifetime", spec(func(s *testcert.ResponseSpec) {
+			s.ThisUpdate, s.NextUpdate = now.Add(-2*time.Hour-time.Second), now.Add(365*24*time.Hour)
+		}), 0, "more than 2h0m0s past its thisUpdate"},
 		{"tryLater", spec(func(s *testcert.ResponseSpec) { s.ResponseStatus = 3 }), 0, "response status 3"},
 		{"garbage", []byte("not DER"), 0, "malformed"},
 	}
@@ -100,11 +103,11 @@ func TestAcceptOCSP(t *testing.T) {
 	stale := spec(func(s *testcert.ResponseSpec) {
 		s.Signer, s.SignerKey, s.ThisUpdate, s.NextUpdate = p.signer.Cert, p.signer.Key, later.Add(-time.Minute), later.Add(365*24*time.Hour)
 	})
-	if _, err := AcceptOCSP(stale, p.leaf.Cert, p.ca.Cert, later, time.Hour); err == nil || !strings.Contains(err.Error(), "not valid now") {
+	if _, err := AcceptOCSP(stale, p.leaf.Cert, p.ca.Cert, later, time.Hour, 2*time.Hour); err == nil || !strings.Contains(err.Error(), "not valid now") {
 		t.Errorf("a delegated signer past its validity: %v", err)
 	}
 	for _, c := range cases {
-		a, err := AcceptOCSP(c.der, p.leaf.Cert, p.ca.Cert, now, time.Hour)
+		a, err := AcceptOCSP(c.der, p.leaf.Cert, p.ca.Cert, now, time.Hour, 2*time.Hour)
 		switch {
 		case c.err == "" && err != nil:
 			t.Errorf("%s: refused: %v", c.name, err)
@@ -433,6 +436,9 @@ func TestOpenSSLFixtures(t *testing.T) {
 		}
 	}
 	now := time.Now()
+	// The answers were signed 2026-09-26 01:05:22 UTC with ten years to run;
+	// they are judged an hour after.
+	at := time.Date(2026, 9, 26, 2, 5, 22, 0, time.UTC)
 	for _, c := range []struct {
 		file string
 		leaf *x509.Certificate
@@ -443,15 +449,15 @@ func TestOpenSSLFixtures(t *testing.T) {
 		{"resp-revoked-ca.der", revoked, StatusRevoked},
 		{"resp-revoked-delegated.der", revoked, StatusRevoked},
 	} {
-		a, err := AcceptOCSP(readDER(t, c.file), c.leaf, ca, now, DefaultOCSPMaxAge)
+		a, err := AcceptOCSP(readDER(t, c.file), c.leaf, ca, at, DefaultOCSPMaxAge, DefaultOCSPMaxLifetime)
 		if err != nil || a.Status != c.want {
 			t.Errorf("%s: %v %v, want %v", c.file, a.Status, err, c.want)
 		}
-		if _, err := AcceptOCSP(readDER(t, c.file), c.leaf, ca, now.AddDate(11, 0, 0), DefaultOCSPMaxAge); err == nil {
+		if _, err := AcceptOCSP(readDER(t, c.file), c.leaf, ca, at.AddDate(11, 0, 0), DefaultOCSPMaxAge, DefaultOCSPMaxLifetime); err == nil {
 			t.Errorf("%s: accepted eleven years on", c.file)
 		}
 	}
-	if _, err := AcceptOCSP(readDER(t, "resp-good-ca.der"), revoked, ca, now, DefaultOCSPMaxAge); err == nil {
+	if _, err := AcceptOCSP(readDER(t, "resp-good-ca.der"), revoked, ca, at, DefaultOCSPMaxAge, DefaultOCSPMaxLifetime); err == nil {
 		t.Error("the good leaf's answer was accepted for the revoked leaf")
 	}
 	crl, err := AcceptCRL(readDER(t, "crl.der"), ca, now)

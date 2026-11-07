@@ -79,7 +79,7 @@ func startReplicatedTrio(t *testing.T) (map[string]*fixture, shardmap.Map) {
 	return nodes, waitMap(t, nodes, 3)
 }
 
-// TestQueuedMessagesSurviveOwnerLoss (AC 1): messages acknowledged to a
+// TestQueuedMessagesSurviveOwnerLoss: messages acknowledged to a
 // publisher for an offline durable subscriber on n1 are delivered when the
 // subscriber comes back on another node after n1 is gone.
 func TestQueuedMessagesSurviveOwnerLoss(t *testing.T) {
@@ -111,7 +111,7 @@ func TestQueuedMessagesSurviveOwnerLoss(t *testing.T) {
 		}
 	}
 	// The publisher's acknowledgement covers n2's own state; the forward to
-	// n1 is asynchronous (1270: at most once between nodes) and n1's enqueue
+	// n1 is asynchronous (at most once between nodes) and n1's enqueue
 	// records reach x's follower on n1's own barrier, so wait for them.
 	var holder string
 	deadline = time.Now().Add(5 * time.Second)
@@ -188,7 +188,7 @@ func TestQueuedMessagesSurviveOwnerLoss(t *testing.T) {
 	}
 }
 
-// TestRetainedSurvivesNodeLoss (AC 1): a retained message whose shard n1
+// TestRetainedSurvivesNodeLoss: a retained message whose shard n1
 // leads is served after n1 is gone.
 func TestRetainedSurvivesNodeLoss(t *testing.T) {
 	nodes, m := startReplicatedTrio(t)
@@ -219,7 +219,7 @@ func TestRetainedSurvivesNodeLoss(t *testing.T) {
 	}
 }
 
-// TestWildcardRetainedAcrossShards (AC 3): a wildcard subscribe returns
+// TestWildcardRetainedAcrossShards: a wildcard subscribe returns
 // retained messages from every shard leader.
 func TestWildcardRetainedAcrossShards(t *testing.T) {
 	nodes, m := startReplicatedTrio(t)
@@ -256,7 +256,7 @@ func TestWildcardRetainedAcrossShards(t *testing.T) {
 	}
 }
 
-// TestRebalanceKeepsConnections (AC 3): a shard-map change moves replicas
+// TestRebalanceKeepsConnections: a shard-map change moves replicas
 // without closing client connections.
 func TestRebalanceKeepsConnections(t *testing.T) {
 	nodes, m := startReplicatedTrio(t)

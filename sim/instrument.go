@@ -12,9 +12,9 @@ import (
 
 // Every sim binary runs with contention profiling on, so a run that goes
 // wrong is diagnosable from its own artifact instead of a re-run with
-// hand-added instrumentation. The rates are the ones WI 1329's research
-// found negligible even under extreme contention; the worst case that does
-// cost throughput is unbuffered channels at rate 1, which these are not.
+// hand-added instrumentation. The rates are ones found negligible even
+// under extreme contention; the worst case that does cost throughput is
+// unbuffered channels at rate 1, which these are not.
 // The product does not import this package, so nothing here reaches it.
 func init() {
 	runtime.SetMutexProfileFraction(100)
@@ -36,10 +36,11 @@ type runtimeSnapshot struct {
 	SchedP99Sec  float64   `json:"sched_p99_sec"`
 	SchedMaxSec  float64   `json:"sched_max_sec"`
 	// The histograms these figures were derived from, kept so an interval
-	// can be subtracted out of two snapshots (WI 1352). The quantiles above
-	// are cumulative since the process started, which is why round 8's
-	// 21.5 s said "somewhere in this window" and never "at 22 s". Not
-	// serialised: the per-interval series carries what a reader needs.
+	// can be subtracted out of two snapshots. The quantiles above
+	// are cumulative since the process started, which is why one run's
+	// 21.5 s scheduler latency said "somewhere in this window" and never
+	// "at 22 s". Not serialised: the per-interval series carries what a reader
+	// needs.
 	sched *histogram
 	gc    *histogram
 }
@@ -198,10 +199,10 @@ func histogramSum(h *metrics.Float64Histogram) float64 {
 }
 
 // runtimeDelta is what changed across a phase, plus the per-operation form
-// of the contention figure. Per-op mutex wait over a fixed seed is the
-// report-first tripwire from WI 1329's research: deterministic enough to
-// compare across runs, and both of this project's contention incidents
-// would have moved it by an order of magnitude.
+// of the contention figure. Per-op mutex wait over a fixed seed is a
+// report-first tripwire: deterministic enough to compare across runs, and
+// both of this project's contention incidents would have moved it by an
+// order of magnitude.
 type runtimeDelta struct {
 	Start           runtimeSnapshot `json:"start"`
 	End             runtimeSnapshot `json:"end"`
@@ -227,7 +228,7 @@ func deltaBetween(a, b runtimeSnapshot, ops int) runtimeDelta {
 	return d
 }
 
-// progressLine renders one long-run progress line (WI 1285). The caller
+// progressLine renders one long-run progress line. The caller
 // supplies every figure; this function reads nothing, which is what makes
 // it unit-testable and keeps the reporting path free of locks by
 // construction. The line goes to stderr because Go buffers a test's log
@@ -243,7 +244,7 @@ func progressLine(phase string, elapsed time.Duration, done, total int, refusals
 // account of why over the same interval. Two connections idle for six
 // seconds beside a six-second stall is a whole-process pause; the same idle
 // beside a quiet observer is not, and the reader should be able to tell
-// them apart without opening a second file (WI 1352).
+// them apart without opening a second file.
 func pauseSuffix(worstStall time.Duration, gcSec, schedMaxSec float64) string {
 	return fmt.Sprintf(" | stall=%dms gc=%dms sched-max=%dms",
 		worstStall.Milliseconds(), int64(gcSec*1000), int64(schedMaxSec*1000))

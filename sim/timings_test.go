@@ -15,8 +15,8 @@ func env(vars map[string]string) func(string) string {
 	return func(k string) string { return vars[k] }
 }
 
-// TestRecordedFailoverDefaultsToProductTimings is WI 1475's default: a
-// recorded run measures the timings the broker ships.
+// TestRecordedFailoverDefaultsToProductTimings: a recorded run measures the
+// timings the broker ships.
 func TestRecordedFailoverDefaultsToProductTimings(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -122,10 +122,10 @@ func harnessCluster(t *testing.T, set TimingSet) (*Cluster, *Node) {
 // notTimings are the integer fields a product cluster's configuration may
 // differ from config.Default in, each with its reason.
 var notTimings = map[string]string{
-	"/cluster/shards": "the harness runs 16 shards; not a timing (WI 1475)",
+	"/cluster/shards": "the harness runs 16 shards; not a timing",
 }
 
-// TestProductClusterRunsEveryDefaultTiming (WI 1805): a product cluster's
+// TestProductClusterRunsEveryDefaultTiming: a product cluster's
 // node is configured with config.Default's value for every integer field of
 // the document but the named non-timings, so no timing the broker reads can
 // run at a harness value under the product's label.
@@ -148,7 +148,7 @@ func TestProductClusterRunsEveryDefaultTiming(t *testing.T) {
 }
 
 // TestHarnessClusterKeepsItsTimings: the gate and the corpus run the
-// harness's values, so their duration does not change (WI 1805).
+// harness's values, so their duration does not change.
 func TestHarnessClusterKeepsItsTimings(t *testing.T) {
 	c, n := harnessCluster(t, TimingsHarness)
 	doc := c.config(n)

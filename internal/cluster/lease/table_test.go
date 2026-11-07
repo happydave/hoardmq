@@ -23,7 +23,7 @@ func TestLeaseLifecycle(t *testing.T) {
 	now := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
 	will := &store.WillRecord{Message: &message.Message{Topic: "w"}, Delay: 5}
 	var changes []change
-	tb.onChange = func(before, after *Lease) { changes = append(changes, change{before, after}) }
+	tb.onChange = func(before, after *Lease, at time.Time) { changes = append(changes, change{before, after, at}) }
 
 	r := apply(t, tb, Op{Kind: OpAcquire, Namespace: "d", ClientID: "x", Node: "n1", Will: will, ExpiryInterval: 60, Now: now})
 	if !r[0].OK || r[0].Epoch != 1 || r[0].PrevOwner != "" {
@@ -162,9 +162,8 @@ func TestHandoffMovesEveryLeaseWithoutAnAliveCheck(t *testing.T) {
 	}
 }
 
-// TestSnapshotSizeTenThousandLeases is the measurement WI 1269's plan asked
-// for (non-functional constraint): the serialised size of a 10,000-lease
-// table, which 1268 predicted would become the largest snapshot section. It
+// TestSnapshotSizeTenThousandLeases measures the serialised size of a
+// 10,000-lease table, predicted to become the largest snapshot section. It
 // records rather than judges — the size is logged, and the only assertion
 // is that the snapshot restores whole.
 func TestSnapshotSizeTenThousandLeases(t *testing.T) {
@@ -215,7 +214,7 @@ func TestRenewalNeverTakes(t *testing.T) {
 	now := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
 	tb := NewTable()
 	var changes int
-	tb.onChange = func(_, _ *Lease) { changes++ }
+	tb.onChange = func(_, _ *Lease, _ time.Time) { changes++ }
 	acquire := func(node string, epoch uint64) Result {
 		return apply(t, tb, Op{Kind: OpAcquire, Namespace: "d", ClientID: "x", Node: node, Epoch: epoch, ExpiryInterval: 60, Now: now})[0]
 	}
@@ -260,7 +259,7 @@ func TestRenewalNeverTakes(t *testing.T) {
 func TestHookedIndexTrailsTheHooks(t *testing.T) {
 	tb := NewTable()
 	entered, release := make(chan struct{}), make(chan struct{})
-	tb.onChange = func(_, _ *Lease) {
+	tb.onChange = func(_, _ *Lease, _ time.Time) {
 		close(entered)
 		<-release
 	}

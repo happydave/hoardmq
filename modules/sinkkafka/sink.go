@@ -39,6 +39,7 @@ const (
 	metricProduced        = "hoardmq_sink_kafka_produced_total"
 	metricDropped         = "hoardmq_sink_kafka_dropped_total"
 	metricRefused         = "hoardmq_sink_kafka_refused_total"
+	metricKeyFallbacks    = "hoardmq_sink_kafka_key_fallbacks_total"
 	metricBufferedRecords = "hoardmq_sink_kafka_buffered_records"
 	metricBufferedBytes   = "hoardmq_sink_kafka_buffered_bytes"
 )
@@ -195,6 +196,9 @@ func (s *sink) OnPublishAccepted(_ context.Context, source ext.PublishSource, m 
 	held := waits(s.set.refuse, source, m.QoS)
 	for _, r := range routes {
 		rec := s.set.record(r, source, m)
+		if fellBack(r, m) {
+			s.add(metricKeyFallbacks, map[string]string{"topic": r.topic})
+		}
 		if b == nil || !s.running.Load() {
 			s.count(rec, errStopped, held)
 			continue

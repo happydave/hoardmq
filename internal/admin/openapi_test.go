@@ -75,10 +75,10 @@ func TestOpenAPIDerivedFromTheTable(t *testing.T) {
 	if _, ok := doc.Paths[Prefix+"/cluster/drain"]["post"]["responses"].(map[string]any)["403"]; !ok {
 		t.Error("POST /cluster/drain does not document its 403")
 	}
-	if len(inTable) != 39 {
-		t.Errorf("the table has %d routes; the plans name 39", len(inTable))
+	if len(inTable) != 40 {
+		t.Errorf("the table has %d routes; the plans name 40", len(inTable))
 	}
-	for _, want := range []string{"GET /api/v1/whoami", "GET /api/v1/apikeys", "POST /api/v1/apikeys", "DELETE /api/v1/apikeys/{keyId}",
+	for _, want := range []string{"DELETE /api/v1/cluster/members/{node}", "GET /api/v1/whoami", "GET /api/v1/apikeys", "POST /api/v1/apikeys", "DELETE /api/v1/apikeys/{keyId}",
 		"GET /api/v1/bans", "POST /api/v1/bans", "DELETE /api/v1/bans/{key}", "GET /api/v1/limits", "PUT /api/v1/limits", "GET /api/v1/overload"} {
 		if !strings.Contains(strings.Join(inDoc, "\n")+"\n", want+"\n") {
 			t.Errorf("the document lacks %s", want)

@@ -24,8 +24,13 @@ type Journal interface {
 	InflightState(k Key, packetID uint16, state byte) error
 	Complete(k Key, packetID uint16) error
 	Dropped(k Key, entrySeq uint64) error
-	Retain(m *mqtt.Message) error
-	RetainDelete(ns, topic string) error
+	// Retain stores a retained message at a version (the zero Version for an
+	// unversioned one).
+	Retain(m *mqtt.Message, v Version) error
+	// RetainClear records a client's clear of a topic: a tombstone at v.
+	RetainClear(ns, topic string, v Version) error
+	// RetainDrop removes whatever is held for a topic: a copy drop.
+	RetainDrop(ns, topic string) error
 	Sync() error
 }
 
@@ -222,13 +227,27 @@ func EncodeDropped(k Key, entrySeq uint64) (Record, error) {
 }
 
 // EncodeRetain is Retain's record.
-func EncodeRetain(m *mqtt.Message) (Record, error) {
-	return encode(RecordRetain, Key{Namespace: m.Namespace, Topic: m.Topic}, m)
+func EncodeRetain(m *mqtt.Message, v Version) (Record, error) {
+	var rv *Version
+	if !v.Zero() {
+		rv = &v
+	}
+	return encode(RecordRetain, Key{Namespace: m.Namespace, Topic: m.Topic}, retainPayload{Message: m, RV: rv})
 }
 
-// EncodeRetainDelete is RetainDelete's record.
-func EncodeRetainDelete(ns, topic string) (Record, error) {
-	return encode(RecordRetainDelete, Key{Namespace: ns, Topic: topic}, retainKey{ns, topic})
+// EncodeRetainClear is RetainClear's record: a delete carrying its version.
+// At the zero Version it is EncodeRetainDrop's, as RetainRecordVersioned
+// writes an empty payload there: a clear is always stamped.
+func EncodeRetainClear(ns, topic string, v Version) (Record, error) {
+	if v.Zero() {
+		return EncodeRetainDrop(ns, topic)
+	}
+	return encode(RecordRetainDelete, Key{Namespace: ns, Topic: topic}, retainKey{Namespace: ns, Topic: topic, RV: &v})
+}
+
+// EncodeRetainDrop is RetainDrop's record: a delete with no version.
+func EncodeRetainDrop(ns, topic string) (Record, error) {
+	return encode(RecordRetainDelete, Key{Namespace: ns, Topic: topic}, retainKey{Namespace: ns, Topic: topic})
 }
 
 // Known reports whether typ is a record type of this format.

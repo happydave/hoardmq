@@ -17,7 +17,9 @@ type Publisher struct {
 	Node      string
 }
 
-// Message is the envelope.
+// Message is the envelope. No field may take the JSON name "rv": a retained
+// record's payload is a Message beside its version under that key
+// (store.Version).
 type Message struct {
 	Namespace string
 	Topic     string

@@ -201,7 +201,8 @@ func (b adminBackend) Client(id string) (admin.ClientDetail, error) {
 	if c, ok := b.s.sessions.Conn(adminNamespace, id); ok {
 		if cc, ok := c.(*conn.Conn); ok {
 			out.Connection = &admin.Connection{Listener: cc.Listener(), RemoteAddress: cc.RemoteAddr().String(),
-				Username: cc.Identity().Username, ProtocolVersion: int(cc.Version()), ConnectedSeconds: cc.Age().Seconds()}
+				Username: cc.Identity().Username, ProtocolVersion: int(cc.Version()), ConnectedSeconds: cc.Age().Seconds(),
+				KeepAlive: int(cc.KeepAlive()), RequestedKeepAlive: int(cc.RequestedKeepAlive()), CleanStart: cc.CleanStart()}
 		}
 	}
 	if l, ok := b.lease(id); ok {
@@ -223,13 +224,16 @@ func (b adminBackend) Subscriptions(id string) ([]admin.Subscription, error) {
 	return out, nil
 }
 
-func (b adminBackend) Disconnect(id string) error {
+func (b adminBackend) Disconnect(id string, will bool) error {
 	c, online := b.s.sessions.Conn(adminNamespace, id)
 	if !online {
 		if rec, held := b.s.sessions.Record(id); held {
 			return admin.Conflict(fmt.Sprintf("client %s is offline; its session is kept (expiry interval %d s)", id, rec.ExpiryInterval))
 		}
 		return b.notHere(id)
+	}
+	if !will {
+		b.s.sessions.DropWill(adminNamespace, id, c)
 	}
 	c.Close(packet.AdministrativeAction)
 	return nil
@@ -249,7 +253,7 @@ func invalidateAdmitted(seen, held uint64, leased bool, owner, self string) bool
 	return !leased || owner == self
 }
 
-func (b adminBackend) Invalidate(ctx context.Context, id string) (admin.Invalidated, error) {
+func (b adminBackend) Invalidate(ctx context.Context, id string, will bool) (admin.Invalidated, error) {
 	s := b.s
 	l, leased := b.lease(id)
 	admit := func(token uint64) bool {
@@ -259,7 +263,7 @@ func (b adminBackend) Invalidate(ctx context.Context, id string) (admin.Invalida
 		}
 		return invalidateAdmitted(seen, token, leased, l.Owner, b.Node())
 	}
-	res := s.sessions.Invalidate(adminNamespace, id, packet.AdministrativeAction, admit)
+	res := s.sessions.Invalidate(adminNamespace, id, packet.AdministrativeAction, admit, will)
 	switch {
 	case !res.Found:
 		return admin.Invalidated{}, b.notHere(id)
@@ -380,6 +384,10 @@ func (b adminBackend) DrainStatus() admin.DrainStatus { return drainStatus(b.s.D
 func (b adminBackend) Drain() admin.DrainStatus {
 	b.s.Drain()
 	return drainStatus(b.s.DrainStatus())
+}
+
+func (b adminBackend) RemoveMember(ctx context.Context, node string) (admin.MemberRemoval, error) {
+	return b.s.removeMember(ctx, node)
 }
 
 func (b adminBackend) RunningConfig() ([]byte, error) { return json.Marshal(b.s.config()) }

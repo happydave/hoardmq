@@ -94,7 +94,7 @@ func BenchmarkConnectParallel(b *testing.B) {
 		// is being hammered by takeovers and acquires (the 100,000-client run
 		// saw 70,499 and 124,218 acquires against 33,333 clients a node). This
 		// variant keeps a writer on that lock and a reader in the tap, which is
-		// the shape WI 1292 removed: it is the measurement that justified
+		// the shape since removed: it is the measurement that justified
 		// taking the lookup out, kept so the cost is on the record.
 		{"legacy-tap-with-lease-read", func(b *testing.B) Journal {
 			t := newTapModel()

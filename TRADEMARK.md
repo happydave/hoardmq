@@ -1,7 +1,5 @@
 # HoardMQ Trademark Policy
 
-This is a stub policy. It will be expanded before the first public release.
-
 The software is licensed under the MIT and Apache-2.0 licences (see
 [LICENSE-MIT](LICENSE-MIT) and [LICENSE-APACHE](LICENSE-APACHE)). Those
 licences cover the code. They do not grant rights to the name "HoardMQ" or to

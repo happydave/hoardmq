@@ -135,11 +135,10 @@ func TestHandOverToANodeThatIsNotATargetIsRefused(t *testing.T) {
 	}
 }
 
-// TestTakeoverReadsTheMaintainedCopy: the shape the work item reports. n2 is
-// X's target, then the map makes n3 the target and the owner writes again;
-// the owner dies and the map makes n2 the fetch's source. What the fetch
-// returns is the copy the owner's stream maintained, not the one n2 held
-// from before the map moved.
+// TestTakeoverReadsTheMaintainedCopy: n2 is X's target, then the map makes n3
+// the target and the owner writes again; the owner dies and the map makes n2
+// the fetch's source. What the fetch returns is the copy the owner's stream
+// maintained, not the one n2 held from before the map moved.
 func TestTakeoverReadsTheMaintainedCopy(t *testing.T) {
 	for _, c := range []struct {
 		name    string

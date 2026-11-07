@@ -37,7 +37,7 @@ func TestSummariseKeepsNotReachedOutOfTheDistribution(t *testing.T) {
 }
 
 // TestSummaryStringAlwaysSaysHowManyDidNotReach: a median without that count
-// is the single-number claim this whole work item exists to stop.
+// is the single-number claim the repeat summary exists to stop.
 func TestSummaryStringAlwaysSaysHowManyDidNotReach(t *testing.T) {
 	got := summarise([]repeatRun{
 		{Index: 1, RecoverySec: 99.804},
@@ -168,7 +168,7 @@ func TestSettleLimitIsTheMeasurementsOwnRule(t *testing.T) {
 // test actually works, breaking the guard and expecting a failure, costs a red
 // test and nothing else. A version of this test that called the remover with
 // these same arguments would be safe only while the guard it was testing still
-// held, and would delete a home directory the moment anyone checked (WI 1377).
+// held, and would delete a home directory the moment anyone checked.
 func TestValidateStoreRootRefusesAnythingOutsideTheTempRoot(t *testing.T) {
 	bad := []string{"/", "/etc", os.TempDir() + "/..", filepath.Dir(os.TempDir())}
 	if home, err := os.UserHomeDir(); err == nil && home != "" {
@@ -335,7 +335,7 @@ func TestFinishRunOnAFailedRunTouchesNothing(t *testing.T) {
 }
 
 // TestTreeReportPath: a recorded run with an artifact directory leaves the
-// source tree alone (WI 1483).
+// source tree alone.
 func TestTreeReportPath(t *testing.T) {
 	now := time.Date(2026, 9, 15, 14, 0, 0, 0, time.UTC)
 	if got := treeReportPath(true, "/tmp/art", now); got != "" {

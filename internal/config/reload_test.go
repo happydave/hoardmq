@@ -34,6 +34,7 @@ func TestChangesClassifiesEachMember(t *testing.T) {
 		{"packet size", func(d *Document) { d.Limits.MaxPacketSize = 2048 },
 			[]string{"/limits/maxPacketSize"}, []string{"/limits/maxPacketSize"}},
 		{"queue bound", func(d *Document) { d.Limits.MaxQueuedMessages = 3 }, []string{"/limits/maxQueuedMessages"}, nil},
+		{"offline QoS 0", func(d *Document) { d.Limits.OfflineQoS0 = "drop" }, []string{"/limits/offlineQoS0"}, nil},
 		{"module member", func(d *Document) { d.Modules["auth.file"] = json.RawMessage(`{"path":"/etc/other"}`) },
 			[]string{"/modules/auth.file/path"}, []string{"/modules/auth.file/path"}},
 		{"module order", func(d *Document) { d.Hooks.Order = []string{"auth.file"} },

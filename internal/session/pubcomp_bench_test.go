@@ -10,7 +10,7 @@ import (
 
 // BenchmarkInboundQoS2Exchange times one durable publisher's inbound QoS 2
 // exchange, PUBLISH then PUBREL, over a real store with its fsync, and
-// reports the store's appends and fsyncs per exchange (WI 2031).
+// reports the store's appends and fsyncs per exchange.
 func BenchmarkInboundQoS2Exchange(b *testing.B) {
 	m, st := benchManager(b)
 	pub := newFake("pub", packet.V5, 100)

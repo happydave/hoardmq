@@ -218,3 +218,37 @@ func TestForwardKeepsAnIdentifierWithASlash(t *testing.T) {
 		t.Fatalf("the owner serving it: %d %s, disconnected %v", ans.Status, ans.Body, owner.b.disconnected)
 	}
 }
+
+// TestMemberRemovalGoesToTheLeader: a removal answered with a 409 naming the
+// leader is sent there; a reader may not remove; a removal that cannot be
+// sent names the leader, not a client; the leader serves a forwarded removal.
+func TestMemberRemovalGoesToTheLeader(t *testing.T) {
+	f := newFixture(t, 0)
+	f.b.errFor["n2"] = &Error{Status: 409, Owner: "n3", Detail: "node n3 leads; the removal is made there"}
+	f.b.forwardAns = ForwardAnswer{Status: 200, ContentType: "application/json", Body: []byte(`{"node":"n2"}`)}
+	rec := f.do("DELETE", "/api/v1/cluster/members/n2", opsToken, "")
+	if rec.Code != 200 || rec.Header().Get(NodeHeader) != "n3" || f.b.forwardCount() != 1 || f.b.forwards[0].Path != "/cluster/members/n2" || f.b.forwards[0].Method != "DELETE" {
+		t.Fatalf("removal through a follower: %d %q %+v", rec.Code, rec.Header().Get(NodeHeader), f.b.forwards)
+	}
+	if e, _ := f.b.lastAudit(t); e.Action != "cluster.member.remove" || e.Target != "n2" || e.Detail["forwardedTo"] != "n3" {
+		t.Fatalf("the caller's audit: %+v", e)
+	}
+	if rec := f.do("DELETE", "/api/v1/cluster/members/n2", readToken, ""); rec.Code != 403 || f.b.forwardCount() != 1 {
+		t.Fatalf("a reader's removal: %d, %d forwards", rec.Code, f.b.forwardCount())
+	}
+
+	f.b.forwardErr = &ForwardError{Outcome: ForwardUnreachable, Reason: "node n3 is not connected"}
+	rec = f.do("DELETE", "/api/v1/cluster/members/n2", opsToken, "")
+	var p Problem
+	if err := json.Unmarshal(rec.Body.Bytes(), &p); err != nil || rec.Code != 409 || p.Owner != "n3" ||
+		!strings.Contains(p.Detail, "node n3 leads") || strings.Contains(p.Detail, "client") {
+		t.Fatalf("an unsent removal: %d %s", rec.Code, rec.Body)
+	}
+
+	g := newFixture(t, 0)
+	ans := g.srv.ServeForwarded(context.Background(), "n2", forwarded("/cluster/members/n4", "DELETE", "cluster:members"))
+	var got MemberRemoval
+	if ans.Status != 200 || json.Unmarshal(ans.Body, &got) != nil || got.Node != "n4" {
+		t.Fatalf("the leader's answer to a forwarded removal: %d %s", ans.Status, ans.Body)
+	}
+}

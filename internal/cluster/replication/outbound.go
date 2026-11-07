@@ -47,9 +47,9 @@ type outbound struct {
 	clearedBy map[store.Scope]uint64
 	// streamBlocked is the fallback for a refusal that cannot be scoped: a
 	// frame carrying neither identity, or the refused set reaching its cap.
-	// It blocks every barrier to this peer, which is what the whole stream
-	// did before this work item, so the fallback's rate is the measure of how
-	// much scoping the fix actually achieves.
+	// It blocks every barrier to this peer, as every refusal did before
+	// refusals were scoped, so the fallback's rate is the measure of how much
+	// scoping the fix actually achieves.
 	streamBlocked    bool
 	fallbackNoKey    atomic.Int64
 	fallbackAtCap    atomic.Int64
@@ -67,7 +67,7 @@ type outbound struct {
 	repairedAt map[store.Scope]time.Time
 	// blockedSince is when this stream last became one no barrier may pass —
 	// a hole, or a key refused — and zero while it may. It is what the
-	// operator's gauge reports the age of (WI 1523).
+	// operator's gauge reports the age of.
 	blockedSince time.Time
 	// hole marks that frames were dropped from this stream. The peer's copy
 	// is missing them, and later frames are applied over the gap without
@@ -122,8 +122,8 @@ type refusal struct {
 // this is the storm path.
 const maxPushedTracked = 4096
 
-// maxRefusedTracked bounds the refused set. WI 1506 recorded 134 rejections
-// in one run and this work item sampled 631 across five, so a cap three
+// maxRefusedTracked bounds the refused set. One measured run recorded 134
+// rejections and a later sample found 631 across five runs, so a cap three
 // orders above that is reached only by a burst no scoping would survive;
 // reaching it falls back to blocking the stream and is counted.
 const maxRefusedTracked = 65536
@@ -146,12 +146,13 @@ func stoppedOutbound(r *Replicator, name string) *outbound {
 	return p
 }
 
-// push queues a frame; it takes the next sequence.
-func (p *outbound) push(f frame) {
+// push queues a frame; it takes the next sequence, which it returns (0 on a
+// closed stream).
+func (p *outbound) push(f frame) uint64 {
 	p.mu.Lock()
 	if p.closed {
 		p.mu.Unlock()
-		return
+		return 0
 	}
 	p.sent++
 	f.Seq = p.sent
@@ -208,8 +209,10 @@ func (p *outbound) push(f frame) {
 		p.pushed = append(p.pushed, seqKey{seq: p.sent, scope: scope})
 	}
 	p.trace.pushed(f.Kind, p.sent-p.ackSeq, len(p.pushed), p.sent, len(p.queue))
+	seq := p.sent
 	p.mu.Unlock()
 	p.cond.Signal()
+	return seq
 }
 
 // lastSent is the sequence of the last frame pushed.
@@ -584,7 +587,7 @@ func (p *outbound) blocked() (reason string, since time.Time) {
 
 // countFallback reports a refusal that could not be scoped. The rate of these
 // is how much of the scoping actually holds: every one of them blocks the
-// whole stream, which is the behaviour this work item removed.
+// whole stream, as every refusal did before refusals were scoped.
 func (p *outbound) countFallback(kind string) {
 	if p.r != nil {
 		p.r.count("hoardmq_replication_refusal_fallback_total", map[string]string{"peer": p.name, "kind": kind}, 1)
@@ -605,6 +608,15 @@ func (p *outbound) refusedAmong(keys []store.Scope) (store.Scope, bool) {
 		}
 	}
 	return store.Scope{}, false
+}
+
+// refusedTopic reports whether the peer has refused a record of a retained
+// topic and not since been sent it again or resynced.
+func (p *outbound) refusedTopic(ns, topic string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	_, ok := p.refused[store.Scope{Namespace: ns, Topic: topic}]
+	return ok
 }
 
 // refusedAllAmong reports every one of these keys the peer has refused and
@@ -765,10 +777,10 @@ func (p *outbound) waitFor(ctx context.Context, up func(string) bool, keys []sto
 		// acknowledgement timeout: the peer's acknowledgement can be lost
 		// while its frames were applied, and with nothing sent after them no
 		// later acknowledgement carries it. A marker asks for a fresh
-		// cumulative acknowledgement, at most one per half timeout per stream
-		// (WI 1494). A frame is never lost silently on a live link: a reset
-		// changes the peer's state, which breaks and resyncs the stream, so
-		// the acknowledgement can only cover frames the peer applied.
+		// cumulative acknowledgement, at most one per half timeout per stream.
+		// A frame is never lost silently on a live link: a reset changes the
+		// peer's state, which breaks and resyncs the stream, so the
+		// acknowledgement can only cover frames the peer applied.
 		probe := false
 		if peerUp && p.r != nil && len(p.queue) == 0 {
 			quiet := p.r.o.AckTimeout / 2
@@ -825,7 +837,11 @@ func (p *outbound) broken() {
 	p.holeGen++
 	p.markBlockedLocked()
 	waiters := p.wakeAllLocked()
+	through := p.brokenAt
 	p.mu.Unlock()
+	if p.r != nil {
+		p.r.tombstoneSendsBroken(p.name, through)
+	}
 	p.trace.broke()
 	for _, w := range waiters {
 		close(w)
@@ -894,7 +910,7 @@ func (p *outbound) startResync(now time.Time, cooldown time.Duration) (gen uint6
 		// one per failure starves the takeover path of those same locks —
 		// the repair becomes the outage. The stream stays holed, so no
 		// barrier passes over the gap meanwhile, and the caller arranges a
-		// retry for when the cooldown ends (WI 1491).
+		// retry for when the cooldown ends.
 		return 0, false, cooldown - now.Sub(p.lastResync)
 	}
 	p.resyncing = true

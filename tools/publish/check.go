@@ -212,6 +212,35 @@ func emailProblems(entries []entry, message string) []string {
 	return out
 }
 
+// citationShape is a reference to a numbered work item: WI, WIs or work item,
+// then a number of three to five digits after a space, hyphen, colon or #, or
+// after a line break and the next line's comment marker, so a reference
+// wrapped across two lines is found too.
+var citationShape = regexp.MustCompile(`(?i)\b(?:wis?|work[- ]?items?)(?:[-#: \t]+|[ \t]*\r?\n[ \t]*(?://+|#+|\*+)?[ \t]*)[0-9]{3,5}\b`)
+
+// citations names every reference to a numbered work item in the entries'
+// paths and contents, by place and line only. The work items are private, so
+// a published reference is one its reader cannot open.
+func citations(entries []entry) []string {
+	var out []string
+	seen := map[string]bool{}
+	add := func(p string) {
+		if !seen[p] {
+			seen[p] = true
+			out = append(out, p)
+		}
+	}
+	for _, e := range entries {
+		if citationShape.MatchString(e.path) {
+			add(e.path + " (path): work-item citation")
+		}
+		for _, m := range citationShape.FindAllIndex(e.data, -1) {
+			add(fmt.Sprintf("%s:%d: work-item citation", e.path, bytes.Count(e.data[:m[0]], []byte{'\n'})+1))
+		}
+	}
+	return out
+}
+
 // licences are the files the published tree must carry at its root.
 var licences = []string{"LICENSE-MIT", "LICENSE-APACHE", "NOTICE"}
 
@@ -231,13 +260,14 @@ func missingLicences(entries []entry) []string {
 	return out
 }
 
-// results are the three checks' outcomes.
+// results are the four checks' outcomes.
 type results struct {
-	patterns int
-	files    int
-	hits     []hit
-	identity []string
-	missing  []string
+	patterns  int
+	files     int
+	hits      []hit
+	citations []string
+	identity  []string
+	missing   []string
 }
 
 // decide is the go/no-go for writing the public commit and moving the
@@ -252,6 +282,9 @@ func decide(r results) (bool, []string) {
 	}
 	for _, h := range r.hits {
 		why = append(why, "term hit: "+h.String())
+	}
+	for _, c := range r.citations {
+		why = append(why, "citation: "+c)
 	}
 	for _, p := range r.identity {
 		why = append(why, "identity: "+p)
@@ -280,7 +313,7 @@ func judgeWritten(c commitObject, tree, tip string, pats []pattern, allowed map[
 	terms := termCheck(pats, allowed, nil, c.message)
 	ids := append(identityProblems("author", c.author), identityProblems("committer", c.committer)...)
 	ids = append(ids, emailProblems(nil, c.message)...)
-	return results{patterns: terms.patterns, files: before.files, hits: terms.hits, identity: ids, missing: before.missing}, nil
+	return results{patterns: terms.patterns, files: before.files, hits: terms.hits, citations: before.citations, identity: ids, missing: before.missing}, nil
 }
 
 // allowedSummary lists the allowed matches per term, in order.

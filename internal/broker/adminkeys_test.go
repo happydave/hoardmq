@@ -164,7 +164,7 @@ func TestAPIKeyRevocationSkipsADeadNode(t *testing.T) {
 	if code, data := api(t, n1, "DELETE", "/api/v1/apikeys/"+revoked.ID, adminOps, ""); code != 200 {
 		t.Fatalf("revoke with n3 dead: %d %s", code, data)
 	}
-	srv, err := NewWithHooks(doc, nil, fixtureHooks)
+	srv, err := newFixtureServer(t, doc)
 	if err != nil {
 		t.Fatal(err)
 	}

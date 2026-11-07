@@ -154,8 +154,12 @@ type Core struct {
 	// test must detect.
 	sendBeforeSave bool
 	onReady        func(entries, messages int, mustSync bool)
-	sent           atomic.Uint64 // frames handed to the transport
+	sent           atomic.Uint64 // frames queued for the transport
 	unroutable     atomic.Uint64 // messages with no known peer
+	// out is the per-peer send queues (peersend.go); unreachableHook, a test
+	// seam, sees each peer reported unreachable.
+	out             outbound
+	unreachableHook func(id uint64)
 
 	// failed is the error the loop stopped on, nil while it runs or after a
 	// stop or a removal: only a restart starts the loop again.
@@ -297,7 +301,7 @@ func New(o Options) (*Core, error) {
 	}
 	if o.Transport != nil {
 		o.Transport.Handle(transport.Consensus, c.receive)
-		// Snapshots are bulk and travel on the data connection (WI 1340);
+		// Snapshots are bulk and travel on the data connection;
 		// the envelope is the same.
 		o.Transport.Handle(transport.ConsensusSnapshot, c.receive)
 		o.Transport.Handle(transport.SnapshotData, c.onData)
@@ -310,11 +314,10 @@ func New(o Options) (*Core, error) {
 
 // maxAppendBytes bounds one raft append message and maxInflightAppends the
 // number a follower may have outstanding. Appends ride the control
-// connection with the heartbeats and lease renewals (WI 1340), so one must
-// never be bulk; a storm's lease batches are megabytes and are split. One
-// named value, not a configuration setting, by owner decision (2026-09-06):
-// it becomes a setting with this default only if it proves to need
-// frequent change.
+// connection with the heartbeats and lease renewals, so one must never be
+// bulk; a storm's lease batches are megabytes and are split. One named
+// value, not a configuration setting: it becomes a setting with this
+// default only if it proves to need frequent change.
 const (
 	maxAppendBytes     = 256 << 10
 	maxInflightAppends = 256
@@ -451,7 +454,7 @@ func (c *Core) joinLoop() {
 	// exists at all, and without this it fires on a slow answer instead: a
 	// wiped node whose joins went unanswered for the window bootstrapped a
 	// second group and was then admitted to the real one, 1 run in 40 under
-	// a loaded gate (WI 1504). A node that has not joined or bootstrapped
+	// a loaded gate. A node that has not joined or bootstrapped
 	// answers nothing — its loop waits on c.started — so a cold start
 	// produces no answers and this stays false.
 	groupKnown := false

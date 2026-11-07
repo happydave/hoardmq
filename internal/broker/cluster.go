@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/happydave/hoardmq/ext"
 	"github.com/happydave/hoardmq/internal/cluster/consensus"
 	"github.com/happydave/hoardmq/internal/cluster/consensus/etcdraft"
 	"github.com/happydave/hoardmq/internal/cluster/consensus/raftlog"
@@ -182,6 +183,7 @@ func (s *Server) openConsensus() error {
 		ReplicaDir:               filepath.Join(s.config().Node.DataDir, "replica"),
 		Replicas:                 s.config().Cluster.Replicas,
 		AckTimeout:               time.Duration(s.config().Cluster.Replication.AckTimeoutMs) * time.Millisecond,
+		RetainedTombstoneHold:    time.Duration(s.config().Limits.RetainedTombstoneHold) * time.Second,
 		TTL:                      lo.TTL,
 		Clock:                    s.hooks.Clock,
 		SkipEpochCheck:           s.hooks.Defects.SkipEpochCheck,
@@ -260,6 +262,11 @@ func (s *Server) openConsensus() error {
 			repl.BasisChanged()
 		}
 	}
+	// A lease that moves here from another node is a cluster event; the
+	// enqueue never waits, as this runs on consensus apply.
+	lo.Moved = func(ns, id, from, to string) {
+		s.clusterEvent(ext.ClusterEvent{Kind: ext.LeaseMoved, Namespace: ns, ClientID: id, From: from, To: to})
+	}
 	// A served fact applied, or this node's last adoption ended: a lost
 	// owner's routes may be forgettable now, or this node's own fact due.
 	if s.routes != nil {
@@ -267,7 +274,7 @@ func (s *Server) openConsensus() error {
 		lo.AdoptionsIdle = s.routes.WakeServed
 		lo.TakesEnded = s.routes.WakeServed
 	}
-	recs := records.New(0)
+	recs := records.New(s.config().Cluster.Records.MaxPerCollection)
 	o.Machine.Register(records.Kind, recs)
 	svc, err = lease.New(lo)
 	if err != nil {
@@ -301,7 +308,7 @@ func (s *Server) openConsensus() error {
 	s.records.Store(&records.Store{Component: recs, Propose: svc.ProposeCommand})
 	s.replica = replica
 	s.repl = repl
-	s.core = core{m: s.sessions, leases: svc, node: o.Node, timeout: lo.TakeoverTimeout, importGate: s.hooks.ImportGate}
+	s.core = core{m: s.sessions, leases: svc, node: o.Node, timeout: lo.TakeoverTimeout, bind: s.config().Auth.SessionBinding != "off", importGate: s.hooks.ImportGate}
 	return nil
 }
 

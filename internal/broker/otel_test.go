@@ -13,7 +13,7 @@ import (
 	"github.com/happydave/hoardmq/internal/packet"
 )
 
-// TestPublishIsTracedToARemoteDelivery (criterion 1): a publish on n1
+// TestPublishIsTracedToARemoteDelivery: a publish on n1
 // carrying a sampled traceparent, delivered to a subscriber on n2, exports
 // n1's publish and forward spans and n2's delivery, one trace in parent order,
 // that the in-process OTLP endpoint accepts without a violation; the

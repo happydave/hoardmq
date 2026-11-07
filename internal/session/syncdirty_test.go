@@ -17,7 +17,7 @@ import (
 // TestSyncIfDirtyWaitsForTheFsyncCoveringItsRecord: two callers journal, and
 // the second to sync finds its record already inside the first's fsync. It
 // must not report its record durable before that fsync has returned, and
-// that fsync fails here (WI 1812).
+// that fsync fails here.
 func TestSyncIfDirtyWaitsForTheFsyncCoveringItsRecord(t *testing.T) {
 	var hold atomic.Bool
 	entered := make(chan struct{}, 1)

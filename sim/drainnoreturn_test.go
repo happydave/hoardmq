@@ -196,7 +196,7 @@ func runDrainNoReturn(t *testing.T, defects broker.Defects) drainNoReturnOutcome
 // the only copy, its receiver's first pull cannot reach it, and it never comes
 // back. The drain waits for the receiver's confirmation, so the receiver's
 // next pull finds the node still up, and the subscriber gets its session and
-// its five messages (WI 1763).
+// its five messages.
 func TestDrainedHolderNotReturningKeepsTheSession(t *testing.T) {
 	out := runDrainNoReturn(t, broker.Defects{})
 	if !out.present || out.received != 5 || out.servedEmpty != 0 {
@@ -308,7 +308,7 @@ func heldHere(srv *broker.Server, id string) bool {
 // TestDrainCountsSessionsConfirmedBeforeItsWait: the receiver's confirmations
 // arrive, and drop the draining node's copies, before the drain's
 // confirmation wait begins. The drain still counts each of those sessions
-// confirmed (WI 1789).
+// confirmed.
 func TestDrainCountsSessionsConfirmedBeforeItsWait(t *testing.T) {
 	gate := newDrainGate(t)
 	c := New(t, Options{DrainGate: gate.hook})
@@ -376,7 +376,7 @@ func TestDrainCountsSessionsConfirmedBeforeItsWait(t *testing.T) {
 // TestDrainWaitsForASessionThatLeftWithoutAConfirmation: the draining node's
 // copy is gone before the wait begins and no confirmation for it ever comes.
 // The drain waits for it until its confirmation timeout and reports it
-// unconfirmed; it does not complete as though nothing were owed (WI 1789).
+// unconfirmed; it does not complete as though nothing were owed.
 func TestDrainWaitsForASessionThatLeftWithoutAConfirmation(t *testing.T) {
 	const confirmTimeout = 2 * time.Second
 	gate := newDrainGate(t)

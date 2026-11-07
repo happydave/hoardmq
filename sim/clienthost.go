@@ -281,7 +281,7 @@ type ClientVerdict struct {
 	Reasons  []string `json:"reasons"`
 }
 
-// Client-limited thresholds (WI 1480 plan, B5).
+// Client-limited thresholds.
 const (
 	clientBusyLimit   = 0.9
 	clientBusySeconds = 3

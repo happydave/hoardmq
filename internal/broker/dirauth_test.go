@@ -77,7 +77,7 @@ func userConnect(v packet.Version, user, pw string) *packet.Connect {
 	return &packet.Connect{ProtocolLevel: v, ClientID: "c-" + user, CleanStart: true, HasUsername: true, Username: user, HasPassword: true, Password: []byte(pw)}
 }
 
-// AC 1: an LDAP bind authenticates a client at 5.0 and 3.1.1, over StartTLS;
+// An LDAP bind authenticates a client at 5.0 and 3.1.1, over StartTLS;
 // the identity is the client's username; a wrong password is refused and
 // audited with its reason, never the password.
 func TestLDAPAuthenticationOnANode(t *testing.T) {
@@ -129,7 +129,7 @@ func TestLDAPAuthenticationOnANode(t *testing.T) {
 	}
 }
 
-// AC 1: a directory outage follows the configured chain fallback. Under deny
+// A directory outage follows the configured chain fallback. Under deny
 // the chain stops at auth.ldap; under pass the authenticator after it decides.
 func TestLDAPOutageFollowsTheChain(t *testing.T) {
 	for _, policy := range []string{"deny", "pass"} {
@@ -201,7 +201,7 @@ func eventually(t *testing.T, f *fixture, user, pw string, want packet.ReasonCod
 	})
 }
 
-// AC 3: the in-broker database supports add, update and remove through the
+// The in-broker database supports add, update and remove through the
 // admin API, a credential is valid on every node, and every mutation is
 // audited on the node that served it, never with the password or its hash.
 func TestCredentialsThroughTheAdminAPI(t *testing.T) {

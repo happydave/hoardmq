@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// Leader placement for the failover measurement (WI 1493). At 100k, recovery
+// Leader placement for the failover measurement. At 100k, recovery
 // took 34 s or 42–59 s depending on which survivor became raft leader, so a
 // run records the leaders and where the displaced clients go first, and a
 // victim policy can put that storm on the leader, or away from it, without an

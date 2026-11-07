@@ -31,6 +31,9 @@ type Lease struct {
 	ExpiresAt      time.Time         `json:"expiresAt,omitempty"`
 	DisconnectedAt time.Time         `json:"disconnectedAt,omitempty"`
 	Will           *store.WillRecord `json:"will,omitempty"`
+	// Principal is the PrincipalDigest of the CONNECT that last acquired the
+	// lease, 0 for none; a reassign or hand-off keeps it.
+	Principal uint64 `json:"principal,omitempty"`
 }
 
 // NodeInfo is what the table knows about a node: when it last proposed
@@ -107,6 +110,7 @@ type Op struct {
 	Routes         uint64            `json:"routes,omitempty"`         // for served: the node's route mark when it said so
 	Cover          uint64            `json:"cover,omitempty"`          // for served: the grant through which the node's takeovers in transit are held
 	CoverRoutes    uint64            `json:"coverRoutes,omitempty"`    // for served: the node's route mark when it said so of the cover
+	Principal      uint64            `json:"principal,omitempty"`      // for acquire: the CONNECT's PrincipalDigest, recorded on the lease
 }
 
 // Result is one operation's outcome.
@@ -177,7 +181,7 @@ type Table struct {
 	granted map[key]string
 	// hooks run after an operation applies, on the applying node, without
 	// the lock; they must not block.
-	onChange    func(before *Lease, after *Lease)
+	onChange    func(before *Lease, after *Lease, at time.Time)
 	onRecovered func()
 	// onAlive is told each node whose alive record a command carried,
 	// onDeclared each node a command's reassignment declared dead, and
@@ -267,7 +271,7 @@ func (t *Table) Apply(index uint64, payload []byte) (any, error) {
 	}
 	if hook != nil {
 		for _, c := range changes {
-			hook(c.before, c.after)
+			hook(c.before, c.after, c.at)
 		}
 	}
 	if index > t.hooked.Load() {
@@ -314,9 +318,13 @@ func (t *Table) Recovered() {
 	}
 }
 
-// change is a lease before and after an operation; nil before means created,
-// nil after means removed.
-type change struct{ before, after *Lease }
+// change is a lease before and after an operation, nil before meaning created
+// and nil after removed, with the operation's stamp, on the clock of the
+// leader that wrote it.
+type change struct {
+	before, after *Lease
+	at            time.Time
+}
 
 func clone(l *Lease) *Lease {
 	if l == nil {
@@ -365,12 +373,12 @@ func (t *Table) applyOne(op Op) (Result, []change) {
 			if !t.grantTo(k, op.Node) {
 				return Result{Reason: doubleGrant}, nil
 			}
-			n := &Lease{Namespace: op.Namespace, ClientID: op.ClientID, Owner: op.Node, Epoch: t.token(0), Online: true, ExpiryInterval: op.ExpiryInterval, Will: op.Will}
+			n := &Lease{Namespace: op.Namespace, ClientID: op.ClientID, Owner: op.Node, Epoch: t.token(0), Online: true, ExpiryInterval: op.ExpiryInterval, Will: op.Will, Principal: op.Principal}
 			if t.gated != nil {
 				t.gated(t.Level(), n)
 			}
 			t.leases[k] = n
-			return Result{OK: true, Epoch: n.Epoch}, []change{{nil, clone(n)}}
+			return Result{OK: true, Epoch: n.Epoch}, []change{{nil, clone(n), op.Now}}
 		}
 		if op.Epoch != 0 && (l.Owner != op.Node || l.Epoch != op.Epoch) {
 			return Result{Reason: "stale"}, nil
@@ -394,12 +402,12 @@ func (t *Table) applyOne(op Op) (Result, []change) {
 			l.Owner = op.Node
 		}
 		l.Online, l.ExpiresAt, l.DisconnectedAt = true, time.Time{}, time.Time{}
-		l.ExpiryInterval, l.Will = op.ExpiryInterval, op.Will
+		l.ExpiryInterval, l.Will, l.Principal = op.ExpiryInterval, op.Will, op.Principal
 		if t.gated != nil {
 			t.gated(t.Level(), l)
 		}
 		t.leases[k] = l
-		return Result{OK: true, Epoch: l.Epoch, PrevOwner: prev, PrevAlive: prevAlive}, []change{{before, clone(l)}}
+		return Result{OK: true, Epoch: l.Epoch, PrevOwner: prev, PrevAlive: prevAlive}, []change{{before, clone(l), op.Now}}
 	case OpDisconnected:
 		l := t.leases[k]
 		if l == nil || l.Owner != op.Node || l.Epoch != op.Epoch {
@@ -417,7 +425,7 @@ func (t *Table) applyOne(op Op) (Result, []change) {
 			}
 		}
 		t.leases[k] = l
-		return Result{OK: true, Epoch: l.Epoch}, []change{{before, clone(l)}}
+		return Result{OK: true, Epoch: l.Epoch}, []change{{before, clone(l), op.Now}}
 	case OpRelease:
 		l := t.leases[k]
 		if l == nil || l.Owner != op.Node || l.Epoch != op.Epoch {
@@ -425,7 +433,7 @@ func (t *Table) applyOne(op Op) (Result, []change) {
 		}
 		delete(t.leases, k)
 		t.lost(op.Node)
-		return Result{OK: true, Epoch: l.Epoch}, []change{{clone(l), nil}}
+		return Result{OK: true, Epoch: l.Epoch}, []change{{clone(l), nil, op.Now}}
 	case OpWillDone:
 		l := t.leases[k]
 		if l == nil || l.Owner != op.Node || l.Epoch != op.Epoch {
@@ -538,7 +546,7 @@ func (t *Table) applyOne(op Op) (Result, []change) {
 					l.Will = armedWill(l.Will, true)
 				}
 			}
-			changes = append(changes, change{before, clone(l)})
+			changes = append(changes, change{before, clone(l), op.Now})
 		}
 		return Result{OK: true, Moved: len(changes)}, changes
 	}
@@ -852,7 +860,7 @@ func (t *Table) OwnedBy(node string) []Lease {
 
 // CountOwnedBy is how many leases a node owns. It exists beside OwnedBy
 // because the routing plane asks this question about every peer on a timer
-// and OwnedBy sorts the whole table to answer it (WI 1351).
+// and OwnedBy sorts the whole table to answer it.
 func (t *Table) CountOwnedBy(node string) int {
 	t.mu.RLock()
 	defer t.mu.RUnlock()

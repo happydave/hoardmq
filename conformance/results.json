@@ -92,6 +92,7 @@
     },
     "MQTT-3.1.2-5": {
       "tests": [
+        "TestOfflineQoS0Dropped311",
         "TestOfflineQueueingAndSessionPresent311"
       ],
       "pass": true
@@ -99,6 +100,12 @@
     "MQTT-3.1.2-6": {
       "tests": [
         "TestOfflineQueueingAndSessionPresent311"
+      ],
+      "pass": true
+    },
+    "MQTT-3.1.2-7": {
+      "tests": [
+        "TestRetainedMessage311"
       ],
       "pass": true
     },
@@ -373,6 +380,12 @@
       ],
       "pass": true
     },
+    "MQTT-3.8.3-4": {
+      "tests": [
+        "TestRawStatements/3.1.1_SUBSCRIBE_reserved_bits"
+      ],
+      "pass": true
+    },
     "MQTT-3.8.4-1": {
       "tests": [
         "TestBasic311"
@@ -483,7 +496,14 @@
     },
     "MQTT-1.5.5-1": {
       "tests": [
-        "TestRawStatements/Remaining_Length_five_bytes"
+        "TestRawConnectRules/CONNECT_Remaining_Length_in_two_bytes_closes_without_CONNACK",
+        "TestRawStatements/Property_Identifier_in_two_bytes",
+        "TestRawStatements/Property_Length_in_two_bytes",
+        "TestRawStatements/Remaining_Length_0_in_four_bytes",
+        "TestRawStatements/Remaining_Length_0_in_three_bytes",
+        "TestRawStatements/Remaining_Length_0_in_two_bytes",
+        "TestRawStatements/Remaining_Length_4_in_two_bytes",
+        "TestRawStatements/Subscription_Identifier_in_two_bytes"
       ],
       "pass": true
     },
@@ -644,6 +664,7 @@
     "MQTT-3.1.2-5": {
       "tests": [
         "TestOfflineMessageQueueing",
+        "TestOfflineQoS0Dropped",
         "TestRedeliveryOnReconnect",
         "TestSessionExpiry"
       ],

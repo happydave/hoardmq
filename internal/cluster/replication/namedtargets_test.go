@@ -23,7 +23,7 @@ func barrierOver(n *tnode, d time.Duration, keys ...store.Scope) error {
 
 // TestBarrierWaitsOnlyOnTheNamedKeysTargets: with n3 down and still named by
 // the map, a barrier over sessions whose records went only to n2 passes, and
-// one over a session whose records went to n3 fails on n3 (WI 1631).
+// one over a session whose records went to n3 fails on n3.
 func TestBarrierWaitsOnlyOnTheNamedKeysTargets(t *testing.T) {
 	h := newHarness(t, []string{"n1", "n2", "n3"}, 4, 2)
 	m := shardmap.Compute(1, h.order, 2, 4)

@@ -60,10 +60,9 @@ func keptUnwritten(sinks map[string]*counters, node string) float64 {
 	return sinks[node].get("hoardmq_replicas_kept_total", map[string]string{"reason": "owner-unwritten"})
 }
 
-// TestCopyFromAnotherGrantIsKeptUntilTheOwnerWrites is WI 1765 (c): the owner
-// is alive but has not written the session at its grant, so the copy that
-// nothing feeds may still be the one it needs. It stays until the owner
-// confirms, and goes then.
+// TestCopyFromAnotherGrantIsKeptUntilTheOwnerWrites: the owner is alive but
+// has not written the session at its grant, so the copy that nothing feeds may
+// still be the one it needs. It stays until the owner confirms, and goes then.
 func TestCopyFromAnotherGrantIsKeptUntilTheOwnerWrites(t *testing.T) {
 	h, sinks, id, applyV2 := unwrittenFixture(t, nil)
 	applyV2()

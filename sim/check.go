@@ -21,31 +21,30 @@ const (
 	// each node still accepts a QoS 1 publish. Four defects this month left a
 	// node refusing every QoS 1/2 publish indefinitely and the corpus passed
 	// each time, because a refusal never enters the ledger's publications and
-	// so no other property can see it (WI 1502).
+	// so no other property can see it.
 	PropRecovers = "replication-recovers"
 	// PropNoRefusalWithoutFaults: a run that injected no faults refused no
 	// QoS 1 or 2 publish. no-acknowledged-loss is a statement about
 	// acknowledged publishes only, so a build that refuses more of its
 	// traffic satisfies it more easily. With no fault injected there is
 	// nothing for a refusal to blame, so zero is the design's own number
-	// rather than a threshold this property chose (WI 1308).
+	// rather than a threshold this property chose.
 	PropNoRefusalWithoutFaults = "no-refusal-without-faults"
 	// PropCountedOnce: the harness recorded each publish as accepted or as
 	// refused, never as both. This is a property over the harness's own
 	// accounting rather than over the broker, and it is here because the
-	// harness is one of the suspects whenever it reports a defect: the
-	// original reading of WI 1308 was that a refusal was being counted as an
-	// acknowledgement, and had it been true, the suite would have noticed only
-	// on a faulted seed and only as something else: a false acknowledged loss,
-	// or a double delivery through the re-homing exception, which reads that
-	// ledger. Never as an accounting error.
+	// harness is one of the suspects whenever it reports a defect: one defect
+	// was first read as a refusal being counted as an acknowledgement,
+	// and had it been true, the suite would have noticed only on a faulted
+	// seed and only as something else: a false acknowledged loss, or a double
+	// delivery through the re-homing exception, which reads that ledger. Never
+	// as an accounting error.
 	PropCountedOnce = "publish-counted-once"
 	// PropSubscribed: every SUBSCRIBE in the run was granted. A refused
 	// subscribe is the delivery side's blind spot — a subscriber that was
 	// never subscribed produces no publication and no missing delivery, so
 	// no-acknowledged-loss and no-double-delivery cannot fail for it. The
-	// harness counts the refusals since WI 1500; this is what reads them
-	// (WI 1509).
+	// harness counts the refusals; this is what reads them.
 	PropSubscribed = "subscribe-granted"
 	// PropNoServedEmpty: no node served a fresh session to a client whose
 	// lease showed it had one (hoardmq_sessions_rebuilt_empty_total). The
@@ -100,8 +99,7 @@ type Evidence struct {
 	ResendLag    time.Duration
 	ResendWindow time.Duration
 	// Routes is every node's view of the workload's topics over the run, so
-	// an acknowledged loss carries the routing state that produced it
-	// (WI 1354).
+	// an acknowledged loss carries the routing state that produced it.
 	Routes []RouteSample
 	// Liveness is one probe per running node, taken after every fault has
 	// been healed and the cluster has settled: can this node still accept a
@@ -282,7 +280,7 @@ func Check(e Evidence) []Violation {
 	// without DUP is therefore a violation of exactly-once, always. That holds
 	// within an exchange the broker accepted: an error PUBREC ends the exchange
 	// after the message may already have been routed, so a publisher that sends
-	// it again is publishing anew, and scenarios must not do so (WI 1486).
+	// it again is publishing anew, and scenarios must not do so.
 	resend := replicaResends(l, e.ResendLag, e.ResendWindow)
 	nonDup := map[msgKey]int{}
 	dups := map[msgKey]int{}
@@ -345,7 +343,7 @@ func Check(e Evidence) []Violation {
 	// failures and in nothing this iterates — so what makes the property
 	// non-vacuous is that the run accepted some, which TestCorpus asserts
 	// over the corpus and no-refusal-without-faults asserts for a run with no
-	// fault to blame (WI 1308).
+	// fault to blame.
 	delivered := map[msgKey]bool{}
 	for _, d := range l.Deliveries {
 		delivered[msgKey{d.Client, d.Publisher, d.Topic, d.Seq}] = true
@@ -513,13 +511,13 @@ func Stats(e Evidence) map[string]int {
 	}
 	// Refusals and the clients they landed on, the same pair the failover
 	// artifact carries: one client refused repeatedly and many clients refused
-	// once are different findings under one total (WI 1509).
+	// once are different findings under one total.
 	if total, clients := refusalsByClient(subscribeRefusals(l.Events)); total > 0 {
 		st["subRefusals"], st["subRefusedClients"] = total, clients
 	}
 	// Which node refused, not just how many refusals there were: one node
 	// refusing everything and every node refusing a little are different
-	// findings under the same total (WI 1502).
+	// findings under the same total.
 	for _, f := range l.Failures {
 		st["publishErrors."+orUnknown(f.Node)]++
 	}

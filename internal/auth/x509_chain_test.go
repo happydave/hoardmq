@@ -217,6 +217,38 @@ func TestRevocationChecksTheChain(t *testing.T) {
 	}
 }
 
+// The leaf's OCSP answer is capped at OCSPMaxLifetime's default, ten days;
+// an intermediate's at a year, however far off its nextUpdate.
+func TestOCSPLifetimePerLevel(t *testing.T) {
+	ctx := context.Background()
+	ocspOnly := func(rootR *testcert.Responder) testcert.Options {
+		return testcert.Options{OCSPServer: []string{rootR.URL + "/ocsp"}}
+	}
+	signedAgo := func(r *testcert.Responder, age time.Duration) {
+		r.Lock()
+		r.Now, r.Lifetime = func() time.Time { return time.Now().Add(-age) }, 2*365*24*time.Hour+age
+		r.Unlock()
+	}
+	day := 24 * time.Hour
+	for _, c := range []struct {
+		name              string
+		leafAge, interAge time.Duration
+		want              Decision
+	}{
+		{"both twenty days old", 20 * day, 20 * day, Deny},
+		{"the leaf's fresh, the intermediate's twenty days old", 0, 20 * day, Allow},
+		{"the leaf's fresh, the intermediate's 367 days old", 0, 367 * day, Deny},
+	} {
+		pk := newChainPKI(t, ocspOnly)
+		signedAgo(pk.subR, c.leafAge)
+		signedAgo(pk.rootR, c.interAge)
+		got := newRevocation(true, false, false).Authenticate(ctx, pk.request())
+		if got.Decision != c.want || (c.want == Deny && got.Reason != "x509: revocation unknown") {
+			t.Errorf("%s: %+v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
 // A CRL accepted for one issuer never answers for another's certificate,
 // even at the same URL.
 func TestCRLCacheIsPerIssuer(t *testing.T) {

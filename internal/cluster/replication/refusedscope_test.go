@@ -13,10 +13,10 @@ import (
 	"github.com/happydave/hoardmq/internal/store"
 )
 
-// TestRefusalIsScopedToItsSession is WI 1510's central pair. A peer's refusal
-// must fail a barrier that names the refused session — the escape, which a
-// later accepted frame used to lift — and must not fail one that names only
-// other sessions, which is the wedge this work item removes.
+// TestRefusalIsScopedToItsSession: a peer's refusal must fail a barrier that
+// names the refused session — the escape, which a later accepted frame used
+// to lift — and must not fail one that names only other sessions, which is
+// the wedge scoping the refusal removes.
 func TestRefusalIsScopedToItsSession(t *testing.T) {
 	h := newHarness(t, []string{"n1", "n2"}, 2, 2)
 	h.applyMap(shardmap.Compute(1, h.order, 2, 2))
@@ -39,7 +39,7 @@ func TestRefusalIsScopedToItsSession(t *testing.T) {
 
 	// The wedge, before anything else is pushed. With the refusal still the
 	// last frame on the stream, a barrier for an unrelated session used to
-	// fail — that is the defect WI 1506 found, and it is only visible here,
+	// fail — that is the defect, and it is only visible here,
 	// because any later push escapes the stream-wide mark and hides it.
 	t.Run("an unrelated session is not wedged by a refusal on the last frame", func(t *testing.T) {
 		unrelated := store.Scope{Namespace: "default", ClientID: clientIn(2, 0, "z")}
@@ -48,8 +48,8 @@ func TestRefusalIsScopedToItsSession(t *testing.T) {
 		}
 	})
 
-	// A later accepted frame for an unrelated session. Before this work item
-	// it lifted the refusal for every barrier; it must not now.
+	// A later accepted frame for an unrelated session. It used to lift the
+	// refusal for every barrier; it must not now.
 	other := clientIn(2, 0, "y")
 	otherScope := store.Scope{Namespace: "default", ClientID: other}
 	if err := n1.own.SessionUpsert(store.SessionMeta{Namespace: "default", ClientID: other, Epoch: 1}); err != nil {

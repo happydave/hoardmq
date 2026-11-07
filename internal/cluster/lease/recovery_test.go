@@ -43,7 +43,7 @@ func recoveredWithAStaleSession(t *testing.T) (n1, n2 *tnode, l Lease) {
 // service starts timers for the offline leases it owns and seals a local
 // session whose lease belongs to another node, at that lease's token. The
 // sealed copy answers the owner's pull: a restarted node's journal can hold the
-// only copy of a session its new owner has not fetched yet (WI 1742).
+// only copy of a session its new owner has not fetched yet.
 func TestRecoveredReconcilesTimersAndStaleSessions(t *testing.T) {
 	n1, n2, l := recoveredWithAStaleSession(t)
 	if n2.sessions.has("default", "x") {

@@ -42,8 +42,9 @@ type tnode struct {
 	core  *Core
 	sync  func(*os.File) error // WAL sync seam, replaceable per test
 	// dropAccepts swallows this node's *accepting* join answers, leaving its
-	// redirects alone. It is how a test holds a joiner in the state WI 1504
-	// was filed for: a group exists and says so, and the admission is late.
+	// redirects alone. It is how a test holds a joiner in the state that let a
+	// wiped node bootstrap a second group: a group exists and says so, and the
+	// admission is late.
 	// dropJoinAnswers swallows every join answer, which is how a test makes
 	// one peer the only one that answers at all.
 	dropAccepts     atomic.Bool
@@ -76,6 +77,11 @@ type tcluster struct {
 	// maxFrame and maxVersion, when set, configure the transports.
 	maxFrame   int
 	maxVersion map[string]uint8
+	// heartbeat, misses and queueDepth, when set, replace the transports'
+	// test liveness (50 ms, 4) and their default queue depth.
+	heartbeat  time.Duration
+	misses     int
+	queueDepth int
 }
 
 func newTCluster(t *testing.T, tweak func(o *Options)) *tcluster {
@@ -92,9 +98,13 @@ func (c *tcluster) addTransport(name string, peers []string) *tnode {
 	for _, p := range peers {
 		ps = append(ps, config.Peer{Name: p, Address: "127.0.0.1:1"})
 	}
+	heartbeat, misses := 50*time.Millisecond, 4
+	if c.heartbeat > 0 {
+		heartbeat, misses = c.heartbeat, c.misses
+	}
 	tr, err := transport.New(transport.Options{Node: name, ClusterID: "t", Listen: "127.0.0.1:0", Peers: ps, Auth: transport.Auth{Mode: "secret", Secret: []byte(secret)},
-		Heartbeat: 50 * time.Millisecond, HeartbeatMisses: 4, HandshakeTimeout: 2 * time.Second, Logger: quiet,
-		MaxFrame: c.maxFrame, MaxVersion: c.maxVersion[name]})
+		Heartbeat: heartbeat, HeartbeatMisses: misses, HandshakeTimeout: 2 * time.Second, Logger: quiet,
+		MaxFrame: c.maxFrame, MaxVersion: c.maxVersion[name], QueueDepth: c.queueDepth})
 	if err != nil {
 		c.t.Fatal(err)
 	}
@@ -300,7 +310,7 @@ func setConfig(t *testing.T, n *tnode, key, value string) {
 // proposeOnLeader proposes through the node every node currently agrees
 // leads, and proposes again through the new leader when leadership moved
 // under it. At these test timings an election follows any heartbeat gap over
-// 100-200 ms, which a loaded host produces (WI 1489); a refusal naming
+// 100-200 ms, which a loaded host produces; a refusal naming
 // another leader is that and nothing else, so it alone is retried.
 func proposeOnLeader(t *testing.T, c *tcluster, kind consensus.Kind, payload []byte) any {
 	t.Helper()
@@ -396,7 +406,7 @@ func TestClustersElectReplicateAndSnapshot(t *testing.T) {
 
 // TestProposalRetriesThroughTheNewLeader: a proposal that reaches a node which
 // is no longer the leader is refused with the leader's name, and proposed
-// again through the leader it names (WI 1489). The first lookup returns a
+// again through the leader it names. The first lookup returns a
 // follower, which is the state after leadership moves between finding the
 // leader and proposing.
 func TestProposalRetriesThroughTheNewLeader(t *testing.T) {
@@ -432,7 +442,7 @@ func TestProposalRetriesThroughTheNewLeader(t *testing.T) {
 }
 
 // TestProposalsSurviveALeaderChange: proposals made through proposeOnLeader
-// all commit when the leader stops midway (WI 1489).
+// all commit when the leader stops midway.
 func TestProposalsSurviveALeaderChange(t *testing.T) {
 	names := []string{"n1", "n2", "n3"}
 	c := full(t, names, nil)

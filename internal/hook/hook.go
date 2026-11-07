@@ -37,9 +37,12 @@ var OK = ext.OK
 type Interceptor interface {
 	Connected(ctx context.Context, info Info)
 	Disconnected(ctx context.Context, info Info, reason packet.ReasonCode, graceful bool)
-	Inbound(ctx context.Context, info Info, p packet.Packet) Outcome
+	// Inbound also returns the identifier of the module whose outcome ended
+	// the chain, or "" when none did.
+	Inbound(ctx context.Context, info Info, p packet.Packet) (Outcome, string)
 	Outbound(ctx context.Context, info Info, p packet.Packet) Outcome
 	Subscribe(ctx context.Context, info Info, sub *packet.Subscription) Outcome
+	Unsubscribe(ctx context.Context, info Info, filter string) Outcome
 }
 
 // DeliveryEvent is the extension API's delivery event.

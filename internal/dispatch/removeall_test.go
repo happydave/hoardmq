@@ -11,9 +11,9 @@ import (
 	"github.com/happydave/hoardmq/internal/topic"
 )
 
-// removeByWalk is RemoveAll as it was before WI 1484: search the namespace's
-// trie for every filter the session holds, then remove each. It is the
-// reference the filter-list removal is compared against.
+// removeByWalk is the earlier RemoveAll: search the namespace's trie for
+// every filter the session holds, then remove each. It is the reference the
+// filter-list removal is compared against.
 func removeByWalk(r *Router, s *session.Session) {
 	r.mu.Lock()
 	root := r.root(s.Namespace(), false)
@@ -78,10 +78,10 @@ func describe(r *Router) []string {
 	return out
 }
 
-// TestRemoveAllMatchesTheWalk is WI 1484: removing a session by the filters
-// it holds leaves the trie, and tells the observer, exactly what the walk
-// did, across direct filters with wildcards and empty levels and shared
-// groups with sticky members.
+// TestRemoveAllMatchesTheWalk: removing a session by the filters it holds
+// leaves the trie, and tells the observer, exactly what the walk did, across
+// direct filters with wildcards and empty levels and shared groups with sticky
+// members.
 func TestRemoveAllMatchesTheWalk(t *testing.T) {
 	filters := []string{"a", "a/b", "a/+", "+/b", "a/#", "#", "/", "/x", "a//b", "c/d/e", "c/+/e", "$SYS/x"}
 	for seed := int64(1); seed <= 6; seed++ {

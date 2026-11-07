@@ -11,8 +11,8 @@ import (
 )
 
 // failingTransport names a leader that cannot be reached: every send fails.
-// It is the difference this work item exists to make visible — a healthy
-// leader this node cannot talk to is not "no leader".
+// It is the difference the unreachable-leader count exists to make visible —
+// a healthy leader this node cannot talk to is not "no leader".
 type failingTransport struct{ err error }
 
 func (t failingTransport) Send(context.Context, string, transport.Class, []byte) error { return t.err }

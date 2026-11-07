@@ -281,7 +281,7 @@ func TestOwnCopiesKeptAsAFollowersAfterAHandOver(t *testing.T) {
 		{"no longer a holder", false, false, "new", "", ""},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			h, _ := withCountersAnd(t, []string{"n1", "n2", "n3"}, 2, 2, quickAck)
+			h, sinks := withCountersAnd(t, []string{"n1", "n2", "n3"}, 2, 2, quickAck)
 			allAlive(h)
 			follower := "n2"
 			if !c.follows {
@@ -295,9 +295,11 @@ func TestOwnCopiesKeptAsAFollowersAfterAHandOver(t *testing.T) {
 			waitMovesDone(h, h.order...)
 			r := h.nodes["n2"].rep
 			a, b := topicIn2(2, 0, 0), topicIn2(2, 0, 1)
-			h.nodes["n2"].sessions.InjectRetained(&message.Message{Namespace: "default", Topic: a, Payload: []byte("oldA"), Retain: true})
-			h.nodes["n2"].sessions.InjectRetained(&message.Message{Namespace: "default", Topic: b, Payload: []byte("oldB"), Retain: true})
-			if _, err := r.follower.apply(store.RetainRecord(&message.Message{Namespace: "default", Topic: a, Payload: []byte("new"), Retain: true})); err != nil {
+			// n2's own copies are from its leadership at v1; the replica copy
+			// of a is the new leader's, stamped at a later map.
+			h.nodes["n2"].sessions.InjectRetainedAt(&message.Message{Namespace: "default", Topic: a, Payload: []byte("oldA"), Retain: true}, store.Version{E: 1, N: 5}, false)
+			h.nodes["n2"].sessions.InjectRetainedAt(&message.Message{Namespace: "default", Topic: b, Payload: []byte("oldB"), Retain: true}, store.Version{E: 1, N: 6}, false)
+			if _, err := r.follower.apply(store.RetainRecordVersioned(&message.Message{Namespace: "default", Topic: a, Payload: []byte("new"), Retain: true}, store.Version{E: 2, N: 1})); err != nil {
 				t.Fatal(err)
 			}
 			// The hand-over is acknowledged at map version 2: n1's release at
@@ -318,6 +320,13 @@ func TestOwnCopiesKeptAsAFollowersAfterAHandOver(t *testing.T) {
 			}
 			if got := ownHolds(h, "n2", b); got != c.ownB {
 				t.Errorf("n2's own copy of %s is %q, want %q", b, got, c.ownB)
+			}
+			if c.follows && !c.released {
+				for outcome, want := range map[string]float64{"newer": 1, "older": 1} {
+					if got := sinks["n2"].get("hoardmq_retained_merges_total", map[string]string{"path": "own-to-replica", "outcome": outcome}); got != want {
+						t.Errorf("own-to-replica merges %s: %v, want %v (b installed; a below the replica's newer copy)", outcome, got, want)
+					}
+				}
 			}
 		})
 	}

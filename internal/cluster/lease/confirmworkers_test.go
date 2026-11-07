@@ -12,7 +12,7 @@ import (
 // pass that drops a sealed copy waits for the journal's group fsync, so the
 // passes in flight at once are what one fsync releases; with four, a node
 // loss's burst of confirmations queued for up to 1.6 s at 10,000 clients
-// (WI 1834) and the moves they end refused meanwhile.
+// and the moves they end refused meanwhile.
 func TestConfirmedQueueActsOnItsWorkersWorthAtOnce(t *testing.T) {
 	var ended atomic.Int64
 	fixtureOptions = func(o *Options) {

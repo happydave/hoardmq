@@ -69,7 +69,7 @@ func markSeconds(seen bool, at time.Duration) float64 {
 // its report only there: the copy in results/ was untracked, so provenance
 // still read the tree as clean, while the measurement checkout collected stray
 // reports and a run on a working tree could overwrite a published report of
-// the same date (WI 1483). A recorded run with no artifact directory keeps
+// the same date. A recorded run with no artifact directory keeps
 // writing results/failover-<date>.md, which is then its only copy.
 func treeReportPath(record bool, artifactDir string, now time.Time) string {
 	if !record || artifactDir != "" {
@@ -109,7 +109,7 @@ type settleWait struct {
 // before it starts. Each mirrors a starting condition the measurement itself
 // refuses on, so the driver waits for exactly what will be tested.
 //
-// The conntrack condition existed only on the refusing side until WI 1496:
+// The conntrack condition existed only on the refusing side in earlier builds:
 // two 100,000-client remote runs were refused for a table that clears itself
 // in about two minutes, which a batch script then had to wait out by hand.
 func settleWaits(clients int, remote bool) []settleWait {

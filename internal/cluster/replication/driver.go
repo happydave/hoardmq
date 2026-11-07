@@ -297,7 +297,7 @@ func (r *Replicator) writeReconciled(version uint64) {
 func (r *Replicator) rebalance(old, cur shardmap.Map) {
 	me := r.o.Node
 	listed := r.o.Sessions.Persistent()
-	retained := r.o.Local.AllRetained()
+	retainedEntries := r.localEntries()
 	type movedFrom struct {
 		ns, id string
 		lost   []string
@@ -394,7 +394,7 @@ func (r *Replicator) rebalance(old, cur shardmap.Map) {
 				// replicas-1 of a shard's holders, so holding it is not
 				// enough: a copy this node is not a target for receives
 				// nothing, and a takeover that read it would hand the client
-				// a queue from before the map moved (WI 1569).
+				// a queue from before the map moved.
 				scope := store.Scope{Namespace: ss.Namespace, ClientID: ss.ClientID}
 				if !ownerKnown || owner == me || contains(cur.Targets(shard, owner), me) {
 					r.unwritten.forget(scope)
@@ -413,8 +413,9 @@ func (r *Replicator) rebalance(old, cur shardmap.Map) {
 			// new holders itself and lets go only once they acknowledge —
 			// the owner's own push may be lost, and the owner may die before
 			// it writes again.
-			acked := r.handOver(ss, cur.Holders(shard))
-			switch shouldDropCopy(true, r.ownerAlive(ss.Namespace, ss.ClientID), acked) {
+			acked, sent := r.handOver(ss, cur.Holders(shard))
+			unheld := ownerMayLackCopy(sent, ownerKnown, owner, me, ss.Epoch, token)
+			switch shouldDropCopy(true, r.ownerAlive(ss.Namespace, ss.ClientID), acked, unheld) {
 			case keepOwnerNotAlive:
 				// If the owner is gone, this may be the last copy of its
 				// queue and subscriptions, and the node taking the lease
@@ -430,6 +431,14 @@ func (r *Replicator) rebalance(old, cur shardmap.Map) {
 					// owner's word or a target seen holding the session.
 					r.judgeUnfed(store.Scope{Namespace: ss.Namespace, ClientID: ss.ClientID}, ss.Epoch, owner, token, cur.Targets(shard, owner))
 				}
+				continue
+			case keepOwnerOnlyHolder:
+				// Nobody took the copy, and the owner, the shard's only other
+				// holder, holds the lease at a later grant than the copy: it
+				// may be an adopter that has not fetched the session, and this
+				// copy the only one.
+				r.count("hoardmq_replicas_kept_total", map[string]string{"reason": "owner-only-holder"}, 1)
+				r.judgeUnfed(store.Scope{Namespace: ss.Namespace, ClientID: ss.ClientID}, ss.Epoch, owner, token, cur.Targets(shard, owner))
 				continue
 			}
 			r.log.Debug("replica dropped after hand-over", "client", ss.ClientID, "copyEpoch", ss.Epoch, "entries", len(ss.Entries), "holders", cur.Holders(shard), "map", cur.Version)
@@ -450,7 +459,7 @@ func (r *Replicator) rebalance(old, cur shardmap.Map) {
 		r.log.Warn("shard map behind what this node last acted on; replicas kept", "from", old.Version, "to", cur.Version, "persisted", r.persisted, "floorKnown", r.persistedKnown, "sessions", kept)
 	}
 	for shard := 0; shard < r.o.Map.Count(); shard++ {
-		r.rebalanceRetained(old, cur, shard, retained, rep.Retained, mayDrop)
+		r.rebalanceRetained(old, cur, shard, retainedEntries, replicaEntries(rep), mayDrop)
 	}
 	r.beginRetainedMoves(old, cur)
 	if err := r.follower.sync(); err != nil {
@@ -507,13 +516,15 @@ const (
 	keepMapBehind
 	keepOwnerNotAlive
 	keepHandoverUnacknowledged
+	keepOwnerOnlyHolder
 )
 
 // shouldDropCopy is the decision to delete a session replica, taken as a
-// function of the three facts it needs: the map has moved past what this
-// node acted on, the session's owner is alive to write new copies, and the
-// new holders acknowledged the copy this node handed them.
-func shouldDropCopy(mapPastFloor, ownerAlive, handoverAcknowledged bool) dropVerdict {
+// function of the four facts it needs: the map has moved past what this node
+// acted on, the session's owner is alive to write new copies, the new holders
+// acknowledged the copy this node handed them, and the owner may lack the
+// session with nobody else given the copy (ownerMayLackCopy).
+func shouldDropCopy(mapPastFloor, ownerAlive, handoverAcknowledged, ownerMayLack bool) dropVerdict {
 	switch {
 	case !mapPastFloor:
 		return keepMapBehind
@@ -521,22 +532,36 @@ func shouldDropCopy(mapPastFloor, ownerAlive, handoverAcknowledged bool) dropVer
 		return keepOwnerNotAlive
 	case !handoverAcknowledged:
 		return keepHandoverUnacknowledged
+	case ownerMayLack:
+		return keepOwnerOnlyHolder
 	}
 	return dropCopy
 }
 
+// ownerMayLackCopy reports whether a copy that went to no holder may be one
+// its lease's owner does not hold: the owner holds the session itself only
+// at its own grant, so a copy from an earlier grant may be what an adopting
+// owner has yet to fetch. A copy at the owner's grant, or a later one, was
+// written by the owner of that grant. It is pure.
+func ownerMayLackCopy(sent, ownerKnown bool, owner, self string, copyEpoch, token uint64) bool {
+	return !sent && ownerKnown && owner != self && copyEpoch < token
+}
+
 // handOver pushes this node's copy of a session to each of the shard's
-// holders that is not this node, and reports whether every one of them
-// acknowledged it within the acknowledgement timeout. A holder that is down,
-// refuses it, or does not answer in time is not holding it, and the copy
-// stays here. With DeleteWithoutHandoverAck the push is made and the answer
-// not waited for: the defect this exists to remove.
-func (r *Replicator) handOver(ss *store.SessionState, holders []string) bool {
+// holders that is not this node or the lease's owner, and reports whether
+// every one of them acknowledged it within the acknowledgement timeout, and
+// whether there was one to send it to. A holder that is down, refuses it, or
+// does not answer in time is not holding it, and the copy stays here. With
+// DeleteWithoutHandoverAck the push is made and the answer not waited for:
+// the defect this exists to remove.
+func (r *Replicator) handOver(ss *store.SessionState, holders []string) (acked, sent bool) {
 	if r.o.Transport == nil {
-		return true
+		// No other node can hold a copy.
+		return true, true
 	}
-	// The owner holds the session itself and takes no copy of it; the
-	// other holders do.
+	// The owner takes no copy of a session it owns; the other holders do.
+	// An owner that may not hold the session yet is the caller's case
+	// (ownerMayLackCopy).
 	owner := ""
 	if l, ok := r.o.Leases.Lookup(ss.Namespace, ss.ClientID); ok {
 		owner = l.Owner
@@ -548,7 +573,7 @@ func (r *Replicator) handOver(ss *store.SessionState, holders []string) bool {
 		}
 	}
 	if len(targets) == 0 {
-		return true
+		return true, false
 	}
 	for _, t := range targets {
 		r.log.Debug("replica handed over", "client", ss.ClientID, "to", t, "copyEpoch", ss.Epoch, "entries", len(ss.Entries), "owner", owner)
@@ -559,7 +584,7 @@ func (r *Replicator) handOver(ss *store.SessionState, holders []string) bool {
 		}
 	}
 	if r.o.DeleteWithoutHandoverAck {
-		return true
+		return true, true
 	}
 	ctx, cancel := context.WithTimeout(r.ctx, r.o.AckTimeout)
 	defer cancel()
@@ -567,10 +592,10 @@ func (r *Replicator) handOver(ss *store.SessionState, holders []string) bool {
 	for _, t := range targets {
 		if err := r.outboundFor(t).wait(ctx, r.up, keys); err != nil {
 			r.log.Warn("session hand-over not acknowledged; copy kept", "client", ss.ClientID, "to", t, "err", err)
-			return false
+			return false, true
 		}
 	}
-	return true
+	return true, true
 }
 
 // mayDrop reports whether copies this node no longer holds under cur may be
@@ -608,7 +633,7 @@ func ownerAliveByLog(live, inBasis bool) bool { return live && inBasis }
 // retainedHandOver pushes retained messages to the new leader of their shard
 // and reports whether it acknowledged them. A leader that already held the
 // shard has them and is not sent them; one that is down cannot take them.
-func (r *Replicator) retainedHandOver(leader string, msgs []*message.Message, version uint64, leaderHeld bool) bool {
+func (r *Replicator) retainedHandOver(leader string, msgs []store.RetainedEntry, version uint64, leaderHeld bool) bool {
 	if r.o.Transport == nil || leaderHeld {
 		return true
 	}
@@ -618,18 +643,21 @@ func (r *Replicator) retainedHandOver(leader string, msgs []*message.Message, ve
 // handOverRetained sends retained copies to a shard's leader, marked as a
 // hand-over, and reports whether it acknowledged them: installed, or held
 // already, which the leader keeps over the hand-over's copy.
-func (r *Replicator) handOverRetained(leader string, msgs []*message.Message, version uint64) bool {
+func (r *Replicator) handOverRetained(leader string, msgs []store.RetainedEntry, version uint64) bool {
 	if r.o.Transport == nil {
 		return true
 	}
 	if !r.up(leader) {
 		return false
 	}
+	if r.o.BeforeRetainedHandOver != nil {
+		r.o.BeforeRetainedHandOver(leader)
+	}
 	marked := !r.o.PreRetainedMoves
 	keys := make([]store.Scope, 0, len(msgs))
-	for _, m := range msgs {
-		r.outboundFor(leader).push(frame{Kind: kindRetainedWrite, Namespace: m.Namespace, Topic: m.Topic, Epoch: version, Msg: m, Handover: marked})
-		keys = append(keys, store.Scope{Namespace: m.Namespace, Topic: m.Topic})
+	for _, e := range msgs {
+		r.outboundFor(leader).push(frame{Kind: kindRetainedWrite, Namespace: e.Msg.Namespace, Topic: e.Msg.Topic, Epoch: version, Msg: e.Msg, RV: rvOf(e.RV), Handover: marked})
+		keys = append(keys, store.Scope{Namespace: e.Msg.Namespace, Topic: e.Msg.Topic})
 	}
 	if r.o.DeleteWithoutHandoverAck {
 		return true
@@ -643,17 +671,7 @@ func (r *Replicator) handOverRetained(leader string, msgs []*message.Message, ve
 	return true
 }
 
-func inShard(r *Replicator, msgs []*message.Message, shard int) []*message.Message {
-	var out []*message.Message
-	for _, m := range msgs {
-		if r.o.Map.ShardOf(m.Namespace, m.Topic) == shard {
-			out = append(out, m)
-		}
-	}
-	return out
-}
-
-func (r *Replicator) rebalanceRetained(old, cur shardmap.Map, shard int, local, replica []*message.Message, mayDrop bool) {
+func (r *Replicator) rebalanceRetained(old, cur shardmap.Map, shard int, local, replica []store.RetainedEntry, mayDrop bool) {
 	me := r.o.Node
 	newLeader := cur.Shards[shard].Leader
 	oldLeader := ""
@@ -662,8 +680,8 @@ func (r *Replicator) rebalanceRetained(old, cur shardmap.Map, shard int, local, 
 		oldLeader = old.Shards[shard].Leader
 		wasHolder = old.Holds(shard, me)
 	}
-	mine := inShard(r, local, shard)
-	held := inShard(r, replica, shard)
+	mine := entriesInShard(r, local, shard)
+	held := entriesInShard(r, replica, shard)
 	// A node that stops holding the shard keeps its copies until the shard's
 	// leader under cur releases them: until the new holders hold the shard,
 	// they may be the only copies but the leader's.
@@ -672,15 +690,32 @@ func (r *Replicator) rebalanceRetained(old, cur shardmap.Map, shard int, local, 
 	handedOver := true
 	switch {
 	case newLeader == me && oldLeader != me:
-		// Promote: whatever this node replicated becomes the local store;
-		// the tap replicates it to the new followers.
-		for _, m := range held {
-			_ = r.o.Sessions.InjectRetained(m)
+		// Promote: each replica copy is merged into the local store by
+		// version, so a copy the store already outranks is not installed;
+		// the tap replicates what is installed to the new followers.
+		// A copy whose install was not durable stays a replica copy until a
+		// retry's install is (retryRetainedFailures): a power cut before the
+		// journal's repair would leave this node, the shard's leader, without
+		// it.
+		installed := held[:0:0]
+		for _, e := range held {
+			installedHere, durable, heldRV := r.o.Sessions.InjectRetainedAt(e.Msg, e.RV, false)
+			r.countMerge("promotion", e.Msg.Topic, installedHere, heldRV, e.RV)
+			if durable || r.o.DropFailedPromotion {
+				installed = append(installed, e)
+				continue
+			}
+			r.notePromotionFailed(shard, e.Msg)
+		}
+		if n := len(held) - len(installed); n > 0 {
+			r.count("hoardmq_replicas_kept_total", map[string]string{"reason": "install-failed"}, float64(n))
+			r.log.Warn("promoted retained copies not durable in this node's journal; the replica copies are kept and the install made again", "shard", shard, "map", cur.Version, "topics", n)
 		}
 		if len(held) > 0 {
-			r.count("hoardmq_retained_promotions_total", nil, float64(len(held)))
-			r.log.Debug("replica retained copies promoted", "shard", shard, "map", cur.Version, "topics", len(held))
+			r.count("hoardmq_retained_promotions_total", nil, float64(len(installed)))
+			r.log.Debug("replica retained copies promoted", "shard", shard, "map", cur.Version, "topics", len(installed))
 		}
+		held = installed
 	case newLeader != me && oldLeader == me:
 		// Hand over to the new leader, then let go of the local copies —
 		// once the new leader acknowledged them; otherwise they stay here,
@@ -736,9 +771,9 @@ func (r *Replicator) rebalanceRetained(old, cur shardmap.Map, shard int, local, 
 			if old.Version > 0 && old.Holds(shard, f) && oldLeader == me {
 				continue
 			}
-			for _, m := range mine {
-				rec := store.RetainRecord(m)
-				r.outboundFor(f).push(frame{Kind: kindAppend, Type: rec.Type, Namespace: m.Namespace, Topic: m.Topic, Epoch: cur.Version, Payload: rec.Payload})
+			for _, e := range mine {
+				rec := entryRecord(e)
+				r.outboundFor(f).push(frame{Kind: kindAppend, Type: rec.Type, Namespace: e.Msg.Namespace, Topic: e.Msg.Topic, Epoch: cur.Version, Payload: rec.Payload})
 			}
 		}
 	}
@@ -767,8 +802,8 @@ func (r *Replicator) rebalanceRetained(old, cur shardmap.Map, shard int, local, 
 				return
 			}
 		}
-		for _, m := range held {
-			if _, err := r.follower.apply(store.RetainRecord(&message.Message{Namespace: m.Namespace, Topic: m.Topic})); err != nil {
+		for _, e := range held {
+			if _, err := r.follower.apply(store.RetainRecord(&message.Message{Namespace: e.Msg.Namespace, Topic: e.Msg.Topic})); err != nil {
 				r.log.Error("replica retained drop failed", "err", err)
 			}
 		}

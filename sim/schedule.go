@@ -54,8 +54,8 @@ func (e Step) String() string {
 
 // scheduleSummary names what a schedule does, in the order the faults start,
 // so a seed's description is read from the generator rather than written
-// beside it. Two work items took their titles from a label that no longer
-// matched its seed (WIs 1298, 1534).
+// beside it. Two defects took their titles from a label that no longer
+// matched its seed.
 func scheduleSummary(steps []Step) string {
 	if len(steps) == 0 {
 		return "no faults"

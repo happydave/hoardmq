@@ -17,7 +17,7 @@ import (
 
 // The client driver runs a failover measurement's clients in their own
 // process, usually on another host, so the brokers do not share a scheduler,
-// CPU or socket tables with them (WI 1480). The test starts it over ssh and
+// CPU or socket tables with them. The test starts it over ssh and
 // talks to it through its stdin and stdout, one JSON object per line:
 //
 //	test → driver   hello (clients, node addresses, sources)
@@ -100,7 +100,7 @@ type driverMsg struct {
 	PerNode   map[string]int `json:"per_node,omitempty"`
 
 	Online int `json:"online,omitempty"`
-	// Recovered is the count under the definition of WI 1618: online with
+	// Recovered is the count under the measurement's definition: online with
 	// every held filter granted on the connection the client is on now.
 	Recovered int   `json:"recovered,omitempty"`
 	Refusals  int64 `json:"refusals,omitempty"`
@@ -434,7 +434,7 @@ func runDriver(in io.Reader, out, errOut io.Writer, o driverOptions) int {
 	first, _ := pop.sample()
 	w.send(driverMsg{Type: msgMarked, Online: first.Online, Refusals: first.Refusals, Fails: first.Fails, Recovered: first.Recovered})
 	// The test decides when the cluster recovered, from the readings it is
-	// sent (WI 1618). Readings go as bulk, which may be dropped under load —
+	// sent. Readings go as bulk, which may be dropped under load —
 	// so every reading that *crosses* the target in either direction is sent
 	// again on the reliable channel. A dropped reading between two crossings
 	// cannot change the interval; a dropped crossing could.

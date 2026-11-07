@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 
 	"github.com/happydave/hoardmq/internal/wal"
 	"go.etcd.io/raft/v3"
@@ -43,7 +44,9 @@ type Store struct {
 	hs      *pb.HardState
 	snap    *pb.Snapshot
 	ckptWal uint64 // write-ahead index recorded by the latest checkpoint
-	durable uint64
+	// durable is changed under mu and read without it, so a reader of the
+	// latest token never waits behind a save's fsync.
+	durable atomic.Uint64
 	logger  *slog.Logger
 	path    string
 }
@@ -54,16 +57,31 @@ func Open(dir, name string, opts wal.Options) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Store{path: filepath.Join(dir, name), log: l, ents: []*pb.Entry{{Index: proto.Uint64(0), Term: proto.Uint64(0)}}, walIdx: []uint64{0}, hs: &pb.HardState{}, snap: &pb.Snapshot{Metadata: &pb.SnapshotMetadata{}}, logger: opts.Logger}
-	if s.logger == nil {
-		s.logger = slog.Default()
+	s := newStore(filepath.Join(dir, name), l, opts.Logger)
+	if _, err := s.load(true); err != nil {
+		_ = l.Close()
+		return nil, err
 	}
+	return s, nil
+}
+
+func newStore(path string, l *wal.Log, logger *slog.Logger) *Store {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &Store{path: path, log: l, ents: []*pb.Entry{{Index: proto.Uint64(0), Term: proto.Uint64(0)}}, walIdx: []uint64{0}, hs: &pb.HardState{}, snap: &pb.Snapshot{Metadata: &pb.SnapshotMetadata{}}, logger: logger}
+}
+
+// load rebuilds the index from the latest checkpoint and the records after
+// its replay point. It returns the point a start appends after when the log
+// ends before it, 0 otherwise; with appendAfter set it starts that segment.
+func (s *Store) load(appendAfter bool) (uint64, error) {
+	l := s.log
 	replayFrom := uint64(1)
 	if idx, payload, ok := l.LatestCheckpoint(); ok {
 		from, err := s.loadCheckpoint(payload)
 		if err != nil {
-			_ = l.Close()
-			return nil, err
+			return 0, err
 		}
 		s.ckptWal = idx
 		replayFrom = from
@@ -71,19 +89,37 @@ func Open(dir, name string, opts wal.Options) (*Store, error) {
 	// A log that lost records its checkpoint covers (a disk that dropped
 	// synced writes) can end below the checkpoint's replay point; records
 	// appended there would be skipped by the next replay.
+	var after uint64
 	if replayFrom > l.LastIndex()+1 {
-		s.logger.Warn("raft log ends before its checkpoint's replay point; appending after it", "replay_from", replayFrom, "log", l.LastIndex())
-		if err := l.ContinueAfter(replayFrom - 1); err != nil {
-			_ = l.Close()
-			return nil, err
+		after = replayFrom - 1
+		if appendAfter {
+			s.logger.Warn("raft log ends before its checkpoint's replay point; appending after it", "replay_from", replayFrom, "log", l.LastIndex())
+			if err := l.ContinueAfter(after); err != nil {
+				return 0, err
+			}
 		}
 	}
-	err = l.Iterate(replayFrom, func(r wal.Record) error { return s.replay(r) })
-	if err != nil {
-		_ = l.Close()
-		return nil, err
-	}
-	return s, nil
+	return after, l.Iterate(replayFrom, func(r wal.Record) error { return s.replay(r) })
+}
+
+// Verified is what a start of the raft log over an inspected log would do
+// after the log's own survey.
+type Verified struct {
+	// AppendAfter is the replay point's predecessor a start appends after,
+	// 0 when it does not need to.
+	AppendAfter uint64
+	// Snapshot is the stored snapshot the checkpoint holds.
+	Snapshot *pb.Snapshot
+	// Err is what the start refuses on.
+	Err error
+}
+
+// VerifyLog loads l, an inspected log (wal.Inspect), as Open does, writing
+// nothing.
+func VerifyLog(l *wal.Log) Verified {
+	s := newStore("", l, slog.New(slog.DiscardHandler))
+	after, err := s.load(false)
+	return Verified{AppendAfter: after, Snapshot: s.snap, Err: err}
 }
 
 // checkpoint payload: 8-byte replay-from write-ahead index, then the hard
@@ -360,9 +396,9 @@ func (s *Store) Save(hs *pb.HardState, ents []*pb.Entry, snap *pb.Snapshot, sync
 		if err := s.log.Sync(); err != nil {
 			return Durable{}, err
 		}
-		s.durable++
+		s.durable.Add(1)
 	}
-	return Durable{seq: s.durable}, nil
+	return Durable{seq: s.durable.Load()}, nil
 }
 
 // applySnapshot installs an incoming snapshot: the index resets to it and a
@@ -392,7 +428,7 @@ func (s *Store) writeCheckpoint() error {
 		return err
 	}
 	s.ckptWal = idx
-	s.durable++
+	s.durable.Add(1)
 	return nil
 }
 
@@ -446,9 +482,7 @@ func (s *Store) Path() string { return s.path }
 
 // LastDurable is the latest token issued.
 func (s *Store) LastDurable() Durable {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return Durable{seq: s.durable}
+	return Durable{seq: s.durable.Load()}
 }
 
 // SnapshotIndex is the index of the stored snapshot.

@@ -82,8 +82,8 @@ type Options struct {
 	Members func() []string
 	// OwnedSessions, when set, reports how many sessions the cluster's
 	// replicated lease state says an owner still holds, and whether that
-	// state can be read yet. It is what bounds the unknown-owner refusal
-	// (WI 1351): an owner proved to hold nothing needs no routes. A node
+	// state can be read yet. It is what bounds the unknown-owner refusal:
+	// an owner proved to hold nothing needs no routes. A node
 	// that cannot read the state yet cannot prove anything, so "not known"
 	// counts as "holds something".
 	OwnedSessions func(node string) (count int, known bool)
@@ -180,7 +180,7 @@ type forwardEnvelope struct {
 type outbound struct {
 	// sendMu is held from taking a sequence until the transport has admitted
 	// the frame, so frames reach the wire in sequence order: a receiver reads
-	// a frame overtaken by a later one as a hole (WI 1708). Taken before p.mu.
+	// a frame overtaken by a later one as a hole. Taken before p.mu.
 	sendMu     sync.Mutex
 	sent       uint64
 	acked      uint64
@@ -330,9 +330,9 @@ type Plane struct {
 	table   *Table
 	version atomic.Uint64
 	// unknownOwners is set while at least one owner's route set is unknown
-	// to this node, which makes every QoS 1 or 2 publish unacknowledgeable
-	// (WI 1351). Read on the publish path, so it is an atomic rather than a
-	// walk of the peer list; recomputed on peer, sync and membership events.
+	// to this node, which makes every QoS 1 or 2 publish unacknowledgeable.
+	// Read on the publish path, so it is an atomic rather than a walk of the
+	// peer list; recomputed on peer, sync and membership events.
 	unknownOwners atomic.Bool
 	// unloaded holds every route send while the node's store has not been
 	// loaded (Options.AwaitLoad): an empty set sent then would withdraw at
@@ -416,7 +416,7 @@ type Plane struct {
 	// and emit hands to them rather than sending: emit runs under a session
 	// mutex (session.Manager.Subscribe holds it across router.Add) and the
 	// route-update class is not urgent, so its enqueue blocks — which is how
-	// 64.7% of a storm's mutex delay ended up in link.admit (WI 1356).
+	// 64.7% of a storm's mutex delay ended up in link.admit.
 	pending  map[entryKey]Entry
 	fullTo   map[string]bool
 	flushing bool
@@ -538,7 +538,7 @@ func (p *Plane) OwnerKnowledge() (episodes []Episode, open bool) {
 
 // OwnersKnown reports whether this node knows every owner's routes. While it
 // does not, a QoS 1 or 2 publish that would need one is refused rather than
-// acknowledged (WI 1351), so a caller that expects a publish to be taken —
+// acknowledged, so a caller that expects a publish to be taken —
 // the simulation harness's idea of a settled cluster — waits for this.
 func (p *Plane) OwnersKnown() bool { return !p.unknownOwners.Load() }
 
@@ -695,7 +695,7 @@ func (p *Plane) recordMove(ns, client string, filters []string) {
 	// The other nodes keep forwarding here because the route is still
 	// advertised; this node cannot see that route at all (Match skips self,
 	// HiddenMatch reports only hidden peers), so it needs its own index to
-	// answer for the same window (WI 1353).
+	// answer for the same window.
 	for _, f := range filters {
 		p.table.SetMoving(ns, f, true)
 	}
@@ -719,7 +719,8 @@ func (p *Plane) emitCount(ns, filter string, count int, stillMoving bool) {
 	e := Entry{Namespace: ns, Filter: filter, Owner: p.o.Node, Version: p.version.Add(1), Count: count, Tombstone: count == 0}
 	// The local merge stays synchronous. Match, HiddenMatch and MovingMatch
 	// are all consulted on this node's publish path, and deferring this
-	// would reopen the acknowledged-loss window WI 1353 closed.
+	// would reopen the acknowledged-loss window of a session in transit,
+	// when no node has a route to it.
 	p.table.Merge([]Entry{e})
 	// Cleared after the merge, not before: between the two there must be no
 	// instant where neither the moving index nor a live route answers for
@@ -1104,7 +1105,7 @@ func (p *Plane) SyncAges() map[string]time.Duration {
 // peerChanged hides a down peer's entries and re-synchronises with a peer
 // that came up.
 // peerChanged hides a down peer's entries and re-synchronises with a peer
-// that came up; the peer's state is its control connection's (WI 1340).
+// that came up; the peer's state is its control connection's.
 func (p *Plane) peerChanged(peer string, s transport.State) {
 	defer p.refreshOwnerKnowledge()
 	switch s {
@@ -1121,7 +1122,7 @@ func (p *Plane) peerChanged(peer string, s transport.State) {
 // dataChanged: forwards and route updates ride the data connection, so its
 // reset loses what was in flight (the barriers covering it fail) and its
 // return re-synchronises the routes; the peer's entries stay visible, since
-// the peer is not down (WI 1340).
+// the peer is not down.
 func (p *Plane) dataChanged(peer string, s transport.State) {
 	switch s {
 	case transport.Up:
@@ -1270,7 +1271,7 @@ func (p *Plane) Forward(msg *message.Message) (int, error) {
 	}
 	// An owner whose routes this node has never received could hold a
 	// subscriber for any topic, so there is no match to test: the publish
-	// cannot be acknowledged as delivered (WI 1351). The forwards above
+	// cannot be acknowledged as delivered. The forwards above
 	// still went to the owners this node does know about.
 	if msg.QoS > 0 && p.unknownOwners.Load() {
 		p.count("hoardmq_forward_failures_total", map[string]string{"reason": "routes-unknown"}, 1)
@@ -1280,7 +1281,7 @@ func (p *Plane) Forward(msg *message.Message) (int, error) {
 	// with it, but its route stays advertised for the move grace so the
 	// other nodes keep forwarding here and are refused. Until now this node
 	// answered its own publishes as though the route did not exist — the one
-	// node still advertising it was the one node blind to it (WI 1353).
+	// node still advertising it was the one node blind to it.
 	if msg.QoS > 0 && p.table.MovingMatch(msg.Namespace, msg.Topic) {
 		if p.proven(msg.Namespace, moves, publishPath{targets: nodes}) {
 			p.count("hoardmq_move_refusals_lifted_total", map[string]string{"path": "local"}, 1)
@@ -1746,7 +1747,7 @@ func (p *Plane) applyLoop(peer string, in *inbound) {
 			case seqLate:
 				// The hole it was reported for never existed. Counted apart
 				// from the gap so a run can tell a phantom hole from a lost
-				// frame (WI 1708).
+				// frame.
 				p.count("hoardmq_forward_late_frames_total", nil, 1)
 			case seqRestart:
 				p.count("hoardmq_forward_stream_restarts_total", nil, 1)

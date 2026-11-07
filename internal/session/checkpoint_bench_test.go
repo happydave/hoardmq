@@ -12,7 +12,7 @@ import (
 
 // BenchmarkCheckpointState times one checkpoint snapshot of n offline
 // persistent sessions, each with a subscription and a queued QoS 1 message:
-// the work a checkpoint does while it reads the sessions (WI 1818).
+// the work a checkpoint does while it reads the sessions.
 func BenchmarkCheckpointState(b *testing.B) {
 	for _, n := range []int{10000, 100000} {
 		b.Run("sessions="+strconv.Itoa(n), func(b *testing.B) {

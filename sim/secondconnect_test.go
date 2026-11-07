@@ -380,8 +380,8 @@ func firstConnectionEnds(t *testing.T, first net.Conn) {
 	}
 }
 
-// TestSecondConnectRacedDuringTheFirstsTakeoverKeepsAClientsState: WI 2266's
-// second path to raced.
+// TestSecondConnectRacedDuringTheFirstsTakeoverKeepsAClientsState: the
+// second path to a session served empty as raced.
 func TestSecondConnectRacedDuringTheFirstsTakeoverKeepsAClientsState(t *testing.T) {
 	secondConnectCase(t, scRaced)
 }

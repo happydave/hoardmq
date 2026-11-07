@@ -11,7 +11,7 @@ import (
 	"github.com/happydave/hoardmq/internal/packet"
 )
 
-// TestServingDecision (WI 1571): a node not ready is not serving
+// TestServingDecision: a node not ready is not serving
 // whatever it knows of routes; a ready node that lacks an owner's routes is
 // degraded; a ready node that has them serves.
 func TestServingDecision(t *testing.T) {
@@ -35,7 +35,7 @@ func TestServingDecision(t *testing.T) {
 	}
 }
 
-// TestDegradedNodeStaysReady (WI 1571): n3 restarted while n1's route
+// TestDegradedNodeStaysReady: n3 restarted while n1's route
 // syncs to it are dropped does not know the routes of n1, which owns a
 // session: it is ready, /servingz says degraded and the gauge is 1; once
 // the syncs get through it serves and the gauge is 0.
@@ -53,7 +53,7 @@ func TestDegradedNodeStaysReady(t *testing.T) {
 	doc := *nodes["n3"].srv.config()
 	old := nodes["n3"]
 	old.stop()
-	srv, err := NewWithHooks(doc, nil, fixtureHooks)
+	srv, err := newFixtureServer(t, doc)
 	if err != nil {
 		t.Fatal(err)
 	}

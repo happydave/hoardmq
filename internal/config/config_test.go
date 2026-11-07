@@ -42,7 +42,7 @@ func TestValidDocumentLoadsWithDefaults(t *testing.T) {
 	if len(problems) != 0 {
 		t.Fatalf("problems: %s", lines(problems))
 	}
-	if doc.Limits.ReceiveMaximum != 1024 || doc.Limits.MaxQueuedMessages != 1000 || doc.Log.Format != "text" || doc.Limits.QueueDrop != "oldest" || doc.Node.WALSync != "commit" || doc.Node.WALSegmentBytes != 64<<20 {
+	if doc.Limits.ReceiveMaximum != 1024 || doc.Limits.MaxQueuedMessages != 1000 || doc.Log.Format != "text" || doc.Limits.QueueDrop != "oldest" || doc.Limits.OfflineQoS0 != "queue" || doc.Cluster.Records.MaxPerCollection != 100000 || doc.Node.WALSync != "commit" || doc.Node.WALSegmentBytes != 64<<20 {
 		t.Errorf("defaults not applied: %+v", doc)
 	}
 	if doc.Limits.MaxPacketSize != 1048576 || doc.Cluster.Replicas != 3 || len(doc.Listeners) != 4 || doc.Listeners[1].TLS.MinVersion != "1.3" || doc.Listeners[2].Path != "/ws" || doc.Listeners[2].MaxConnections != 10 || !doc.Auth.Anonymous {
@@ -83,7 +83,7 @@ func TestMinimalDocument(t *testing.T) {
 	}
 }
 
-// Each rule the plan states has a failing fixture; the expected pointer is
+// Each validation rule has a failing fixture; the expected pointer is
 // what the operator sees.
 func TestEachRuleHasAFailingFixture(t *testing.T) {
 	cases := []struct {
@@ -113,6 +113,9 @@ func TestEachRuleHasAFailingFixture(t *testing.T) {
 		{"connectTimeout 0", `{"version":1,"node":{"dataDir":"d"},"limits":{"connectTimeout":0}}`, "/limits/connectTimeout", "at least 1"},
 		{"maxKeepAlive high", `{"version":1,"node":{"dataDir":"d"},"limits":{"maxKeepAlive":70000}}`, "/limits/maxKeepAlive", "at most"},
 		{"queueDrop", `{"version":1,"node":{"dataDir":"d"},"limits":{"queueDrop":"random"}}`, "/limits/queueDrop", "one of"},
+		{"offlineQoS0", `{"version":1,"node":{"dataDir":"d"},"limits":{"offlineQoS0":"maybe"}}`, "/limits/offlineQoS0", "one of"},
+		{"records cap 0", `{"version":1,"node":{"dataDir":"d"},"cluster":{"records":{"maxPerCollection":0}}}`, "/cluster/records/maxPerCollection", "at least 1"},
+		{"records cap high", `{"version":1,"node":{"dataDir":"d"},"cluster":{"records":{"maxPerCollection":1000001}}}`, "/cluster/records/maxPerCollection", "at most"},
 		{"maxSessionExpiry negative", `{"version":1,"node":{"dataDir":"d"},"limits":{"maxSessionExpiry":-1}}`, "/limits/maxSessionExpiry", "at least 0"},
 		{"auth unknown", `{"version":1,"node":{"dataDir":"d"},"auth":{"anon":true}}`, "/auth/anon", "unknown member"},
 		{"decisionTtlSeconds 0", `{"version":1,"node":{"dataDir":"d"},"auth":{"decisionTtlSeconds":0}}`, "/auth/decisionTtlSeconds", "at least 1"},
@@ -155,6 +158,7 @@ func TestEachRuleHasAFailingFixture(t *testing.T) {
 		{"receiveMaximum high", `{"version":1,"node":{"dataDir":"d"},"limits":{"receiveMaximum":65536}}`, "/limits/receiveMaximum", "at most"},
 		{"maxQueued negative", `{"version":1,"node":{"dataDir":"d"},"limits":{"maxQueuedMessages":-1}}`, "/limits/maxQueuedMessages", "at least 0"},
 		{"maxSubscriptions negative", `{"version":1,"node":{"dataDir":"d"},"limits":{"maxSubscriptions":-1}}`, "/limits/maxSubscriptions", "at least 0"},
+		{"maxRetainedTopics negative", `{"version":1,"node":{"dataDir":"d"},"limits":{"maxRetainedTopics":-1}}`, "/limits/maxRetainedTopics", "at least 0"},
 		{"maxTopicAliasBytes negative", `{"version":1,"node":{"dataDir":"d"},"limits":{"maxTopicAliasBytes":-1}}`, "/limits/maxTopicAliasBytes", "at least 0"},
 		{"sessionBinding", `{"version":1,"node":{"dataDir":"d"},"auth":{"sessionBinding":"username"}}`, "/auth/sessionBinding", "one of"},
 		{"integer not float", `{"version":1,"node":{"dataDir":"d"},"limits":{"receiveMaximum":1.5}}`, "/limits/receiveMaximum", "expected integer"},
@@ -209,6 +213,8 @@ func TestEnvironmentOverrides(t *testing.T) {
 		"HOARDMQ_LIMITS_MAX_PACKET_SIZE=4096",
 		"HOARDMQ_LOG_LEVEL=warn",
 		"HOARDMQ_LOG_FORMAT=json",
+		"HOARDMQ_LIMITS_OFFLINE_QOS0=drop",
+		"HOARDMQ_CLUSTER_RECORDS_MAX_PER_COLLECTION=250000",
 		"HOARDMQ_CONFIG=ignored-here.json",
 		"OTHER=1",
 	}
@@ -216,7 +222,7 @@ func TestEnvironmentOverrides(t *testing.T) {
 	if len(problems) != 0 {
 		t.Fatalf("problems: %s", lines(problems))
 	}
-	if doc.Node.DataDir != "/elsewhere" || doc.Node.Name != "n9" || doc.Cluster.Replicas != 2 || doc.Limits.MaxPacketSize != 4096 || doc.Log.Level != "warn" || doc.Log.Format != "json" {
+	if doc.Node.DataDir != "/elsewhere" || doc.Node.Name != "n9" || doc.Cluster.Replicas != 2 || doc.Limits.MaxPacketSize != 4096 || doc.Log.Level != "warn" || doc.Log.Format != "json" || doc.Limits.OfflineQoS0 != "drop" || doc.Cluster.Records.MaxPerCollection != 250000 {
 		t.Errorf("overrides not applied: %+v", doc)
 	}
 }
@@ -418,6 +424,77 @@ func TestSinkKafkaSchema(t *testing.T) {
 	if _, p := Parse([]byte(`{"version":1,"node":{"dataDir":"d"},"modules":{"hook.test":{"anything":[1,2]}}}`), nil); len(p) != 0 {
 		t.Errorf("another module's object: %v", p)
 	}
+	segment := `{"brokers":["k:9092"],"routes":[{"filter":"devices/+/telemetry/#","topic":"telemetry","key":{"segment":1,"fallback":"none"},
+		"headers":{"source":"hoardmq-edge"}}],"headers":{"prefix":"x-","userPropertyPrefix":"p."}}`
+	if _, p := Parse([]byte(base+segment+`}}`), nil); len(p) != 0 {
+		t.Fatalf("the segment key, static headers and prefixes: %v", p)
+	}
+	for _, c := range []struct{ doc, pointer string }{
+		{`{"brokers":["k:9092"],"routes":[{"filter":"a/#","topic":"t","key":{"segment":"x"}}]}`, "/modules/sink.kafka/routes/0/key/segment"},
+		{`{"brokers":["k:9092"],"routes":[{"filter":"a/#","topic":"t","key":{"segment":1,"level":2}}]}`, "/modules/sink.kafka/routes/0/key"},
+		{`{"brokers":["k:9092"],"routes":[{"filter":"a/#","topic":"t","headers":{"h":1}}]}`, "/modules/sink.kafka/routes/0/headers/h"},
+		{`{"brokers":["k:9092"],"routes":[{"filter":"a/#","topic":"t"}],"headers":{"suffix":"x"}}`, "/modules/sink.kafka/headers"},
+	} {
+		_, p := Parse([]byte(base+c.doc+`}}`), nil)
+		if len(p) == 0 || !strings.HasPrefix(p[0].Pointer, c.pointer) {
+			t.Errorf("%s: problems %v, want one at %s", c.doc, p, c.pointer)
+		}
+	}
+}
+
+// TestWebhookSchema: the published schema describes modules.auth.http and
+// modules.events.http.
+func TestWebhookSchema(t *testing.T) {
+	base := `{"version":1,"node":{"dataDir":"d"},"modules":`
+	good := `{"auth.http":{"url":"https://auth.example.com/mqtt","timeoutMs":2000,"onUnavailable":"deny",
+		"caFile":"/etc/hoardmq/ca.pem","certFile":"/etc/hoardmq/client.pem","keyFile":"/etc/hoardmq/client.key",
+		"bearerTokenFile":"/run/secrets/auth","headers":{"x-tenant":"a"},"followRedirects":false,
+		"authenticate":true,"authorize":true,"sendPassword":true,"cache":{"maxEntries":100000}},
+		"events.http":{"url":"https://hooks.example.com/mqtt-events","events":["client.connected","message.publish",
+		"session.unsubscribe","cluster.member.joined","cluster.member.left","cluster.lease.moved","cluster.drain.started"],
+		"mode":"async","buffer":{"maxEvents":10000},"batch":{"maxEvents":1,"maxDelayMs":100},
+		"retry":{"maxAttempts":3,"backoffMs":200},"timeoutMs":5000,"payload":"base64"}}`
+	if _, p := Parse([]byte(base+good+`}`), nil); len(p) != 0 {
+		t.Fatalf("the documented example: %v", p)
+	}
+	for _, c := range []struct{ doc, pointer string }{
+		{`{"auth.http":{}}`, "/modules/auth.http"},
+		{`{"auth.http":{"url":"https://a","onUnavailable":"allow"}}`, "/modules/auth.http/onUnavailable"},
+		{`{"auth.http":{"url":"https://a","timeoutMs":50}}`, "/modules/auth.http/timeoutMs"},
+		{`{"auth.http":{"url":"https://a","retries":2}}`, "/modules/auth.http"},
+		{`{"events.http":{"url":"https://a","mode":"later"}}`, "/modules/events.http/mode"},
+		{`{"events.http":{"url":"https://a","events":["client.unsubscribed"]}}`, "/modules/events.http/events/0"},
+		{`{"events.http":{"url":"https://a","events":["cluster.lease.lost"]}}`, "/modules/events.http/events/0"},
+		{`{"events.http":{"url":"https://a","buffer":{"maxEvents":0}}}`, "/modules/events.http/buffer/maxEvents"},
+	} {
+		_, p := Parse([]byte(base+c.doc+`}`), nil)
+		if len(p) == 0 || !strings.HasPrefix(p[0].Pointer, c.pointer) {
+			t.Errorf("%s: problems %v, want one at %s", c.doc, p, c.pointer)
+		}
+	}
+}
+
+// TestPayloadSchemaSchema: the published schema describes modules.schema.json.
+func TestPayloadSchemaSchema(t *testing.T) {
+	base := `{"version":1,"node":{"dataDir":"d"},"modules":{"schema.json":`
+	good := `{"audit":true,"rules":[{"name":"readings","filter":"sensors/+/reading","schemaFile":"/etc/hoardmq/reading.schema.json"},
+		{"name":"commands","filter":"cmd/#","schema":{"type":"object","required":["op"]},"onInvalid":"disconnect","reason":135},
+		{"name":"any","filter":"x","schema":true,"namespace":"t"}]}`
+	if _, p := Parse([]byte(base+good+`}}`), nil); len(p) != 0 {
+		t.Fatalf("the documented example: %v", p)
+	}
+	for _, c := range []struct{ doc, pointer string }{
+		{`{}`, "/modules/schema.json"},
+		{`{"rules":[{"name":"Bad!","filter":"a","schema":true}]}`, "/modules/schema.json/rules/0/name"},
+		{`{"rules":[{"name":"r","filter":"a","schema":true,"onInvalid":"refuse"}]}`, "/modules/schema.json/rules/0/onInvalid"},
+		{`{"rules":[{"name":"r","filter":"a","schema":true,"reason":145}]}`, "/modules/schema.json/rules/0/reason"},
+		{`{"rules":[{"name":"r","filter":"a","schema":"string"}]}`, "/modules/schema.json/rules/0/schema"},
+	} {
+		_, p := Parse([]byte(base+c.doc+`}}`), nil)
+		if len(p) == 0 || !strings.HasPrefix(p[0].Pointer, c.pointer) {
+			t.Errorf("%s: problems %v, want one at %s", c.doc, p, c.pointer)
+		}
+	}
 }
 
 // The inbound topic-alias table's byte bound defaults to 1 MiB, accepts 0
@@ -469,5 +546,46 @@ func TestMaxSubscriptions(t *testing.T) {
 	changed, restartOnly := Changes(Default(), next)
 	if len(changed) != 1 || changed[0] != "/limits/maxSubscriptions" || len(restartOnly) != 0 {
 		t.Fatalf("changed %v, restart-only %v", changed, restartOnly)
+	}
+}
+
+// The retained-topic limit defaults to 0 (unlimited), accepts a bound, and is
+// put into force by a reload.
+func TestMaxRetainedTopics(t *testing.T) {
+	if got := Default().Limits.MaxRetainedTopics; got != 0 {
+		t.Fatalf("default %d, want 0", got)
+	}
+	d, p := Parse([]byte(`{"version":1,"node":{"dataDir":"d"},"limits":{"maxRetainedTopics":5000}}`), nil)
+	if len(p) != 0 || d.Limits.MaxRetainedTopics != 5000 {
+		t.Fatalf("5000: %v %d", p, d.Limits.MaxRetainedTopics)
+	}
+	next := Default()
+	next.Limits.MaxRetainedTopics = 5000
+	changed, restartOnly := Changes(Default(), next)
+	if len(changed) != 1 || changed[0] != "/limits/maxRetainedTopics" || len(restartOnly) != 0 {
+		t.Fatalf("changed %v, restart-only %v", changed, restartOnly)
+	}
+}
+
+// The outbound in-flight cap defaults to 65535, the largest Receive Maximum,
+// takes 1 to 65535, and is read at start only.
+func TestMaxInflightMessages(t *testing.T) {
+	if got := Default().Limits.MaxInflightMessages; got != 65535 {
+		t.Fatalf("default %d, want 65535", got)
+	}
+	for _, n := range []int{0, 65536} {
+		_, p := Parse([]byte(`{"version":1,"node":{"dataDir":"d"},"limits":{"maxInflightMessages":`+strconv.Itoa(n)+`}}`), nil)
+		if len(p) == 0 {
+			t.Fatalf("%d accepted", n)
+		}
+	}
+	d, p := Parse([]byte(`{"version":1,"node":{"dataDir":"d"},"limits":{"maxInflightMessages":1024}}`), nil)
+	if len(p) != 0 || d.Limits.MaxInflightMessages != 1024 {
+		t.Fatalf("1024: %v %d", p, d.Limits.MaxInflightMessages)
+	}
+	next := Default()
+	next.Limits.MaxInflightMessages = 1024
+	if _, restartOnly := Changes(Default(), next); len(restartOnly) != 1 || restartOnly[0] != "/limits/maxInflightMessages" {
+		t.Fatalf("restart-only %v, want the cap", restartOnly)
 	}
 }

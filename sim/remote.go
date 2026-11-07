@@ -496,7 +496,7 @@ func (p *remotePopulation) finish() (popSummary, error) {
 // measurement reads. It is a separate function so a field can be tested to
 // cross the socket: a figure added to popSummary but not to this conversion
 // reads zero on exactly the runs the published sweeps use — the remote ones —
-// and a zero is indistinguishable from a healthy run (WI 1509).
+// and a zero is indistinguishable from a healthy run.
 func summaryFromDriver(ds driverSummary) popSummary {
 	out := popSummary{DroppedClients: ds.DroppedClients, Refusals: ds.Refusals, Drops: ds.Drops,
 		Fails: ds.Fails, SubRefusals: ds.SubRefusals, SubRefusedClients: ds.SubRefusedClients,

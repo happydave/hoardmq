@@ -177,10 +177,10 @@ type Stats struct {
 	FailedSlotSec   float64 `json:"handshakes_failed_slot_sec"`
 	Active          int     `json:"active"`
 	// Prebuffered counts CONNECTs already in the socket at the first read:
-	// sockets that waited in the listen backlog (WI 1338 attribution).
+	// sockets that waited in the listen backlog.
 	Prebuffered int64 `json:"connects_prebuffered"`
 	// Abandoned counts CONNECTs refused because their client had already
-	// closed the connection (WI 1485).
+	// closed the connection.
 	Abandoned int64 `json:"connects_abandoned"`
 }
 
@@ -241,7 +241,7 @@ func (c *countedConn) Prebuffered() { c.l.prebuffered.Add(1) }
 // counting it when so. The handshake asks before acquiring the client's
 // lease: a CONNECT that waited in the listen backlog while its client gave
 // up would otherwise move the lease away from the session that client has
-// since opened elsewhere (WI 1485).
+// since opened elsewhere.
 func (c *countedConn) PeerGone() bool {
 	if !peerGone(c.Conn) {
 		return false

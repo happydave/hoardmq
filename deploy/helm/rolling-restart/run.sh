@@ -7,7 +7,8 @@
 #   run.sh <out-dir> <image-tag>
 #
 # Env: CTX (kube context, default kind-hoardmq), NS (default hoardmq),
-# CHART (default ../hoardmq beside this file), CLIENT_IMAGE (default
+# CHART (default ../hoardmq beside this file), REPOSITORY (the broker
+# image's repository, default hoardmq), CLIENT_IMAGE (default
 # mqttclient:dev), HELM_ARGS (more arguments for helm install, split on
 # whitespace, e.g. "--set admin.enabled=true"), ADMIN_PORT (default 9091).
 # The images must already be loaded into the cluster.
@@ -26,6 +27,7 @@ CTX=${CTX:-kind-hoardmq}
 NS=${NS:-hoardmq}
 HERE=$(cd "$(dirname "$0")" && pwd)
 CHART=${CHART:-$HERE/../hoardmq}
+REPOSITORY=${REPOSITORY:-hoardmq}
 CLIENT_IMAGE=${CLIENT_IMAGE:-mqttclient:dev}
 ADMIN_PORT=${ADMIN_PORT:-9091}
 read -r -a EXTRA <<<"${HELM_ARGS:-}"
@@ -50,6 +52,7 @@ kubectl --context "$CTX" create namespace "$NS" >/dev/null
 k create configmap hoardmq-acl \
   --from-literal=acl.json='{"rules":[{"topic":"#","allow":["publish","subscribe","unsubscribe"]}]}' >/dev/null
 helm --kube-context "$CTX" install hoardmq "$CHART" -n "$NS" \
+  --set image.repository="$REPOSITORY" \
   --set image.tag="$TAG" \
   --set auth.anonymous=true \
   --set 'extraConfig.modules.authz\.file.path=/etc/hoardmq-acl/acl.json' \

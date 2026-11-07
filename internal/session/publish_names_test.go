@@ -51,11 +51,15 @@ func (j *scopeJournal) Sent(k store.Key, _ uint64, _ uint16) error              
 func (j *scopeJournal) InflightState(k store.Key, _ uint16, _ byte) error       { return j.key(k) }
 func (j *scopeJournal) Complete(k store.Key, _ uint16) error                    { return j.key(k) }
 func (j *scopeJournal) Dropped(k store.Key, _ uint64) error                     { return j.key(k) }
-func (j *scopeJournal) Retain(m *message.Message) error {
+func (j *scopeJournal) Retain(m *message.Message, _ store.Version) error {
 	j.note(store.Scope{Namespace: m.Namespace, Topic: m.Topic})
 	return nil
 }
-func (j *scopeJournal) RetainDelete(ns, topic string) error {
+func (j *scopeJournal) RetainClear(ns, topic string, _ store.Version) error {
+	j.note(store.Scope{Namespace: ns, Topic: topic})
+	return nil
+}
+func (j *scopeJournal) RetainDrop(ns, topic string) error {
 	j.note(store.Scope{Namespace: ns, Topic: topic})
 	return nil
 }
@@ -100,7 +104,7 @@ func (r *namingReplication) QueryRetained(string, string, time.Time) []*message.
 }
 
 // TestEveryWriteIsNamedByItsWait: a barrier waits only on the targets of the
-// keys it names (WI 1631), so a record a call writes and does not name is
+// keys it names, so a record a call writes and does not name is
 // acknowledged unexamined. For each path that writes before a durability wait,
 // every key written is among those named. Unlike the enumerated checks above,
 // this compares the journal's own writes with the names. A shared-group

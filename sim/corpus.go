@@ -7,7 +7,7 @@ package sim
 // ttl), and `TestCorpus` fails when the two disagree — for every seed in the
 // plain gate, and for the first two under HOARDMQ_SIM_REDUCED.
 //
-// It used to be written by hand, and drifted: WIs 1298 and 1534 were titled
+// It used to be written by hand, and drifted: two defects were titled
 // from labels whose seeds no longer matched, and by 2026-09-21 none of the
 // eight descriptions matched its schedule.
 var Corpus = []struct {

@@ -167,7 +167,7 @@ func TestInvalidateOnline(t *testing.T) {
 	m.Connect(c, pkt, 7)
 	m.Resume(c)
 	subscribe(m, c, 1, "t")
-	res := m.Invalidate("default", "c", packet.AdministrativeAction, func(token uint64) bool { return token == 7 })
+	res := m.Invalidate("default", "c", packet.AdministrativeAction, func(token uint64) bool { return token == 7 }, true)
 	if !res.Found || res.Refused || !res.WasOnline || !res.WillPublished || res.Scope != (store.Scope{Namespace: "default", ClientID: "c", Epoch: 7}) {
 		t.Fatalf("result %+v", res)
 	}
@@ -215,11 +215,11 @@ func TestInvalidateOffline(t *testing.T) {
 	if len(watcher.publishes()) != 0 {
 		t.Fatalf("a Will went out before the delay: %v", watcher.publishes())
 	}
-	res := m.Invalidate("default", "armed", packet.AdministrativeAction, nil)
+	res := m.Invalidate("default", "armed", packet.AdministrativeAction, nil, true)
 	if !res.Found || res.WasOnline || !res.WillPublished {
 		t.Fatalf("armed %+v", res)
 	}
-	res = m.Invalidate("default", "normal", packet.AdministrativeAction, nil)
+	res = m.Invalidate("default", "normal", packet.AdministrativeAction, nil, true)
 	if !res.Found || res.WasOnline || res.WillPublished {
 		t.Fatalf("normal %+v", res)
 	}
@@ -227,7 +227,7 @@ func TestInvalidateOffline(t *testing.T) {
 	if len(pubs) != 1 || pubs[0].Topic != "will/armed" {
 		t.Fatalf("wills %v", pubs)
 	}
-	if res := m.Invalidate("default", "nobody", packet.AdministrativeAction, nil); res.Found {
+	if res := m.Invalidate("default", "nobody", packet.AdministrativeAction, nil, true); res.Found {
 		t.Fatalf("unknown %+v", res)
 	}
 }
@@ -243,7 +243,7 @@ func TestInvalidateRefused(t *testing.T) {
 	m.Connect(c, pkt, 4)
 	m.Resume(c)
 	var saw uint64
-	res := m.Invalidate("default", "c", packet.AdministrativeAction, func(token uint64) bool { saw = token; return false })
+	res := m.Invalidate("default", "c", packet.AdministrativeAction, func(token uint64) bool { saw = token; return false }, true)
 	if !res.Found || !res.Refused || saw != 4 {
 		t.Fatalf("result %+v saw %d", res, saw)
 	}

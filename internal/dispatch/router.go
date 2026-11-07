@@ -8,13 +8,20 @@ import (
 
 	"github.com/happydave/hoardmq/internal/message"
 	"github.com/happydave/hoardmq/internal/session"
+	"github.com/happydave/hoardmq/internal/store"
 	"github.com/happydave/hoardmq/internal/topic"
 )
 
-// Router is the trie-backed session.Router.
+// Router is the trie-backed session.Router. Matching holds the read lock,
+// so publishes on many connections match side by side; a subscription
+// change holds the write lock.
 type Router struct {
 	strategy Strategy
-	mu       sync.Mutex
+	mu       sync.RWMutex
+	// groupMu guards what a match changes while it holds only the read
+	// lock: each shared group's round-robin position and sticky member, and
+	// rng.
+	groupMu  sync.Mutex
 	roots    map[string]*node // by namespace
 	retained *retained
 	rng      *rand.Rand
@@ -28,8 +35,9 @@ type Router struct {
 	// shared group it matched: the routing plane answers no for messages
 	// forwarded from another node, and on the publishing node only when this
 	// node owns the group's dispatch and its strategy chose a local member;
-	// otherwise it forwards the message itself. It runs under the router
-	// lock and must not call back into the router.
+	// otherwise it forwards the message itself. It runs under the router's
+	// read lock and must not call back into the router: a writer waiting
+	// would hold the call up behind the read that made it.
 	decider func(ns, groupKey string, msg *message.Message) bool
 }
 
@@ -53,6 +61,10 @@ func (r *Router) notify(ns, filter string, count int) {
 		r.observer(ns, filter, count)
 	}
 }
+
+// matchHook, when set, runs inside Match under the read lock: tests hold a
+// match there.
+var matchHook func()
 
 // New creates a router with the given shared-subscription strategy.
 func New(strategy Strategy) *Router {
@@ -156,7 +168,7 @@ func (r *Router) Remove(s *session.Session, filter string) bool {
 // RemoveAll implements session.Router. It removes the session's filters one
 // by one, so its cost is the session's own subscriptions: searching the trie
 // for them visited every other session's too, under the lock, on every
-// takeover and eviction (WI 1484).
+// takeover and eviction.
 func (r *Router) RemoveAll(s *session.Session, filters []string) {
 	for _, f := range filters {
 		r.Remove(s, f)
@@ -167,8 +179,11 @@ func (r *Router) RemoveAll(s *session.Session, filters []string) {
 // non-shared subscription the topic reaches, with the highest QoS and all
 // identifiers, plus one entry per shared group with the chosen member.
 func (r *Router) Match(msg *message.Message, publisher *session.Session) []session.Match {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if matchHook != nil {
+		matchHook()
+	}
 	root := r.root(msg.Namespace, false)
 	if root == nil {
 		return nil
@@ -208,7 +223,9 @@ func (r *Router) Match(msg *message.Message, publisher *session.Session) []sessi
 			if r.decider != nil && !r.decider(msg.Namespace, groupKey(name, g.filter), msg) {
 				continue
 			}
+			r.groupMu.Lock()
 			member, ok := g.choose(r.strategy, msg, nil, r.rng)
+			r.groupMu.Unlock()
 			if !ok {
 				continue
 			}
@@ -235,8 +252,8 @@ func groupKey(share, inner string) string { return share + "/" + inner }
 // MatchGroup implements session.Router: a fresh choice for a redistributed
 // message, excluding the departed member.
 func (r *Router) MatchGroup(ns, key string, msg *message.Message, exclude *session.Session) (session.Match, bool) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	root := r.root(ns, false)
 	if root == nil {
 		return session.Match{}, false
@@ -250,7 +267,9 @@ func (r *Router) MatchGroup(ns, key string, msg *message.Message, exclude *sessi
 	if g == nil {
 		return session.Match{}, false
 	}
+	r.groupMu.Lock()
 	member, ok := g.choose(r.strategy, msg, exclude, r.rng)
+	r.groupMu.Unlock()
 	if !ok {
 		return session.Match{}, false
 	}
@@ -274,6 +293,11 @@ func cutGroupKey(key string) (share, inner string, ok bool) {
 // Retain implements session.Router.
 func (r *Router) Retain(msg *message.Message) { r.retained.set(msg) }
 
+// RetainUnder implements session.Router.
+func (r *Router) RetainUnder(msg *message.Message, limit int) store.RetainRefusal {
+	return r.retained.setUnder(msg, limit)
+}
+
 // RetainedFor implements session.Router.
 func (r *Router) RetainedFor(ns, filter string, now time.Time) []*message.Message {
 	return r.retained.matching(ns, filter, now)
@@ -285,11 +309,47 @@ func (r *Router) Sweep(now time.Time) { r.retained.sweep(now) }
 // AllRetained implements session.Router.
 func (r *Router) AllRetained() []*message.Message { return r.retained.all() }
 
-// LoadRetained implements session.Router.
-func (r *Router) LoadRetained(ms []*message.Message) {
-	for _, m := range ms {
-		r.retained.set(m)
-	}
+// RetainStamped implements session.Router: a leader's client write or clear,
+// stamped (epoch, the next number) and installed in one critical section.
+func (r *Router) RetainStamped(msg *message.Message, epoch uint64, limit int) (store.Version, bool) {
+	return r.retained.stampUnder(msg, epoch, limit)
+}
+
+// MergeRetained implements session.Router: a copy at a version, installed by
+// store.MergeRetained; an empty payload at the zero Version is a copy drop.
+func (r *Router) MergeRetained(msg *message.Message, v store.Version, handOver bool) (bool, RetainedEntry) {
+	return r.retained.merge(msg, v, handOver)
+}
+
+// MarkRetainedAppended implements session.Router.
+func (r *Router) MarkRetainedAppended(msg *message.Message, v store.Version, count uint64) {
+	r.retained.markAppended(msg, v, count)
+}
+
+// HeldRetained implements session.Router: what is held for a topic,
+// tombstone included.
+func (r *Router) HeldRetained(ns, topic string) (RetainedEntry, bool) {
+	r.retained.mu.RLock()
+	defer r.retained.mu.RUnlock()
+	return r.retained.held(ns, topic)
+}
+
+// DropTombstoneIf implements session.Router: a compare-and-delete.
+func (r *Router) DropTombstoneIf(ns, topic string, v store.Version) bool {
+	return r.retained.dropTombstoneIf(ns, topic, v)
+}
+
+// RetainedEntries implements session.Router: every held entry, tombstones
+// included, with versions.
+func (r *Router) RetainedEntries() []RetainedEntry { return r.retained.entries() }
+
+// SeedRetainedVersion implements session.Router: stamps from here on take
+// numbers above n.
+func (r *Router) SeedRetainedVersion(n uint64) { r.retained.seed(n) }
+
+// SweepLeading implements session.Router.
+func (r *Router) SweepLeading(now time.Time, leads func(ns, topic string) (uint64, bool)) []RetainedEntry {
+	return r.retained.sweepLeading(now, leads)
 }
 
 // RetainedCount is the number of retained messages held.
@@ -313,8 +373,8 @@ type Matcher struct {
 // group member and asks no decider, so the next delivery is the one it would
 // have been. Match does both.
 func (r *Router) Matchers(ns, topic string) []Matcher {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	out := make([]Matcher, 0)
 	root := r.root(ns, false)
 	if root == nil {

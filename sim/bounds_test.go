@@ -10,7 +10,7 @@ import (
 )
 
 // inBounds is a run in the configuration the time bound holds for, meeting
-// every bound: the shape of WI 1618's batch.
+// every bound: the shape of a recorded 100,000-client batch.
 func inBounds() boundsInput {
 	in := boundsInput{
 		Clients: 100_000, RecoverySec: 33.6, NinetyNineSec: 32.9, NineNineNineSec: 33.3,
@@ -161,8 +161,7 @@ func TestBoundsNoProbeFigureFails(t *testing.T) {
 	}
 }
 
-// A5: the refusals after the instant gate at 0, since WI 1706 closed (the
-// owner's decision of 2026-09-22), and every reason code counts.
+// A5: the refusals after the instant gate at 0, and every reason code counts.
 func TestBoundsRefusalsGate(t *testing.T) {
 	in := inBounds()
 	if r := mustRow(t, judgeRun(in), rowRefusals); r.Status != boundPass || r.Figure != "0" {
@@ -221,7 +220,8 @@ func balanced() []boundsInput {
 	return ins
 }
 
-// B1.
+// A balanced batch within every bound passes, with its placement and each
+// run's verdict.
 func TestBatchPassesWhenBalanced(t *testing.T) {
 	b := judgeBatch(batchOf(balanced()...))
 	if b.Verdict != boundPass {
@@ -239,7 +239,7 @@ func TestBatchPassesWhenBalanced(t *testing.T) {
 	}
 }
 
-// B2.
+// One run over the bound fails the time row and the batch, naming the run.
 func TestBatchFailsOnOneRunOverTheBound(t *testing.T) {
 	ins := balanced()
 	ins[5].RecoverySec = 56
@@ -253,7 +253,7 @@ func TestBatchFailsOnOneRunOverTheBound(t *testing.T) {
 	}
 }
 
-// B3: all of one placement, all within the bound: the time row is not judged.
+// All of one placement, all within the bound: the time row is not judged.
 // The same set with a run over the bound still fails.
 func TestBatchTimeNeedsBalanceToPass(t *testing.T) {
 	ins := balanced()[:3]
@@ -287,7 +287,7 @@ func TestBatchNoRunInConfiguration(t *testing.T) {
 	}
 }
 
-// B4.
+// One run that served sessions empty fails the sessions row and the batch.
 func TestBatchFailsOnEmptySessions(t *testing.T) {
 	ins := balanced()
 	ins[1].SessionLost, ins[1].SessionLostClients = 11, 11
@@ -304,7 +304,7 @@ func TestBatchFailsOnEmptySessions(t *testing.T) {
 	}
 }
 
-// B5: the keys boundsInput reads are the keys the artifact writes. A renamed
+// The keys boundsInput reads are the keys the artifact writes. A renamed
 // field on either side would leave a batch reading a zero where a run wrote a
 // figure.
 func TestBoundsInputDecodesFromTheArtifact(t *testing.T) {
@@ -445,8 +445,8 @@ func TestJudgeRunFiles(t *testing.T) {
 	}
 }
 
-// WI 1805: a run labelled product but recorded before the label covered the
-// takeover and ack timeouts is noted as such, and the note decides nothing.
+// A run labelled product but recorded before the label covered the takeover
+// and ack timeouts is noted as such, and the note decides nothing.
 func TestAProductRecordWithoutItsTimeoutsIsNoted(t *testing.T) {
 	var old boundsInput
 	raw := []byte(`{"clients":100000,"recovery_sec":33.6,"probe":{"attempts":9300,"acked":5900},"hold":{"seconds":60},
@@ -457,10 +457,10 @@ func TestAProductRecordWithoutItsTimeoutsIsNoted(t *testing.T) {
 	}
 	current := inBounds()
 	oldV, curV := judgeRun(old), judgeRun(current)
-	if row := mustRow(t, oldV, rowRecovery); row.Status != boundPass || !strings.Contains(row.Note, "before WI 1805") {
+	if row := mustRow(t, oldV, rowRecovery); row.Status != boundPass || !strings.Contains(row.Note, "before 2026-09-24") {
 		t.Errorf("an old product record: time row %+v, want pass with the note", row)
 	}
-	if row := mustRow(t, curV, rowRecovery); strings.Contains(row.Note, "WI 1805") {
+	if row := mustRow(t, curV, rowRecovery); strings.Contains(row.Note, "2026-09-24") {
 		t.Errorf("a record that carries its takeover timeout needs no note: %+v", row)
 	}
 	if oldV.Verdict != curV.Verdict {
@@ -468,11 +468,11 @@ func TestAProductRecordWithoutItsTimeoutsIsNoted(t *testing.T) {
 	}
 	harness := old
 	harness.Provenance.Effective = &boundsEffective{TimingSet: "harness (stress)"}
-	if row := mustRow(t, judgeRun(harness), rowRecovery); strings.Contains(row.Note, "WI 1805") {
+	if row := mustRow(t, judgeRun(harness), rowRecovery); strings.Contains(row.Note, "2026-09-24") {
 		t.Errorf("a harness record already says it is not the product: %+v", row)
 	}
 	b := judgeBatch([]namedRun{{"r1", old}, {"r2", current}})
-	if row := mustRow(t, b.boundsVerdict, rowRecovery); !strings.Contains(row.Note, "1 of 2 runs recorded before WI 1805") {
+	if row := mustRow(t, b.boundsVerdict, rowRecovery); !strings.Contains(row.Note, "1 of 2 runs recorded before 2026-09-24") {
 		t.Errorf("the set's time row should count the old records: %+v", row)
 	}
 }

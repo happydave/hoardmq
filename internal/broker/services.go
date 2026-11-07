@@ -104,13 +104,13 @@ func (v services) DrainStatus() module.DrainStatus { return v.s.DrainStatus() }
 
 // degradedRoutesUnknown is the degraded state of a ready node that does not
 // know every owner's routes, and so refuses every QoS 1 or 2 publish that
-// needs one (WI 1351).
+// needs one.
 const degradedRoutesUnknown = "routes-unknown"
 
 // Serving reports whether this node is ready and knows every owner's routes,
 // so that a QoS 1 or 2 publish can be acknowledged, and when it is not, why.
 // A ready node that does not know them is degraded; readiness does not
-// report it, so a load balancer keeps the node in service (WI 1571).
+// report it, so a load balancer keeps the node in service.
 func (s *Server) Serving() (bool, string) {
 	ready, reason := s.Readiness()
 	return serving(ready, reason, s.routes == nil || s.routes.OwnersKnown())
@@ -161,6 +161,10 @@ func (s *Server) Readiness() (bool, string) {
 		// and holds, until it is restarted on a build that understands the
 		// level.
 		return false, "level"
+	case s.consensus != nil && s.consensus.Status().Role == "removed":
+		// Removed from the group: it waits, visibly, for an operator to clear
+		// its volume; it neither wipes it nor rejoins by itself.
+		return false, "removed"
 	case s.consensus != nil && s.consensus.Recovering():
 		return false, "recovering"
 	case s.consensus != nil && s.consensus.Behind():

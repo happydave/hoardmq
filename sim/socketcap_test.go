@@ -5,7 +5,8 @@ import (
 	"testing"
 )
 
-// TestListenPortsAreNotDrawnAsClusterPorts is the fix for WI 1511's cause.
+// TestListenPortsAreNotDrawnAsClusterPorts is the fix for the cause of an
+// unbounded socket capture.
 //
 // freePort checks a port by binding 127.0.0.1, but a listener address given
 // through Options.ListenAddrs is on another interface — in the remote-client
@@ -73,7 +74,8 @@ func TestSocketsPerSampleCap(t *testing.T) {
 	}
 
 	// Over it, the sample is truncated and says by how much — silence here is
-	// what made WI 1511 invisible until a 937 MB file refused to publish.
+	// what kept an unbounded capture invisible until a 937 MB file refused to
+	// publish.
 	big := make([]SocketSample, socketsPerSampleMax+1234)
 	got, dropped = capSockets(big)
 	if len(got) != socketsPerSampleMax {
@@ -83,10 +85,10 @@ func TestSocketsPerSampleCap(t *testing.T) {
 		t.Errorf("over the cap: dropped %d, want 1234", dropped)
 	}
 
-	// The shape WI 1511 actually produced.
+	// The shape the unbounded capture actually produced.
 	got, dropped = capSockets(make([]SocketSample, 168184))
 	if len(got) != socketsPerSampleMax || dropped != 168184-socketsPerSampleMax {
-		t.Errorf("WI 1511's sample: kept %d dropped %d", len(got), dropped)
+		t.Errorf("the unbounded capture's sample: kept %d dropped %d", len(got), dropped)
 	}
 	if strconv.Itoa(dropped) == "0" {
 		t.Error("a capture of 168,184 rows reported nothing dropped")

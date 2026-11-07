@@ -11,8 +11,9 @@ import (
 // RouteSample is one node's view of one topic at one instant: the remote
 // nodes it would forward to, and whether an owner it is hiding holds a
 // matching route. A publish acknowledged while every node's sample is empty
-// is the WI 1353 defect, and this is what lets the checker say so instead
-// of leaving it to a node debug log (WI 1354).
+// is a session in transit between owners with no route on any node, and
+// this is what lets the checker say so instead of leaving it to a node debug
+// log.
 type RouteSample struct {
 	At     time.Time `json:"at"`
 	Node   string    `json:"node"`

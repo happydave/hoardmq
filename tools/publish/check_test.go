@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"reflect"
 	"sort"
@@ -43,6 +44,7 @@ func TestDecideRefusesEachCheckAlone(t *testing.T) {
 	}
 	for name, r := range map[string]results{
 		"a term hit":        {patterns: 13, files: 694, hits: []hit{{where: "sim/x.go", line: 3, term: 6}}},
+		"a citation":        {patterns: 13, files: 694, citations: []string{"sim/x.go:3: work-item citation"}},
 		"a personal email":  {patterns: 13, files: 694, identity: []string{"author: email is not a GitHub noreply address"}},
 		"a missing licence": {patterns: 13, files: 694, missing: []string{"LICENSE-APACHE"}},
 		"no pattern read":   {patterns: 0, files: 694},
@@ -217,6 +219,11 @@ func TestJudgeWrittenRefusesWhatWasNotChecked(t *testing.T) {
 	if r, err := judgeWritten(root, "t1", "", pats, testAllowed(), before); err != nil || r.files != 7 {
 		t.Fatalf("a first commit with no parent: %v, %+v", err, r)
 	}
+	cited := before
+	cited.citations = []string{"sim/x.go:3: work-item citation"}
+	if r, err := judgeWritten(good, "t1", "p1", pats, testAllowed(), cited); err != nil || !reflect.DeepEqual(r.citations, cited.citations) {
+		t.Fatalf("the files' citations are not carried to the written commit: %v, %+v", err, r)
+	}
 	for name, c := range map[string]struct {
 		c   commitObject
 		tip string
@@ -238,6 +245,49 @@ func TestJudgeWrittenRefusesWhatWasNotChecked(t *testing.T) {
 		r, err := judgeWritten(c, "t1", "p1", pats, testAllowed(), before)
 		if ok, _ := decide(r); err != nil || ok {
 			t.Errorf("%s: err %v, go %v; want a no-go", name, err, ok)
+		}
+	}
+}
+
+// wi is the letters a citation starts with, kept apart from its number so
+// this file holds no citation of its own.
+const wi = "W" + "I"
+
+func TestCitationsFindEveryFormByPlaceOnly(t *testing.T) {
+	for _, c := range []struct {
+		name, text string
+		line       int
+	}{
+		{"a number", "x\n// as " + wi + " 1292 found\n", 2},
+		{"in parentheses", "// a reason (" + wi + " 1292).\n", 1},
+		{"a list", "// " + wi + "s 1292, 1293 and 1294\n", 1},
+		{"work item", "// work" + " item 1350 requires\n", 1},
+		{"Work item", "// Work" + " item 1350 requires\n", 1},
+		{"work-item", "work" + "-item 1350\n", 1},
+		{"hyphenated", "see " + wi + "-1292\n", 1},
+		{"with #", "see " + wi + "#1292\n", 1},
+		{"five digits", "see " + wi + " 12345\n", 1},
+		{"wrapped in Go", "a\n// and before " + wi + "\n// 1504 it did not\n", 2},
+		{"wrapped in prose", "were " + wi + "s\n1624 and 1625\n", 1},
+		{"wrapped in a shell comment", "# by " + wi + "\n#   1292\n", 1},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got := citations([]entry{{path: "sim/x.go", data: []byte(c.text)}})
+			want := []string{fmt.Sprintf("sim/x.go:%d: work-item citation", c.line)}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("%q: %v, want %v", c.text, got, want)
+			}
+		})
+	}
+	if got := citations([]entry{{path: "docs/" + wi + "-1292.md", data: []byte("clean\n")}}); !reflect.DeepEqual(got, []string{"docs/" + wi + "-1292.md (path): work-item citation"}) {
+		t.Fatalf("a citation in a path: %v", got)
+	}
+	for _, text := range []string{
+		"WIFI 1234", "kiwi 1234", "TWI 1234", wi + " 12", wi + "s are 3", "decided 2026-10-21",
+		"a work item that tracks a race", "takeoverAckBefore1762", "work items: none",
+	} {
+		if got := citations([]entry{{path: "sim/x.go", data: []byte(text)}}); len(got) != 0 {
+			t.Errorf("%q is no citation: %v", text, got)
 		}
 	}
 }

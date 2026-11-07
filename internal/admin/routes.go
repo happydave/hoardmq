@@ -26,6 +26,7 @@ type Param struct {
 	Description string
 	Required    bool
 	Integer     bool
+	Boolean     bool
 }
 
 // Route is one entry of the table: it dispatches, it is authorized by its
@@ -50,8 +51,9 @@ type Route struct {
 	Status   int
 	// Problems documents failures beyond those the generator derives.
 	Problems map[int]string
-	// forward marks a route that acts on one client: a call for a client
-	// another node holds is forwarded there.
+	// forward marks a route a call may need another node for: one acting on
+	// a client another node holds, or a removal the leader makes. The handler
+	// answers a 409 naming that node and the call is forwarded there.
 	forward bool
 	// target names what an audit record is about.
 	target func(r *http.Request) string
@@ -64,6 +66,26 @@ type RawDocument struct{}
 
 func pathValue(name string) func(*http.Request) string {
 	return func(r *http.Request) string { return r.PathValue(name) }
+}
+
+// willParam is the disconnect and invalidate routes' will parameter: absent
+// or true publishes the client's Will, false drops it, and a false is noted in
+// the call's audit record.
+var willParam = Param{Name: "will", Boolean: true, Description: "false: the client's Will is not published. Default true."}
+
+func readWill(r *http.Request) (bool, error) {
+	switch r.URL.Query().Get("will") {
+	case "", "true":
+		return true, nil
+	case "false":
+		n := note(r)
+		if n.detail == nil {
+			n.detail = map[string]string{}
+		}
+		n.detail["will"] = "false"
+		return false, nil
+	}
+	return false, BadRequest("will must be true or false")
 }
 
 func queryValue(name string) func(*http.Request) string {
@@ -146,13 +168,27 @@ func (s *Server) routes() []Route {
 			Response: []Subscription{}, Status: 200, forward: true,
 			handle: func(r *http.Request) (any, error) { return b.Subscriptions(r.PathValue("clientId")) }},
 		{Method: "POST", Path: "/clients/{clientId}/disconnect", Scope: ClientsWrite, Action: "client.disconnect",
-			Summary:  "Close a client's connection with 0x98 Administrative action. The session is kept; the Will is published as for any server-initiated close.",
+			Summary:  "Close a client's connection with 0x98 Administrative action. The session is kept; the Will is published as for any server-initiated close, unless will is false.",
+			Query:    []Param{willParam},
 			Response: struct{}{}, Status: 200, target: pathValue("clientId"), forward: true,
-			handle: func(r *http.Request) (any, error) { return struct{}{}, b.Disconnect(r.PathValue("clientId")) }},
+			handle: func(r *http.Request) (any, error) {
+				will, err := readWill(r)
+				if err != nil {
+					return nil, err
+				}
+				return struct{}{}, b.Disconnect(r.PathValue("clientId"), will)
+			}},
 		{Method: "DELETE", Path: "/clients/{clientId}/session", Scope: ClientsWrite, Action: "session.invalidate",
-			Summary:  "End a client's session: close its connection, discard its state, release its lease, and publish its Will, since the session ends. A copy whose lease has moved to another node is not discarded: the call goes to the lease's owner. One whose later grant this node has seen is refused with 409.",
+			Summary:  "End a client's session: close its connection, discard its state, release its lease, and publish its Will, since the session ends, unless will is false. A copy whose lease has moved to another node is not discarded: the call goes to the lease's owner. One whose later grant this node has seen is refused with 409.",
+			Query:    []Param{willParam},
 			Response: Invalidated{}, Status: 200, target: pathValue("clientId"), forward: true,
-			handle: func(r *http.Request) (any, error) { return b.Invalidate(r.Context(), r.PathValue("clientId")) }},
+			handle: func(r *http.Request) (any, error) {
+				will, err := readWill(r)
+				if err != nil {
+					return nil, err
+				}
+				return b.Invalidate(r.Context(), r.PathValue("clientId"), will)
+			}},
 		{Method: "GET", Path: "/subscriptions", Scope: ClientsRead, Summary: "The subscriptions on this node a topic reaches, plain and shared. A view: no shared group advances.",
 			Query:    []Param{{Name: "topic", Description: "A topic name, no wildcards.", Required: true}},
 			Response: []Matcher{}, Status: 200,
@@ -218,6 +254,14 @@ func (s *Server) routes() []Route {
 			Summary:  "Start this node's graceful leave; while one runs, report it. The process exits when the drain completes.",
 			Response: DrainStatus{}, Status: 202, target: node,
 			handle: func(*http.Request) (any, error) { return b.Drain(), nil }},
+
+		{Method: "DELETE", Path: "/cluster/members/{node}", Scope: ClusterMembers, Action: "cluster.member.remove",
+			Summary: "Remove a consensus member. Any node takes the call and the leader decides: it refuses the last voter, a removal " +
+				"that leaves the remaining reachable voters short of a majority, a member that owns leases, and a live member that " +
+				"is neither drained nor held. A leader asked to remove itself hands leadership over first.",
+			Response: MemberRemoval{}, Status: 200, target: pathValue("node"), forward: true,
+			Problems: map[int]string{404: "not a member", 409: "refused, with the reason; or the call goes to the leader", 503: "no leader known, or the removal did not apply in time"},
+			handle:   func(r *http.Request) (any, error) { return b.RemoveMember(r.Context(), r.PathValue("node")) }},
 
 		{Method: "GET", Path: "/config", Scope: ConfigRead, Summary: "The running configuration, every member naming a password, secret, token or key redacted.",
 			Response: RawDocument{}, Status: 200,

@@ -103,12 +103,26 @@ type Context struct {
 	Observability Observability
 	// Services is nil during hoardmq check.
 	Services Services
+	// DecisionTTL is auth.decisionTtlSeconds: the longest the broker holds an
+	// authentication decision before making it again, and the longest a module
+	// may hold an authorization answer; zero is no bound.
+	DecisionTTL time.Duration
+	// Audit records events in the node's audit log; nil when the node keeps
+	// none (observability.audit.enabled false) and during hoardmq check.
+	Audit Auditor
 	// Passwords verifies a password against a stored credential the way the
 	// broker's own authenticators do: through the node's verification cache
 	// while serving and uncached during hoardmq check, within the node's
 	// Argon2id memory budget, and refusing what the build's FIPS setting
 	// refuses. Never nil.
 	Passwords PasswordVerifier
+}
+
+// Auditor records an event in the node's audit log. It never waits: when the
+// log's queue is full the event is dropped, counted in the log's own drops,
+// and Audit reports false, so a module can audit from a client's path.
+type Auditor interface {
+	Audit(actor, action, target, outcome string, detail map[string]string) bool
 }
 
 // PasswordVerifier checks a password against a stored credential in one of

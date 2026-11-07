@@ -161,11 +161,11 @@ func (m *countingMetrics) get(name string) float64 {
 	return m.v[name]
 }
 
-// TestAWipedNodeWaitsForAdmissionWhileAGroupExists is WI 1504's defect, made
-// deterministic. The peers answer and name a leader, their admission is
-// swallowed, and the join window passes in between. A bootstrap here is a
-// second group — which is what happened 1 run in 40 under a loaded gate,
-// where the answers were merely slow.
+// TestAWipedNodeWaitsForAdmissionWhileAGroupExists is the defect of a wiped
+// node bootstrapping instead of joining, made deterministic. The peers answer
+// and name a leader, their admission is swallowed, and the join window passes
+// in between. A bootstrap here is a second group — which is what happened 1
+// run in 40 under a loaded gate, where the answers were merely slow.
 func TestAWipedNodeWaitsForAdmissionWhileAGroupExists(t *testing.T) {
 	names := []string{"n1", "n2", "n3"}
 	c := full(t, names, func(o *Options) { o.JoinTimeout = 2 * time.Second })
@@ -202,7 +202,7 @@ func TestAWipedNodeWaitsForAdmissionWhileAGroupExists(t *testing.T) {
 		t.Fatalf("a wiped node bootstrapped a second group while its peers were naming a leader: %+v", st)
 	}
 	// The wait is visible while it lasts: the warning repeats and the gauge
-	// counts the time waited (WI 1735).
+	// counts the time waited.
 	waitFor(t, "the waiting warning to repeat", 10*time.Second, func() bool { return warned.n.Load() >= 2 })
 	if v, _ := metrics.gauge("hoardmq_raft_join_wait_seconds"); v <= 0 {
 		t.Fatalf("the join wait gauge reads %v while n1 waits", v)
@@ -236,8 +236,7 @@ func TestAWipedNodeWaitsForAdmissionWhileAGroupExists(t *testing.T) {
 // TestAWipedNodeWaitsWhenOnlyTheLeaderAnswers is the same defect where the
 // leader's own answer is the only evidence a group exists — a two-node group,
 // or one whose followers cannot be heard. A follower says who the leader is
-// because it is redirecting; the leader has to say so itself, and before WI
-// 1504 it did not.
+// because it is redirecting; the leader has to say so itself.
 func TestAWipedNodeWaitsWhenOnlyTheLeaderAnswers(t *testing.T) {
 	names := []string{"n1", "n2", "n3"}
 	c := full(t, names, func(o *Options) { o.JoinTimeout = 2 * time.Second })
@@ -333,7 +332,7 @@ func TestRestartRejoinsRatherThanRebootstrapping(t *testing.T) {
 	})
 	st = n1.core.Status()
 	// A failure here carries which of the two cases it is: the window passing
-	// with a group known is the condition WI 1504's rule acts on, and a
+	// with a group known is the condition the waiting rule acts on, and a
 	// bootstrap after a window that named no leader is the case it does not
 	// cover — nothing answered at all.
 	waited, booted := metrics.get("hoardmq_raft_join_window_passed_total"), metrics.get("hoardmq_raft_bootstrapped_after_window_total")
@@ -425,13 +424,13 @@ func TestPersistBeforeSend(t *testing.T) {
 	}
 }
 
-// TestWipedNodeHasNoRaftNodeWhileJoining pins the first half of work item
-// 1350: while a wiped node's join is outstanding it has no raft node at
-// all, so there is nothing for a vote request to be stepped into. Start
-// takes the join branch for an empty store with peers, and the node loop
-// waits on the started channel, which only closes when the leader admits
-// the joiner. The test exists so a later change to Start cannot silently
-// open a window in which a node with no recorded vote can grant one.
+// TestWipedNodeHasNoRaftNodeWhileJoining pins that while a wiped node's join
+// is outstanding it has no raft node at all, so there is nothing for a vote
+// request to be stepped into. Start takes the join branch for an empty store
+// with peers, and the node loop waits on the started channel, which only
+// closes when the leader admits the joiner. The test exists so a later change
+// to Start cannot silently open a window in which a node with no recorded vote
+// can grant one.
 func TestWipedNodeHasNoRaftNodeWhileJoining(t *testing.T) {
 	names := []string{"n1", "n2", "n3"}
 	c := full(t, names, nil)

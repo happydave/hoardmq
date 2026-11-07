@@ -56,10 +56,10 @@ func hasFilter(st *store.SessionState, filter string) bool {
 	return false
 }
 
-// TestAbandonedGrantIsFetchedFromTheReplica is WI 1740's acceptance test. The
-// acquire commits after its CONNECT's context ended, the previous owner then
-// crashes, and the client's next CONNECT on the node now holding its lease is
-// served the replica's copy rather than a fresh session.
+// TestAbandonedGrantIsFetchedFromTheReplica: the acquire commits after its
+// CONNECT's context ended, the previous owner then crashes, and the client's
+// next CONNECT on the node now holding its lease is served the replica's copy
+// rather than a fresh session.
 func TestAbandonedGrantIsFetchedFromTheReplica(t *testing.T) {
 	replica := replicaOf("x")
 	c, a, b := abandonedGrant(t, peerFetch(replica))

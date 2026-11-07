@@ -237,6 +237,108 @@ func TestVarintErratum(t *testing.T) {
 	}
 }
 
+// publishWithLength is a PUBLISH whose Remaining Length is written as the
+// given bytes, over a body of n bytes at level v: topic "t", a zero property
+// length at 5.0, and a zero payload filling the rest.
+func publishWithLength(v Version, length []byte, n int) []byte {
+	body := hex(0x00, 0x01, 't')
+	if v == V5 {
+		body = append(body, 0x00)
+	}
+	body = append(body, make([]byte, n-len(body))...)
+	return append(append(hex(0x30), length...), body...)
+}
+
+func TestNonMinimalVariableByteIntegers(t *testing.T) {
+	cases := []struct {
+		name string
+		v    Version
+		raw  []byte
+	}{
+		// Remaining Length: 0 written in two, three and four bytes.
+		{"PINGREQ length 0 in two bytes", V5, hex(0xC0, 0x80, 0x00)},
+		{"PINGREQ length 0 in three bytes", V5, hex(0xC0, 0x80, 0x80, 0x00)},
+		{"PINGREQ length 0 in four bytes", V5, hex(0xC0, 0x80, 0x80, 0x80, 0x00)},
+		// Below 5.0 no statement covers the encoding; 3.1.1's table 2.4 gives
+		// each byte count a range a non-minimal encoding falls outside.
+		{"PINGREQ length 0 in two bytes v4", V4, hex(0xC0, 0x80, 0x00)},
+		{"PINGREQ length 0 in two bytes v3", V3, hex(0xC0, 0x80, 0x00)},
+		// Remaining Length: a non-zero value in too many bytes, its body present.
+		{"PUBLISH length 4 in two bytes", V5, publishWithLength(V5, hex(0x84, 0x00), 4)},
+		{"PUBLISH length 3 in three bytes v4", V4, publishWithLength(V4, hex(0x83, 0x80, 0x00), 3)},
+		{"PUBLISH length 3 in four bytes v4", V4, publishWithLength(V4, hex(0x83, 0x80, 0x80, 0x00), 3)},
+		{"PUBLISH length 130 in three bytes", V5, publishWithLength(V5, hex(0x82, 0x81, 0x00), 130)},
+		{"PUBLISH length 16384 in four bytes", V5, publishWithLength(V5, hex(0x80, 0x80, 0x81, 0x00), 16384)},
+		// Property Length.
+		{"property length 0 in two bytes", V5, hex(0x30, 0x05, 0x00, 0x01, 't', 0x80, 0x00)},
+		{"property length 0 in three bytes", V5, hex(0x30, 0x06, 0x00, 0x01, 't', 0x80, 0x80, 0x00)},
+		{"property length 0 in four bytes", V5, hex(0x30, 0x07, 0x00, 0x01, 't', 0x80, 0x80, 0x80, 0x00)},
+		{"property length 2 in two bytes", V5, hex(0x30, 0x07, 0x00, 0x01, 't', 0x82, 0x00, 0x01, 0x01)},
+		// Property Identifier: Payload Format Indicator (1) in two bytes.
+		{"property identifier in two bytes", V5, hex(0x30, 0x07, 0x00, 0x01, 't', 0x03, 0x81, 0x00, 0x01)},
+		// Subscription Identifier: 1 in two bytes.
+		{"subscription identifier in two bytes", V5, hex(0x82, 0x0A, 0x00, 0x01, 0x03, 0x0B, 0x81, 0x00, 0x00, 0x01, 'a', 0x00)},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			p, err := decodeRaw(c.v, c.raw)
+			if err == nil {
+				t.Fatalf("decoded %T without error", p)
+			}
+			if got := reasonOf(t, err); got != MalformedPacket {
+				t.Errorf("got %v, want %s", err, MalformedPacket)
+			}
+		})
+	}
+	for _, v := range []Version{V5, V4} {
+		raw := connectBytes("MQTT", byte(v), 0x02, 0x00, 0x00)
+		if v == V5 {
+			raw = connectBytes("MQTT", byte(v), 0x02, 0x00, 0x00, 0x00)
+		}
+		long := append(hex(raw[0], raw[1]|0x80, 0x00), raw[2:]...)
+		if _, err := NewDecoder(bytes.NewReader(raw)).ReadConnect(); err != nil {
+			t.Fatalf("CONNECT at %s: %v", v, err)
+		}
+		_, err := NewDecoder(bytes.NewReader(long)).ReadConnect()
+		if err == nil {
+			t.Fatalf("CONNECT at %s with its length in two bytes decoded without error", v)
+		}
+		if got := reasonOf(t, err); got != MalformedPacket {
+			t.Errorf("CONNECT at %s with its length in two bytes: got %v", v, err)
+		}
+	}
+}
+
+func TestMinimalRemainingLengthBoundaries(t *testing.T) {
+	for _, c := range []struct {
+		length []byte
+		n      int
+	}{
+		{hex(0x7F), 127},
+		{hex(0x80, 0x01), 128},
+		{hex(0xFF, 0x7F), 16383},
+		{hex(0x80, 0x80, 0x01), 16384},
+		{hex(0x80, 0x80, 0x80, 0x01), 2097152},
+	} {
+		for _, v := range []Version{V5, V4} {
+			p, err := decodeRaw(v, publishWithLength(v, c.length, c.n))
+			if err != nil {
+				t.Fatalf("length %d (% x) at %s: %v", c.n, c.length, v, err)
+			}
+			if got := len(p.(*Publish).Payload); got != c.n-3-btoi(v == V5) {
+				t.Errorf("length %d at %s: payload %d bytes", c.n, v, got)
+			}
+		}
+	}
+}
+
+func btoi(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
 func TestReasonCodeStrings(t *testing.T) {
 	if s := MalformedPacket.String(); s != "Malformed Packet (0x81)" {
 		t.Error(s)

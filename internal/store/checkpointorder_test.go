@@ -54,7 +54,7 @@ func heldSnapshot(t *testing.T, s *Store) Snapshot {
 		enqueue(t, s, "a", 2, "a2")
 		aRead := appended()
 		enqueue(t, s, "b", 1, "b1")
-		if err := s.Retain(msg("ns", "r", "v2")); err != nil {
+		if err := s.Retain(msg("ns", "r", "v2"), Version{}); err != nil {
 			t.Fatal(err)
 		}
 		st := NewState()
@@ -77,7 +77,7 @@ func heldFixture(t *testing.T, s *Store) {
 	upsert(t, s, "a")
 	upsert(t, s, "b")
 	enqueue(t, s, "a", 1, "a1")
-	if err := s.Retain(msg("ns", "r", "v1")); err != nil {
+	if err := s.Retain(msg("ns", "r", "v1"), Version{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Sync(); err != nil {
@@ -186,7 +186,7 @@ func TestCheckpointDuringARepairWritesNothingOlder(t *testing.T) {
 // TestCheckpointWhileNotWholeRepairs: an fsync fails while a checkpoint's
 // state is read. The journal is not whole, so the checkpoint repairs rather
 // than write the state it was given over it, as one begun after the failure
-// does (WI 1812).
+// does.
 func TestCheckpointWhileNotWholeRepairs(t *testing.T) {
 	dir := t.TempDir()
 	d := faultdisk.New()
@@ -244,7 +244,7 @@ func TestHeldRecordsHoldOnlyTheirSessionUpToItsIndex(t *testing.T) {
 		return r.Payload
 	}
 	a := enqueue("ns", "a")
-	del, err := extstore.EncodeRetainDelete("ns", "a")
+	del, err := extstore.EncodeRetainDrop("ns", "a")
 	if err != nil {
 		t.Fatal(err)
 	}

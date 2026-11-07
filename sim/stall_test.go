@@ -88,8 +88,8 @@ func TestStallWatchWorstIsPerInterval(t *testing.T) {
 	}
 }
 
-// TestIntervalPausesAreTheIntervals is the figure round 8 needed and did
-// not have: a bucket occupied before the interval must not appear in it.
+// TestIntervalPausesAreTheIntervals is the figure a cumulative reading cannot
+// give: a bucket occupied before the interval must not appear in it.
 func TestIntervalPausesAreTheIntervals(t *testing.T) {
 	buckets := []float64{0, 0.001, 0.01, 0.1, 1, 10, 100}
 	prev := runtimeSnapshot{

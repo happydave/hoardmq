@@ -1,6 +1,7 @@
 package sim
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/happydave/hoardmq/internal/config"
@@ -16,6 +17,44 @@ func TestParseConnectRate(t *testing.T) {
 	for _, v := range []string{"x", "-1,2", "1,2,3", "1,", "1,-2"} {
 		if _, _, err := parseConnectRate(v); err == nil {
 			t.Errorf("%q accepted", v)
+		}
+	}
+}
+
+// The failover report's caveat names a connect-rate limit only when the run
+// set one, with its burst.
+func TestConnectRateCaveat(t *testing.T) {
+	env := func(v string) func(string) string {
+		return func(k string) string {
+			if k == connectRateEnv {
+				return v
+			}
+			return ""
+		}
+	}
+	for _, c := range []struct {
+		value     string
+		want, not []string
+	}{
+		{"", []string{"no connect-rate limit was set"}, []string{"admitted"}},
+		{"0", []string{"no connect-rate limit was set"}, []string{"admitted"}},
+		{"500,1000", []string{"at most 500 CONNECTs", "a burst of 1000"}, []string{"no connect-rate limit"}},
+		{"500", []string{"at most 500 CONNECTs", "a burst of twice the rate"}, []string{"no connect-rate limit", "burst of 0"}},
+	} {
+		k, err := readProductKnobs(env(c.value))
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := strings.ReplaceAll(k.connectRateCaveat(), "\n", " ")
+		for _, w := range c.want {
+			if !strings.Contains(got, w) {
+				t.Errorf("%s=%q: caveat %q lacks %q", connectRateEnv, c.value, got, w)
+			}
+		}
+		for _, n := range c.not {
+			if strings.Contains(got, n) {
+				t.Errorf("%s=%q: caveat %q says %q", connectRateEnv, c.value, got, n)
+			}
 		}
 	}
 }

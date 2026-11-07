@@ -23,8 +23,7 @@ import (
 // A measurement records how it was produced, so a published result can be
 // traced to its parameters from the repository alone. Before this, those
 // parameters lived in driver scripts outside version control, and a round
-// published as "product timings" ran at the harness's 10 ms raft tick
-// (WI 1379).
+// published as "product timings" ran at the harness's 10 ms raft tick.
 
 // Provenance is what a measurement records about its own production. A value
 // that could not be read is stated as unavailable with the reason; nothing
@@ -52,7 +51,7 @@ type Effective struct {
 	HeartbeatMisses int `json:"heartbeat_misses"`
 	RaftTickMs      int `json:"raft_tick_ms"`
 	WALGroupDelayMs int `json:"wal_group_delay_ms"`
-	// The other timings the nodes read (WI 1805). A record without them was
+	// The other timings the nodes read. A record without them was
 	// written when the harness ran each at its own value whatever the set.
 	TakeoverTimeoutMs     int    `json:"takeover_timeout_ms"`
 	AckTimeoutMs          int    `json:"ack_timeout_ms"`
@@ -66,13 +65,13 @@ type Effective struct {
 	Shards                int    `json:"shards"`
 	TempRoot              string `json:"temp_root"`
 	// TimingSet names the set the values above came from, and any knob
-	// moved away from it (WI 1475).
+	// moved away from it.
 	TimingSet string `json:"timing_set"`
 	// ClientSources is how many source addresses the clients dialled from,
-	// and ClientDial how one real socket dialled (WI 1477).
+	// and ClientDial how one real socket dialled.
 	ClientSources int    `json:"client_sources"`
 	ClientDial    string `json:"client_dial,omitempty"`
-	// The remote-client mode (WI 1480): where the clients ran and the
+	// The remote-client mode: where the clients ran and the
 	// addresses the nodes listened on. Absent for an in-process run.
 	ClientMode string `json:"client_mode,omitempty"`
 	ClientHost string `json:"client_host,omitempty"`
@@ -80,11 +79,11 @@ type Effective struct {
 	Auth          string   `json:"auth"`
 	NodeAddresses []string `json:"node_addresses,omitempty"`
 	// The client listener's connect-rate limit and the password cache's TTL
-	// the nodes ran with (WI 1283).
+	// the nodes ran with.
 	ConnectRate     int `json:"connect_rate"`
 	ConnectBurst    int `json:"connect_burst"`
 	AuthCacheTTLSec int `json:"auth_cache_ttl_sec"`
-	// TraceRatio is traces.otlp's sampleRatio when the run traces (WI 1313).
+	// TraceRatio is traces.otlp's sampleRatio when the run traces.
 	TraceRatio *float64 `json:"trace_ratio,omitempty"`
 }
 

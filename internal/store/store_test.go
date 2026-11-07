@@ -57,10 +57,10 @@ func TestEveryRecordTypeRecovers(t *testing.T) {
 	must(s.InflightState(Key{Namespace: "default", ClientID: "c1"}, 5, StatePubrecReceived))
 	must(s.Complete(Key{Namespace: "default", ClientID: "c1"}, 9))
 	must(s.Dropped(Key{Namespace: "default", ClientID: "c1"}, 4))
-	must(s.Retain(msg("default", "r/1", "kept")))
-	must(s.Retain(msg("default", "r/2", "temp")))
-	must(s.RetainDelete("default", "r/2"))
-	must(s.Retain(msg("default", "r/1", "kept-2")))
+	must(s.Retain(msg("default", "r/1", "kept"), Version{}))
+	must(s.Retain(msg("default", "r/2", "temp"), Version{}))
+	must(s.RetainDrop("default", "r/2"))
+	must(s.Retain(msg("default", "r/1", "kept-2"), Version{}))
 	// Records for an unknown session are ignored.
 	must(s.Enqueue(Key{Namespace: "default", ClientID: "nobody"}, Entry{Seq: 1, Message: msg("default", "x", "y")}))
 	must(s.Sync())
@@ -108,7 +108,7 @@ func TestCheckpointThenReplay(t *testing.T) {
 	s := openStore(t, dir, Options{SegmentBytes: 1 << 20, CheckpointEvery: 3})
 	_ = s.SessionUpsert(SessionMeta{Namespace: "default", ClientID: "a", ExpiryInterval: 1})
 	_ = s.Subscribe(Key{Namespace: "default", ClientID: "a"}, SubscriptionRecord{Filter: "x"})
-	_ = s.Retain(msg("default", "t", "v"))
+	_ = s.Retain(msg("default", "t", "v"), Version{})
 	if !s.NeedsCheckpoint() {
 		t.Fatal("checkpoint not requested after three records")
 	}
@@ -124,7 +124,7 @@ func TestCheckpointThenReplay(t *testing.T) {
 	}
 	// Records after the checkpoint are replayed on top of it.
 	_ = s.Subscribe(Key{Namespace: "default", ClientID: "a"}, SubscriptionRecord{Filter: "y"})
-	_ = s.RetainDelete("default", "t")
+	_ = s.RetainDrop("default", "t")
 	_ = s.Close()
 	s2 := openStore(t, dir, Options{})
 	defer func() { _ = s2.Close() }()
@@ -160,7 +160,7 @@ func TestRelaxedPolicySyncsOnInterval(t *testing.T) {
 	dir := t.TempDir()
 	s := openStore(t, dir, Options{SyncPolicy: Relaxed, SyncInterval: 10 * time.Millisecond, Sync: func(f *os.File) error { syncs.Add(1); return f.Sync() }})
 	base := syncs.Load()
-	_ = s.Retain(msg("default", "t", "v"))
+	_ = s.Retain(msg("default", "t", "v"), Version{})
 	if err := s.Sync(); err != nil {
 		t.Fatal(err)
 	}
@@ -184,7 +184,7 @@ func TestCommitPolicySyncs(t *testing.T) {
 	var syncs atomic.Int32
 	s := openStore(t, t.TempDir(), Options{Sync: func(f *os.File) error { syncs.Add(1); return f.Sync() }})
 	defer func() { _ = s.Close() }()
-	_ = s.Retain(msg("default", "t", "v"))
+	_ = s.Retain(msg("default", "t", "v"), Version{})
 	before := syncs.Load()
 	if err := s.Sync(); err != nil {
 		t.Fatal(err)
@@ -198,7 +198,7 @@ func TestCommitPolicySyncs(t *testing.T) {
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Retain(msg("default", "t", "v")); err == nil {
+	if err := s.Retain(msg("default", "t", "v"), Version{}); err == nil {
 		t.Fatal("append after close")
 	}
 }

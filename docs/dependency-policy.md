@@ -28,6 +28,11 @@ the reasoning live together.
       (BSD-3, with Apache-2.0 and MIT parts) and `github.com/pierrec/lz4/v4` v4.1.30 (BSD-3). Their cryptography is
       the standard library's, so the FIPS-track build is still `-tags fips`;
   - test-only: `paho.golang`, `paho.mqtt.golang` and their transitive modules.
+  - in a contributed module only, never the broker's module or the default binary: `contrib/_authsql` (`auth.sql`,
+    since 2026-11-02) and `contrib/_sinkpostgres` (`sink.postgres`, since 2026-11-02) each bring `github.com/jackc/pgx/v5` v5.10.0 with `github.com/jackc/pgpassfile`,
+    `github.com/jackc/pgservicefile` and `github.com/jackc/puddle/v2` (MIT), and `golang.org/x/sync` and
+    `golang.org/x/text` (BSD-3). pgx's TLS and its SCRAM to the server are the standard library's. A binary
+    `hoardmq-build` makes with it carries these; `cmd/hoardmq-build`'s `TestAuthSQLLicences` holds both halves.
 
 ## Gates
 
@@ -37,7 +42,7 @@ Run from the module root. All must pass before a work item closes.
 |---|---|---|
 | Format | `gofmt -l .` prints nothing | Source is formatted |
 | Vet | `go vet ./...` | No vet findings |
-| Lint | `golangci-lint run ./...` | Standard linters plus misspell, per `.golangci.yml` |
+| Lint | `golangci-lint run ./...` | Standard linters plus misspell, per `.golangci.yml`; golangci-lint `v2.13.3-0.20260913112253-5573d88ff782` under Go 1.27.1 (development.md, ["Building and testing"](development.md#building-and-testing)) |
 | Test | `go test ./...` | All tests pass (never `-short`) |
 | Licence | `go run ./tools/licensecheck` | Every module the build or the tests import has a licence file in a permitted family; EPL-2.0 is accepted only for the pinned test clients |
 | NOTICE | `go generate ./... && git diff --exit-code NOTICE` | The committed NOTICE matches the module list |

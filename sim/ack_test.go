@@ -15,7 +15,7 @@ import (
 // TestAckCountsSubscribersOnOtherNodes: a publish whose only subscriber is on
 // another node reached a subscriber, so its PUBACK and PUBREC carry Success;
 // a publish nobody subscribes to anywhere still carries No matching
-// subscribers (WI 1487).
+// subscribers.
 func TestAckCountsSubscribersOnOtherNodes(t *testing.T) {
 	c := New(t, Options{})
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -40,7 +40,7 @@ func TestAckCountsSubscribersOnOtherNodes(t *testing.T) {
 
 	// An acknowledgement of 0x83 says the broker could not confirm delivery in
 	// time, which says nothing about the reason code under test, so confirmed
-	// retries such a publish as a new message within this budget (WI 1487).
+	// retries such a publish as a new message within this budget.
 	budget := time.Now().Add(20 * time.Second)
 	var confirmed []uint64
 	acked := func(qos byte, topic string) packet.ReasonCode {

@@ -26,7 +26,7 @@ func TestSubscribedViolations(t *testing.T) {
 
 	// One refusal, with everything a reader needs to find it. The time is
 	// fixed rather than time.Now() so the assertion below can name it: the
-	// acceptance criteria ask for four fields in the violation and a test that
+	// violation carries four fields, and a test that
 	// checks three of them would report the fourth as covered.
 	at := time.Date(2026, 9, 15, 22, 41, 58, 123456789, time.UTC)
 	refusals := subscribeRefusals([]Event{
@@ -109,7 +109,8 @@ func TestRefusalsByClient(t *testing.T) {
 	}
 }
 
-// TestSubscribeRefusalsReachTheBatchSummary is the artifact half of WI 1509.
+// TestSubscribeRefusalsReachTheBatchSummary is the artifact half of counting
+// refused subscribes.
 // The property fires inside a corpus run; a failover batch has no corpus, and
 // its run.json is what the published results are read from. So the counts have
 // to survive the same path the leadership fields take: run.json → readRun →
@@ -165,12 +166,12 @@ func TestSubscribeRefusalsReachTheBatchSummary(t *testing.T) {
 	}
 }
 
-// TestSubRefusedClientsCountsTheWindowNotTheRun is the bug this work item's
-// own code review found: the first version counted a client whose lifetime
-// refusals were non-zero, so a client refused while the population was filling
-// was reported as a client the storm refused. Every other counter in the
-// summary is windowed by subtracting one total at the mark; this one cannot
-// be, because "how many clients" is not a sum.
+// TestSubRefusedClientsCountsTheWindowNotTheRun pins a bug in the first
+// version: it counted a client whose lifetime refusals were non-zero, so a
+// client refused while the population was filling was reported as a client
+// the storm refused. Every other counter in the summary is windowed by
+// subtracting one total at the mark; this one cannot be, because "how many
+// clients" is not a sum.
 func TestSubRefusedClientsCountsTheWindowNotTheRun(t *testing.T) {
 	before := &Client{ID: "refused-while-filling"}
 	during := &Client{ID: "refused-by-the-storm"}

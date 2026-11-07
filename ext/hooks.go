@@ -105,6 +105,18 @@ type ConnectionHook interface {
 
 // InboundInterceptor sees every decoded packet after CONNECT and may change
 // it in place.
+//   - It is called before authorization, so it sees packets the client is
+//     not allowed to send.
+//   - A PUBLISH arrives checked and with its topic alias resolved: Topic is
+//     the topic it is routed on, and the Topic Alias property is cleared.
+//   - It sees QoS 1 and QoS 2 retransmissions.
+//   - A Drop or Disconnect of a QoS 2 PUBLISH whose packet identifier the
+//     session holds open is not honoured: the broker answers it with the
+//     first attempt's verdict, and counts it.
+//
+// A module that decides on a publish's topic or payload refuses from
+// PublishAdmission, which runs after authorization and the QoS 2
+// retransmission check.
 type InboundInterceptor interface {
 	InterceptInbound(ctx context.Context, info ConnectionInfo, p mqtt.Packet) Outcome
 }
@@ -119,6 +131,68 @@ type OutboundInterceptor interface {
 // it with a reason code (Drop with Reason set).
 type SubscribeInterceptor interface {
 	InterceptSubscribe(ctx context.Context, info ConnectionInfo, sub *mqtt.Subscription) Outcome
+}
+
+// UnsubscribeInterceptor sees each filter of an UNSUBSCRIBE after validation
+// and before authorization. Drop refuses that filter with Reason, or
+// Unspecified Error (0x80) when Reason is not an error code: the UNSUBACK's
+// code for it at MQTT 5. Below 5 the UNSUBACK has no codes and a client reads
+// it as success, so a Drop closes the connection there. Disconnect closes
+// with Reason.
+type UnsubscribeInterceptor interface {
+	InterceptUnsubscribe(ctx context.Context, info ConnectionInfo, filter string) Outcome
+}
+
+// ClusterEventKind names a cluster event.
+type ClusterEventKind byte
+
+// Cluster event kinds.
+const (
+	// MemberJoined: the consensus membership as this node sees it gained a
+	// member. Every node reports what it sees.
+	MemberJoined ClusterEventKind = iota
+	// MemberLeft: it lost one.
+	MemberLeft
+	// LeaseMoved: a client's lease moved to this node from another;
+	// reported once, by the new owner.
+	LeaseMoved
+	// DrainStarted: this node began its graceful leave.
+	DrainStarted
+)
+
+func (k ClusterEventKind) String() string {
+	switch k {
+	case MemberJoined:
+		return "member.joined"
+	case MemberLeft:
+		return "member.left"
+	case LeaseMoved:
+		return "lease.moved"
+	}
+	return "drain.started"
+}
+
+// ClusterEvent is one cluster event. Member names the node a membership or
+// drain event is about; Namespace, ClientID, From and To are a lease move's.
+type ClusterEvent struct {
+	Kind      ClusterEventKind
+	Time      time.Time
+	Member    string
+	Namespace string
+	ClientID  string
+	From      string
+	To        string
+}
+
+// ClusterListener is told of cluster events. The broker never waits for it:
+// each listener has a bounded queue that the raising path fills without
+// blocking, and a worker that calls OnClusterEvent under the hook policy.
+// An event that finds the queue full, or is queued at stop, is dropped and
+// counted (hoardmq_cluster_events_dropped_total{module}); delivery is at most
+// once. Membership is read from the consensus configuration about once a
+// second, and a node's first reading after it starts raises nothing.
+type ClusterListener interface {
+	OnClusterEvent(ctx context.Context, ev ClusterEvent)
 }
 
 // DeliveryListener observes delivery events.

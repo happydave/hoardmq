@@ -51,6 +51,7 @@ type pipedDriver struct {
 
 func startPipedDriver(t *testing.T, c *Cluster, clients int, opts driverOptions) *pipedDriver {
 	t.Helper()
+	needAddresses(t, "127.0.0.11", "127.0.0.12")
 	toDriverR, toDriverW := io.Pipe()
 	fromDriverR, fromDriverW := io.Pipe()
 	d := &pipedDriver{stdin: toDriverW, code: make(chan int, 1), stderr: &syncBuffer{}}

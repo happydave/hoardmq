@@ -12,7 +12,7 @@ import (
 // TestFenceRecordNamesTheDecidingCondition runs the fence rule's matrix
 // again and checks, per row, that the record says which condition decided
 // it. Without the record, a fence under a leader this node judged settled
-// and a fence with no reachable quorum look the same (WI 1474).
+// and a fence with no reachable quorum look the same.
 func TestFenceRecordNamesTheDecidingCondition(t *testing.T) {
 	cases := []struct {
 		name            string
@@ -132,7 +132,7 @@ func TestDeferralStreakRecordsOnce(t *testing.T) {
 // TestFenceRecordsAreBounded: the ring keeps the last fenceRecordsMax and
 // the total keeps counting.
 func TestFenceRecordsAreBounded(t *testing.T) {
-	s := &Service{}
+	s := bareService(t)
 	for i := range fenceRecordsMax + 5 {
 		s.recordFence(FenceRecord{Term: uint64(i)})
 	}
@@ -148,7 +148,7 @@ func TestFenceRecordsAreBounded(t *testing.T) {
 // TestLoopTimingRecordsTheLongestGap: the tick loop's gap and the status
 // read's duration are maxima over the run.
 func TestLoopTimingRecordsTheLongestGap(t *testing.T) {
-	s := &Service{}
+	s := bareService(t)
 	base := time.Now()
 	s.markLoop(base)
 	s.markLoop(base.Add(250 * time.Millisecond))

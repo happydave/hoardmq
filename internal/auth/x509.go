@@ -31,6 +31,10 @@ type Revocation struct {
 	// OCSPMaxAge is how old an OCSP answer without a nextUpdate may be;
 	// zero is DefaultOCSPMaxAge.
 	OCSPMaxAge time.Duration
+	// OCSPMaxLifetime is how old the leaf's OCSP answer with a nextUpdate
+	// may be; zero is DefaultOCSPMaxLifetime. An intermediate's is
+	// ocspCAMaxLifetime.
+	OCSPMaxLifetime time.Duration
 	// FetchWait bounds how long a CONNECT waits for a fetch; Timeout bounds
 	// the fetch.
 	FetchWait time.Duration
@@ -56,6 +60,24 @@ type flight struct {
 
 // DefaultOCSPMaxAge is OCSPMaxAge's default.
 const DefaultOCSPMaxAge = 24 * time.Hour
+
+// DefaultOCSPMaxLifetime is OCSPMaxLifetime's default: the longest validity
+// interval the CA/Browser Forum allows a subscriber certificate's answer.
+const DefaultOCSPMaxLifetime = 10 * 24 * time.Hour
+
+// ocspCAMaxLifetime caps an intermediate's answer: the CA/Browser Forum
+// requires one to be updated at least every twelve months.
+const ocspCAMaxLifetime = 366 * 24 * time.Hour
+
+func (r *Revocation) ocspLifetime(leaf bool) time.Duration {
+	switch {
+	case !leaf:
+		return ocspCAMaxLifetime
+	case r.OCSPMaxLifetime == 0:
+		return DefaultOCSPMaxLifetime
+	}
+	return r.OCSPMaxLifetime
+}
 
 // Cache bounds.
 const (
@@ -132,7 +154,7 @@ func (r *Revocation) checkLevel(ctx context.Context, cert, issuer *x509.Certific
 		ocspURL, crlURLs = r.OCSPURL, r.CRLURLs
 	}
 	if r.OCSP {
-		l.ocsp, l.ocspRan = r.ocspStatus(ctx, cert, issuer, ocspURL), true
+		l.ocsp, l.ocspRan = r.ocspStatus(ctx, cert, issuer, ocspURL, r.ocspLifetime(leaf)), true
 	}
 	if r.CRL && l.ocsp == StatusUnknown {
 		l.crl, l.crlRan = r.crlStatus(ctx, cert, issuer, crlURLs), true
@@ -186,8 +208,8 @@ func (r *Revocation) now() time.Time {
 
 // ocspStatus is the cached answer while it is current, else a fetch's,
 // waited for at most FetchWait. url, when set, replaces the certificate's
-// responder.
-func (r *Revocation) ocspStatus(ctx context.Context, leaf, issuer *x509.Certificate, url string) RevocationStatus {
+// responder; lifetime caps an answer's age.
+func (r *Revocation) ocspStatus(ctx context.Context, leaf, issuer *x509.Certificate, url string, lifetime time.Duration) RevocationStatus {
 	if issuer == nil {
 		return StatusUnknown
 	}
@@ -204,12 +226,12 @@ func (r *Revocation) ocspStatus(ctx context.Context, leaf, issuer *x509.Certific
 	key := "ocsp:" + hex.EncodeToString(kh) + ":" + leaf.SerialNumber.Text(16)
 	now := r.now()
 	r.mu.Lock()
-	if a, ok := r.ocsp[key]; ok && a.NextUpdate.After(now) {
+	if a, ok := r.ocsp[key]; ok && ocspCurrent(a.ThisUpdate, a.NextUpdate, now, lifetime) {
 		r.mu.Unlock()
 		return a.Status
 	}
 	f := r.start(key, func() (OCSPAnswer, *CRL, error) {
-		a, err := r.fetchOCSP(url, leaf, issuer)
+		a, err := r.fetchOCSP(url, leaf, issuer, lifetime)
 		return a, nil, err
 	})
 	r.mu.Unlock()
@@ -336,7 +358,7 @@ func (r *Revocation) wait(ctx context.Context, f *flight) bool {
 	return false
 }
 
-func (r *Revocation) fetchOCSP(url string, leaf, issuer *x509.Certificate) (OCSPAnswer, error) {
+func (r *Revocation) fetchOCSP(url string, leaf, issuer *x509.Certificate, lifetime time.Duration) (OCSPAnswer, error) {
 	body, err := OCSPRequest(leaf, issuer)
 	if err != nil {
 		return OCSPAnswer{}, err
@@ -357,7 +379,7 @@ func (r *Revocation) fetchOCSP(url string, leaf, issuer *x509.Certificate) (OCSP
 	if maxAge == 0 {
 		maxAge = DefaultOCSPMaxAge
 	}
-	return AcceptOCSP(data, leaf, issuer, r.now(), maxAge)
+	return AcceptOCSP(data, leaf, issuer, r.now(), maxAge, lifetime)
 }
 
 func (r *Revocation) fetchCRL(url string, issuer *x509.Certificate) (*CRL, error) {

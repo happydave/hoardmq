@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-// TestSettleWaits asserts what WI 1496 is for: a remote-client batch waits for
+// TestSettleWaits asserts what settling is for: a remote-client batch waits for
 // the connection-tracking table, an in-process batch does not, and the limit it
 // waits for is the same one serverStartProblems refuses above. The last part is
 // the one that matters — the two sides drifting apart is how two 100,000-client

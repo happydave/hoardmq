@@ -96,11 +96,12 @@ func holderCluster(t *testing.T, fb func(context.Context, string, string, string
 	return a, b, stopHolder
 }
 
-// TestTakeoverWithAnUndeclaredHolderDownWaitsForItsDeclaration is WI 1765 (a)
-// on the takeover path. The previous owner answers that it holds nothing and
-// every replica asked answers "not found", but the one holder the fetch
-// skipped as down is alive by the log and may come back with its copy. The
-// client is refused and the adoption kept until the holder is declared dead.
+// TestTakeoverWithAnUndeclaredHolderDownWaitsForItsDeclaration pins a down,
+// undeclared holder on the takeover path. The previous owner answers that it
+// holds nothing and every replica asked answers "not found", but the one
+// holder the fetch skipped as down is alive by the log and may come back with
+// its copy. The client is refused and the adoption kept until the holder is
+// declared dead.
 func TestTakeoverWithAnUndeclaredHolderDownWaitsForItsDeclaration(t *testing.T) {
 	_, b, stop := holderCluster(t, foundNowhere, nil)
 	res, err := acquire(t, b, "x", nil, 300, false)
@@ -128,10 +129,11 @@ func TestTakeoverWithAnUndeclaredHolderDownWaitsForItsDeclaration(t *testing.T) 
 	}
 }
 
-// TestAdoptionWithAnUndeclaredHolderDownWaitsForItsDeclaration is WI 1765 (a)
-// on the adoption path, the shape corpus seed 1 traced: the previous owner is
-// declared dead and cannot be asked, and the only holder is down. The CONNECT
-// is refused until the holder is declared, then served fresh.
+// TestAdoptionWithAnUndeclaredHolderDownWaitsForItsDeclaration pins a down,
+// undeclared holder on the adoption path, the shape corpus seed 1 traced: the
+// previous owner is declared dead and cannot be asked, and the only holder is
+// down. The CONNECT is refused until the holder is declared, then served
+// fresh.
 func TestAdoptionWithAnUndeclaredHolderDownWaitsForItsDeclaration(t *testing.T) {
 	holdWorkerBack(t)
 	fixtureFallback = foundNowhere
@@ -346,10 +348,10 @@ func declaredOwnerCluster(t *testing.T) (lead, owner *tnode, views map[string]*p
 	return lead, owner, views
 }
 
-// TestDeclaredOwnerReachableOnItsControlConnectionIsPulled is WI 1765 (b): the
-// previous owner was declared dead but can be reached again — its control
-// connection is up and its data connection is not yet. It is pulled, and its
-// session served, rather than counted as holding nothing.
+// TestDeclaredOwnerReachableOnItsControlConnectionIsPulled: the previous owner
+// was declared dead but can be reached again — its control connection is up
+// and its data connection is not yet. It is pulled, and its session served,
+// rather than counted as holding nothing.
 func TestDeclaredOwnerReachableOnItsControlConnectionIsPulled(t *testing.T) {
 	lead, owner, views := declaredOwnerCluster(t)
 	views[lead.name].set(owner.name, false)
@@ -382,9 +384,9 @@ type confirmSeen struct {
 	token        uint64
 }
 
-// TestConfirmationReachesTheHoldersTheOwnerDoesNotFeed is WI 1765 (c)'s
-// signal: a new owner's confirmation goes to its previous owner and to every
-// holder it does not replicate to, once, and each receiver passes it on.
+// TestConfirmationReachesTheHoldersTheOwnerDoesNotFeed: a new owner's
+// confirmation goes to its previous owner and to every holder it does not
+// replicate to, once, and each receiver passes it on.
 func TestConfirmationReachesTheHoldersTheOwnerDoesNotFeed(t *testing.T) {
 	var mu sync.Mutex
 	seen := map[string][]confirmSeen{}

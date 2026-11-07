@@ -103,7 +103,7 @@ func reconnectAndCount(t *testing.T, ctx context.Context, n *Node, topic string)
 // TestQoS0SentFromTheQueueIsNotDeliveredAgain: a QoS 0 message sent from a
 // durable session's queue is not given to the client again after its node
 // crashes and restarts, nor after another node takes the session over from a
-// replica. QoS 0 is at most once (WI 1831).
+// replica. QoS 0 is at most once.
 func TestQoS0SentFromTheQueueIsNotDeliveredAgain(t *testing.T) {
 	t.Run("a crash and restart", func(t *testing.T) {
 		const topic = "q0/restart"

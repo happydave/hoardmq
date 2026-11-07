@@ -9,7 +9,7 @@ import (
 	"github.com/happydave/hoardmq/internal/packet"
 )
 
-// TestShortCopiesGauge (WI 1632): with three copies on three nodes n1's
+// TestShortCopiesGauge: with three copies on three nodes n1's
 // persistent sessions and led shards are fully copied; with n3 gone and the
 // map moved they have two copies and the gauges count them; with n3 back
 // they read zero again.
@@ -46,7 +46,7 @@ func TestShortCopiesGauge(t *testing.T) {
 		t.Fatalf("n3 gone: %v sessions and %v led shards short, want %d and 4", s, l, persistent)
 	}
 
-	srv, err := NewWithHooks(doc, nil, fixtureHooks)
+	srv, err := newFixtureServer(t, doc)
 	if err != nil {
 		t.Fatal(err)
 	}

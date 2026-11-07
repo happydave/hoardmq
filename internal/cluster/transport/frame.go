@@ -33,11 +33,11 @@ const (
 	Heartbeat
 	// LeaseAlive carries a node's lease renewal and its answer on the urgent
 	// lane: queued ahead of every other class so a renewal never waits behind
-	// replication traffic (WI 1337). It needs framing Version2 on the link.
+	// replication traffic. It needs framing Version2 on the link.
 	LeaseAlive
 	// ConnectionRole is the first frame a version-3 dialer sends after the
-	// handshake: which of the peer pair's two connections this one is (WI
-	// 1340). ConsensusSnapshot carries a raft snapshot, which is bulk and so
+	// handshake: which of the peer pair's two connections this one is.
+	// ConsensusSnapshot carries a raft snapshot, which is bulk and so
 	// travels on the data connection rather than with the other raft
 	// messages on the control connection.
 	ConnectionRole

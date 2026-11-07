@@ -14,7 +14,7 @@ import (
 // consistent with stop-the-world, scheduler starvation, CPU steal on a
 // shared host and swap." GC is measured and the Go scheduler's latency is
 // measured; nothing measured the machine, so three rounds reasoned "not GC,
-// therefore starvation" with disk neither ruled in nor out (WI 1375).
+// therefore starvation" with disk neither ruled in nor out.
 //
 // This file measures the machine. The headline is Linux pressure stall
 // information: for cpu, io and memory, the time some task was stalled on

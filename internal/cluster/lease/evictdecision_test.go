@@ -62,8 +62,8 @@ func TestShouldEvict(t *testing.T) {
 }
 
 // TestLostLeaseDoesNotEvictAClientThatCameBack drives lostLease itself, not
-// the predicate. WI 1495's own B3 and WI 1511 both shipped a tested function
-// that nothing called; this is the control against that.
+// the predicate. A tested function that nothing called has shipped twice;
+// this is the control against that.
 func TestLostLeaseDoesNotEvictAClientThatCameBack(t *testing.T) {
 	c := newCluster(t, []string{"n1", "n2", "n3"}, 5*time.Second, nil)
 	a, b := c.nodes["n1"], c.nodes["n2"]
@@ -105,7 +105,7 @@ func TestLostLeaseDoesNotEvictAClientThatCameBack(t *testing.T) {
 	})
 
 	if !b.sessions.has("default", kept) {
-		t.Error("the client that came back was evicted — the defect this work item exists to fix")
+		t.Error("the client that came back was evicted — the defect deferring the eviction exists to fix")
 	}
 	if got := b.svc.LivenessStats().EvictDeferrals; got == 0 {
 		t.Error("no deferral was counted, so nothing shows the eviction was held off")

@@ -151,7 +151,7 @@ func TestOrderDecidesInterceptorsAndLifecycle(t *testing.T) {
 		if len(problems) != 0 {
 			t.Fatal(problems)
 		}
-		if out := r.Hooks().Inbound(context.Background(), hook.Info{}, &packet.Publish{}); out.Action != hook.Drop {
+		if out, _ := r.Hooks().Inbound(context.Background(), hook.Info{}, &packet.Publish{}); out.Action != hook.Drop {
 			t.Errorf("order %q: outcome %v, want drop", c.order, out.Action)
 		}
 		if got := strings.Join(calls, " "); got != c.calls {

@@ -146,7 +146,7 @@ func runDrainRestart(t *testing.T, defects broker.Defects, confirmTimeout time.D
 // only copy, and its receiver could not fetch it before the node stopped. The
 // restarted node's recovery seals the session rather than deleting it, so the
 // receiver's next fetch finds it and the subscriber gets its session and its
-// five messages (WI 1742).
+// five messages.
 func TestDrainedHolderRestartingKeepsTheSession(t *testing.T) {
 	out := runDrainRestart(t, broker.Defects{}, 2*time.Second)
 	if !out.present || out.received != 5 || out.servedEmpty != 0 {
@@ -171,7 +171,7 @@ func TestDrainedHolderRestartingLosesTheSessionWhenRecoveryEvicts(t *testing.T) 
 // past the deferred reclaim, which seals the session, and ends at its
 // confirmation timeout; the node stops with the session sealed. Its final
 // checkpoint keeps the sealed copy, so the restarted node still has it for
-// the receiver (WI 1763).
+// the receiver.
 func TestDrainedHolderSealedAtStopRestartingKeepsTheSession(t *testing.T) {
 	out := runDrainRestart(t, broker.Defects{}, 3*time.Second)
 	if !out.sealedAtStop {

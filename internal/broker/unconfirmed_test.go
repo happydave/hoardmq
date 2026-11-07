@@ -46,7 +46,7 @@ func TestRetransmissionWhoseOpeningOutranItsDispatchIsRefused(t *testing.T) {
 
 	pub, _ := nodes["n1"].connect("tcp", packet.V5, &packet.Connect{ClientID: "p", CleanStart: true, Properties: packet.Properties{SessionExpiryInterval: &exp}}, false)
 	// A freshly formed cluster can refuse the first publish forwarded to a
-	// peer (WI 1572): wait until one reaches the subscriber's node.
+	// peer: wait until one reaches the subscriber's node.
 	accepted := false
 	for pid := uint16(100); pid < 150 && !accepted; pid++ {
 		pub.send(&packet.Publish{Topic: "t/x", QoS: 1, PacketID: pid, Payload: []byte("warm")})

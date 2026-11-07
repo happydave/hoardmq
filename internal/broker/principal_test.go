@@ -174,12 +174,11 @@ func TestFlappingBansThePrincipalsUseOfTheClientID(t *testing.T) {
 	}
 }
 
-// Across nodes the takeover runs before the principals can be compared: a
-// refused CONNECT on n2 for alice's session on n1 closes alice's connection
-// there (Session taken over), and n2 holds the session offline, its lease
-// recorded offline as a disconnect leaves it; alice resumes it with its
-// subscription. Nothing reaches the refused principal.
-func TestCrossNodeRefusalLeavesTheSessionOffline(t *testing.T) {
+// Across nodes a CONNECT by another principal is refused from the lease
+// table before any takeover: alice's connection on n1 stays open, her lease
+// stays n1's and online, and she keeps receiving. Nothing reaches the refused
+// principal.
+func TestCrossNodeRefusalLeavesTheOwnerConnected(t *testing.T) {
 	alice, _ := auth.HashPassword([]byte("pa"))
 	mallory, _ := auth.HashPassword([]byte("pm"))
 	users := filepath.Join(t.TempDir(), "users.json")
@@ -196,33 +195,27 @@ func TestCrossNodeRefusalLeavesTheSessionOffline(t *testing.T) {
 	}
 	a1.send(&packet.Subscribe{PacketID: 1, Subscriptions: []packet.Subscription{{Filter: "t/a", QoS: 1}}})
 	a1.read()
-	if _, ack := nodes["n2"].connect("tcp", packet.V5, asUser("mallory", false), false); ack.ReasonCode != packet.NotAuthorized || ack.SessionPresent {
-		t.Fatalf("mallory on n2: %s present=%v", ack.ReasonCode, ack.SessionPresent)
-	}
-	if d, ok := a1.read().(*packet.Disconnect); !ok || d.ReasonCode != packet.SessionTakenOver {
-		t.Fatalf("alice's n1 connection: %+v", d)
-	}
-	waitOffline(t, nodes["n2"], "c1")
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		l, ok := nodes["n2"].srv.Leases().Table().Lookup("default", "c1")
-		if ok && l.Owner == "n2" && !l.Online {
+		if l, ok := nodes["n2"].srv.Leases().Table().Lookup("default", "c1"); ok && l.Owner == "n1" {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("the lease after the refusal: %+v %v, want n2's and offline", l, ok)
+			t.Fatal("precondition: n2's table holds alice's lease")
 		}
-		time.Sleep(20 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond)
 	}
-	a2, ack := nodes["n2"].connect("tcp", packet.V5, asUser("alice", false), false)
-	if ack.ReasonCode != packet.Success || !ack.SessionPresent {
-		t.Fatalf("alice on n2: %s present=%v", ack.ReasonCode, ack.SessionPresent)
+	if _, ack := nodes["n2"].connect("tcp", packet.V5, asUser("mallory", false), false); ack.ReasonCode != packet.NotAuthorized || ack.SessionPresent {
+		t.Fatalf("mallory on n2: %s present=%v", ack.ReasonCode, ack.SessionPresent)
+	}
+	if l, ok := nodes["n1"].srv.Leases().Table().Lookup("default", "c1"); !ok || l.Owner != "n1" || !l.Online {
+		t.Fatalf("the lease after the refusal: %+v %v, want n1's and online", l, ok)
 	}
 	pub, _ := nodes["n2"].connect("tcp", packet.V5, &packet.Connect{ClientID: "pub", CleanStart: true, HasUsername: true, Username: "alice", HasPassword: true, Password: []byte("pa")}, false)
 	pub.send(&packet.Publish{Topic: "t/a", QoS: 1, PacketID: 1, Payload: []byte("after")})
 	pub.read()
-	if p, ok := a2.read().(*packet.Publish); !ok || string(p.Payload) != "after" {
-		t.Fatalf("alice's delivery on n2: %+v", p)
+	if p, ok := a1.read().(*packet.Publish); !ok || string(p.Payload) != "after" {
+		t.Fatalf("alice's delivery on n1 after the refusal: %+v", p)
 	}
 }
 

@@ -24,7 +24,7 @@ func eventuallyGone(c net.Conn, wait time.Duration) bool {
 	return false
 }
 
-// TestPeerGoneSeesAClosedClient is WI 1485: once a client has sent its bytes
+// TestPeerGoneSeesAClosedClient: once a client has sent its bytes
 // and closed, and the server has read them, the peek reports the peer gone,
 // and the listener counts it.
 func TestPeerGoneSeesAClosedClient(t *testing.T) {

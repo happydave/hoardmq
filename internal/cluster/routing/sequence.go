@@ -11,7 +11,7 @@ type seqVerdict int
 const (
 	seqInOrder seqVerdict = iota
 	// seqGap: the frames from missingFrom to missingTo never arrived and are
-	// reported before this frame's acknowledgement can cover them (WI 1337).
+	// reported before this frame's acknowledgement can cover them.
 	seqGap
 	// seqLate: a frame this receiver reported missing arrived after all.
 	seqLate
@@ -25,7 +25,7 @@ type seqRange struct{ lo, hi uint64 }
 // inboundSeq judges one peer's forward sequence. Its expectation advances
 // within a stream: a late frame fills its hole and leaves the expectation
 // where it was, since rewinding it made the next frame report a hole that
-// never existed (WI 1708). Only a new stream moves it back.
+// never existed. Only a new stream moves it back.
 type inboundSeq struct {
 	next  uint64 // the sequence the stream's next frame must carry
 	seen  bool   // a frame of the current stream has arrived

@@ -68,7 +68,7 @@ func installedState(msg *message.Message) *store.SessionState {
 // routed a publish into a session and forwarded the same publish here for
 // this node's own subscribers; the session was handed over holding it, and
 // the forward arrives after the install. The session keeps one copy, and the
-// forward still counts as having reached it (WI 1521).
+// forward still counts as having reached it.
 func TestInstalledSessionIsNotGivenAMessageItHeldAgain(t *testing.T) {
 	m, _ := newManager(t, nil)
 	msg := &message.Message{Topic: "t/x", QoS: 1, Payload: []byte("m41"), Publisher: message.Publisher{ClientID: "pub", Node: "n2"}, Seq: 41, Arrived: time.Unix(1_700_000_000, 5)}

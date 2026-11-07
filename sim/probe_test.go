@@ -47,7 +47,7 @@ func TestProbeCountsAnAckedMessageNeverDelivered(t *testing.T) {
 }
 
 // A lost message is attributed: the node that answered it, when, and the
-// pair's connection events and deliveries around it (WI 2259).
+// pair's connection events and deliveries around it.
 func TestProbeAttributesALostMessage(t *testing.T) {
 	crash := time.Now()
 	p := newTestProbe(t, 1)

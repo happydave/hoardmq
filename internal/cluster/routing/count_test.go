@@ -23,8 +23,8 @@ func walkCount(t *Table) (local, remote int) {
 	return local, remote
 }
 
-// TestCountAgreesWithTheWalk is WI 1481: after every Merge, MergeFull and
-// Forget in seeded random sequences, the kept counts equal a full walk.
+// TestCountAgreesWithTheWalk: after every Merge, MergeFull and Forget in
+// seeded random sequences, the kept counts equal a full walk.
 func TestCountAgreesWithTheWalk(t *testing.T) {
 	owners := []string{"a", "b", "c"}
 	for seed := int64(1); seed <= 8; seed++ {

@@ -1,9 +1,12 @@
 # Default values for the HoardMQ chart. Every value below is referenced by a
 # template; the chart's self-check test keeps the two in step.
 
+# The image to run, which the chart cannot render without: the project
+# publishes none, so build one from the reference Dockerfile and push it to
+# a registry the cluster pulls from (chart README).
 image:
-  repository: hoardmq
-  tag: dev
+  repository: ""
+  tag: ""
   pullPolicy: IfNotPresent
 
 # Number of broker pods. Size for N-1: a rolling restart runs the cluster
@@ -56,15 +59,24 @@ tls:
   # generated: the chart creates a CA and a node certificate (SANs for every
   # ordinal) in a Secret and reuses it across upgrades.
   # certManager: an Issuer and Certificate are created for cert-manager.
+  # certManagerCSI: no pod starts while cert-manager or its issuer is down;
+  # in exchange cert-manager's CSI driver, a prerequisite, makes each pod's
+  # key on its node, in that pod's volume only (see the chart README, "TLS
+  # between nodes").
   mode: generated
   # Days of validity for generated certificates.
   generatedValidityDays: 3650
   certManager:
-    # Existing ClusterIssuer or Issuer to sign the node certificate; empty
-    # creates a self-signed Issuer in the release namespace.
+    # Existing ClusterIssuer or Issuer to sign the node certificates, in both
+    # cert-manager modes; empty makes a private CA in the release namespace.
     issuerRef:
       name: ""
       kind: ClusterIssuer
+  # The certificates the CSI driver issues; tls.certManager.issuerRef names
+  # their issuer.
+  certManagerCSI:
+    duration: 2160h
+    renewBefore: 360h
 
 # The MQTT listener clients reach through the client Service.
 listeners:
@@ -82,6 +94,13 @@ listeners:
     secretName: ""
     # As for mqtt; with both listeners a pod may hold the sum.
     maxConnections: 20000
+  # More listeners, appended after mqtt and mqtts without restating them.
+  # Each entry needs name (a port name: at most 15 characters, lower case),
+  # type and port; every other member is passed to the broker's listener as
+  # written (tls, maxConnections, path, ...). Each gets a container port and a
+  # port on the client Service of its name. For example:
+  #   - { name: ws, type: ws, port: 8080, path: /mqtt }
+  extra: []
 
 # Each pod's limits (see the chart README, "Limits", for the values'
 # reasons). The broker's own defaults are unlimited; 0 turns one off.
@@ -94,6 +113,12 @@ limits:
   # Topic filters one client's session may hold; a SUBSCRIBE filter past it
   # is refused and the client stays connected.
   maxSubscriptions: 100
+  # The longest keep-alive a client may use, in seconds, a keep-alive of 0
+  # included: a client silent for one and a half times it is closed.
+  maxKeepAlive: 3600
+  # QoS 1 and 2 messages in flight to one client before the rest wait in its
+  # queue; a client asking for fewer keeps its own.
+  maxInflightMessages: 1024
 
 service:
   type: ClusterIP
@@ -131,6 +156,38 @@ resources:
 
 podDisruptionBudget:
   enabled: true
+
+# The broker container's security context. The broker writes only its data
+# directory, the volume mounted at /var/lib/hoardmq, so the root filesystem is
+# read-only. A value set here replaces this one whole; {} sets none.
+containerSecurityContext:
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  runAsNonRoot: true
+  capabilities:
+    drop:
+      - ALL
+  seccompProfile:
+    type: RuntimeDefault
+
+# A NetworkPolicy admitting only the broker's own traffic. Off by default: a
+# policy that does not fit the deployment cuts it off. On, it admits the
+# cluster port from the release's pods only, the client ports (mqtt, mqtts,
+# every extra listener) from clientFrom, and the observability port (probes,
+# metrics) from observabilityFrom; an empty list admits any source. Egress is
+# not restricted.
+networkPolicy:
+  enabled: false
+  clientFrom: []
+  observabilityFrom: []
+
+# A prometheus-operator ServiceMonitor scraping /metrics on every pod's
+# observability port. Off by default; it needs the operator's CRD. labels are
+# added to it, for a Prometheus that selects ServiceMonitors by label.
+serviceMonitor:
+  enabled: false
+  interval: 30s
+  labels: {}
 
 # Prefer spreading pods over nodes.
 podAntiAffinity: preferred

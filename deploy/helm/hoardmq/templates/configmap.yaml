@@ -4,6 +4,9 @@ metadata:
   name: {{ include "hoardmq.fullname" . }}
   labels:
     {{- include "hoardmq.labels" . | nindent 4 }}
+{{- if not (has .Values.tls.mode (list "generated" "certManager" "certManagerCSI")) }}
+{{- fail (printf "tls.mode %q is not one of generated, certManager, certManagerCSI" (toString .Values.tls.mode)) }}
+{{- end }}
 {{- if lt (int .Values.cluster.maxReplicas) 1 }}
 {{- fail "cluster.maxReplicas must be at least 1" }}
 {{- end }}
@@ -20,7 +23,7 @@ data:
       "version" 1
       "node" (dict "dataDir" "/var/lib/hoardmq")
       "listeners" (list (dict "name" "mqtt" "type" "tcp" "address" (printf ":%d" (int .Values.listeners.mqtt.port)) "maxConnections" (int .Values.listeners.mqtt.maxConnections)))
-      "limits" (dict "connectRate" (int .Values.limits.connectRate) "connectBurst" (int .Values.limits.connectBurst) "maxSubscriptions" (int .Values.limits.maxSubscriptions))
+      "limits" (dict "connectRate" (int .Values.limits.connectRate) "connectBurst" (int .Values.limits.connectBurst) "maxSubscriptions" (int .Values.limits.maxSubscriptions) "maxKeepAlive" (int .Values.limits.maxKeepAlive) "maxInflightMessages" (int .Values.limits.maxInflightMessages))
       "cluster" (dict
         "id" .Values.cluster.id
         "replicas" (int .Values.cluster.replicas)
@@ -37,6 +40,19 @@ data:
     -}}
     {{- if .Values.listeners.mqtts.enabled }}
     {{- $_ := set $base "listeners" (append (get $base "listeners") (dict "name" "mqtts" "type" "tls" "address" (printf ":%d" (int .Values.listeners.mqtts.port)) "maxConnections" (int .Values.listeners.mqtts.maxConnections) "tls" (dict "certFile" "/etc/hoardmq/client-tls/tls.crt" "keyFile" "/etc/hoardmq/client-tls/tls.key"))) }}
+    {{- end }}
+    {{- $names := dict "mqtt" true "mqtts" true }}
+    {{- range $i, $l := .Values.listeners.extra }}
+    {{- if not (and $l.name $l.type $l.port) }}
+    {{- fail (printf "listeners.extra[%d] needs name, type and port" $i) }}
+    {{- end }}
+    {{- if hasKey $names $l.name }}
+    {{- fail (printf "listeners.extra[%d]: the name %q is taken" $i $l.name) }}
+    {{- end }}
+    {{- $_ := set $names $l.name true }}
+    {{- $entry := omit $l "port" }}
+    {{- $_ := set $entry "address" (printf ":%d" (int $l.port)) }}
+    {{- $_ := set $base "listeners" (append (get $base "listeners") $entry) }}
     {{- end }}
     {{- if and (not .Values.admin.enabled) (hasKey .Values.extraConfig "admin") }}
     {{- fail "extraConfig.admin configures the admin API, which closes the observability listener's /drain the preStop posts to: set admin.enabled so the preStop drains through the API" }}

@@ -18,10 +18,10 @@ import (
 	"github.com/happydave/hoardmq/internal/cluster/transport"
 )
 
-// The failover measurement's evidence for WI 1470's open questions (WI
-// 1474): how the storm's CPU divides between the simulated clients and the
-// nodes, what the process was doing before the first fence, and whether a
-// peer's frames were stuck unsent or unread.
+// The failover measurement's evidence for three open questions: how the
+// storm's CPU divides between the simulated clients and the nodes, what the
+// process was doing before the first fence, and whether a peer's frames were
+// stuck unsent or unread.
 
 // nodeLabels runs f with pprof labels naming a node. Goroutines created
 // while f runs inherit them, so a node's accept loops, connection handlers
@@ -115,7 +115,7 @@ type PeersSample struct {
 // wrong. It fired once: a drawn cluster port collided with the remote mode's
 // fixed client port, the filter matched every client connection, and one
 // 250,000-client run wrote 6,421,763 rows into a 937 MB artifact while
-// spending 286 ms a second reading them (WI 1511).
+// spending 286 ms a second reading them.
 const socketsPerSampleMax = 2000
 
 // peerSamplesMax bounds the series at one sample a second over the window.

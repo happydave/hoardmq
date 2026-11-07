@@ -176,7 +176,7 @@ func TestRuntimeSnapshotSeesContention(t *testing.T) {
 	}
 }
 
-// TestProgressLine pins the WI 1285 line format: phase, progress fraction,
+// TestProgressLine pins the progress line format: phase, progress fraction,
 // storm counters, and the runtime figures, one line, no locks read.
 func TestProgressLine(t *testing.T) {
 	got := progressLine("reconnect", 95*time.Second, 3855, 33402, 27105, 12, 51234, 1.75)

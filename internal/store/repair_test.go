@@ -33,7 +33,7 @@ func journalScript(t *testing.T, s *Store, fail func()) {
 	must(s.Checkpoint(fixed(st)))
 	must(s.Enqueue(k("a"), Entry{Seq: 2, Message: msg("ns", "t/a", "two"), QoS: 1, PacketID: 2}))
 	must(s.Sent(k("a"), 2, 2))
-	must(s.Retain(msg("ns", "r", "kept")))
+	must(s.Retain(msg("ns", "r", "kept"), Version{}))
 	must(s.Sync())
 	must(s.Complete(k("a"), 1))
 	must(s.SessionDelete(k("b")))

@@ -9,13 +9,13 @@ import (
 	"github.com/happydave/hoardmq/internal/packet"
 )
 
-// TestNewOwnersPublishesAreNotRefusedPastTheConfirmation is WI 1805's r8 at
-// the product's 5 s move grace: a subscriber taken over from n1 to n2, and a
-// publisher on n2 publishing to its topic. n1 keeps advertising the topic for
-// the grace, so each publish is forwarded there too. Once n2's confirmation
-// has reached n1, n1 accepts n2's forwards, so the publisher is refused at
-// most until then, not for the whole grace, and the moved subscriber gets
-// every message once.
+// TestNewOwnersPublishesAreNotRefusedPastTheConfirmation is the failover case
+// that refused publishes after a hand-off, at the product's 5 s move grace: a
+// subscriber taken over from n1 to n2, and a publisher on n2 publishing to its
+// topic. n1 keeps advertising the topic for the grace, so each publish is
+// forwarded there too. Once n2's confirmation has reached n1, n1 accepts n2's
+// forwards, so the publisher is refused at most until then, not for the whole
+// grace, and the moved subscriber gets every message once.
 func TestNewOwnersPublishesAreNotRefusedPastTheConfirmation(t *testing.T) {
 	nodes := startTrio(t, func(_ string, d *config.Document) { d.Cluster.Leases.TakeoverTimeoutMs = 5000 })
 	exp := uint32(300)

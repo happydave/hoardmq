@@ -16,15 +16,15 @@ import (
 // callers arriving while it runs join the next group, which starts the
 // moment the current one finishes. A caller therefore waits at most two
 // fsyncs, and the disk sees one fsync per group rather than one per
-// acknowledgement — the floor WI 1292 round 3 measured at ~380 operations
-// a second per node.
+// acknowledgement — the floor measured at ~380 operations a second per
+// node.
 //
 // Durability: a caller is released only by an fsync that was
 // issued after its own append reached the file (the leader flushes under
 // the store lock and records the covered position before it syncs), and
 // only if no fsync of the store failed between the group's seal and its
 // release. After a failed fsync the journal is not whole, and the next group
-// repairs it instead of syncing (WI 1812).
+// repairs it instead of syncing.
 type groupSyncer struct {
 	store *Store
 
@@ -201,7 +201,7 @@ func (g *groupSyncer) lead(grp *syncGroup) error {
 	// Sealed before the store lock is released: a caller that appends after
 	// this flush can only reach the syncer once the group is sealed, and then
 	// waits for a later fsync instead of joining this one, which cannot cover
-	// its record (WI 1490). The syncer lock is only ever taken inside the store
+	// its record. The syncer lock is only ever taken inside the store
 	// lock, never the reverse.
 	g.mu.Lock()
 	grp.sealed, grp.target = true, target

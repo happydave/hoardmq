@@ -72,6 +72,7 @@ func TestApplyDecisions(t *testing.T) {
 		{"a bad collection name", 28, Op{Collection: "A.b", Key: "x", Value: json.RawMessage(`{}`)}, false, RefusedInvalid, 0},
 	}
 	for _, s := range steps {
+		s.op.Max = 3
 		r := apply(t, c, s.index, s.op)
 		if r.OK != s.ok || r.Reason != s.reason || r.Version != s.version || r.Index != s.index {
 			t.Errorf("%s: %+v, want ok=%v reason=%q version=%d", s.name, r, s.ok, s.reason, s.version)
@@ -92,10 +93,10 @@ func TestApplyDecisions(t *testing.T) {
 // A key that is not UTF-8 cannot survive the operation's JSON, so the rule is
 // checked where it decides.
 func TestDecideRefusesAKeyThatIsNotUTF8(t *testing.T) {
-	if why := Decide(put("\xff", `{}`, nil), Record{}, false, 0, 10); why != RefusedInvalid {
+	if why := Decide(put("\xff", `{}`, nil), Record{}, false, 0); why != RefusedInvalid {
 		t.Fatalf("%q", why)
 	}
-	if why := Decide(put("\u00e9", `{}`, nil), Record{}, false, 0, 10); why != "" {
+	if why := Decide(put("\u00e9", `{}`, nil), Record{}, false, 0); why != "" {
 		t.Fatalf("a UTF-8 key: %q", why)
 	}
 }
@@ -128,6 +129,7 @@ func TestApplyIsDeterministic(t *testing.T) {
 			op = put(key, fmt.Sprintf(`{"n":%d}`, i), nil)
 		}
 		op.At = at.Add(time.Duration(i) * time.Second)
+		op.Max = 50
 		ra, rb := apply(t, a, i, op), apply(t, b, i, op)
 		if ra.OK != rb.OK || ra.Reason != rb.Reason {
 			t.Fatalf("step %d: %+v and %+v", i, ra, rb)

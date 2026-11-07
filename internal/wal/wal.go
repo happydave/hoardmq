@@ -107,7 +107,7 @@ type Log struct {
 	closed   bool
 
 	// rollMu guards the active file against an fsync in flight outside the
-	// owner's lock (group commit, WI 1292 round 4): Fsync holds it shared
+	// owner's lock (group commit): Fsync holds it shared
 	// while it syncs, roll and Close hold it exclusively while they close or
 	// replace the file. gen counts rolls so a late Fsync can tell its file
 	// was already synced and closed by roll.
@@ -123,7 +123,7 @@ type Log struct {
 	writeFailures atomic.Int64
 	// syncMu is held across every sync of the active file. Linux reports a
 	// write-back error to one fsync of a file, so two that overlap can see one
-	// fail and the other succeed over the pages the failure dropped (WI 1812).
+	// fail and the other succeed over the pages the failure dropped.
 	syncMu sync.Mutex
 }
 
@@ -144,13 +144,25 @@ func Open(dir, name string, opts Options) (*Log, error) {
 	if err := os.MkdirAll(l.dir, 0o750); err != nil {
 		return nil, fmt.Errorf("wal %s: %w", name, err)
 	}
-	restart, err := l.scan()
-	if err != nil {
-		return nil, err
+	sv := l.survey()
+	// A segment cut before its header goes even when an earlier segment is
+	// then refused; a torn tail is cut only once every segment read clean.
+	if sv.TornSegment != nil {
+		if err := l.removeTornSegment(*sv.TornSegment); err != nil {
+			return nil, err
+		}
+	}
+	if sv.Err != nil {
+		return nil, sv.Err
+	}
+	if sv.TornTail != nil {
+		if err := l.truncateTornTail(*sv.TornTail); err != nil {
+			return nil, err
+		}
 	}
 	if len(l.segments) == 0 {
-		l.last = restart - 1
-		if err := l.roll(restart); err != nil {
+		l.last = sv.NewSegment - 1
+		if err := l.roll(sv.NewSegment); err != nil {
 			return nil, err
 		}
 		return l, nil
@@ -161,13 +173,63 @@ func Open(dir, name string, opts Options) (*Log, error) {
 	return l, nil
 }
 
-// scan lists segments, validates headers, and verifies every record of every
-// segment, repairing a torn tail on the last one. It returns the index a log
-// left with no segment starts at.
-func (l *Log) scan() (uint64, error) {
+// Inspect reads the log named name under dir as Open would, writing nothing.
+// The Log it returns holds the segments a start keeps and takes no append.
+func Inspect(dir, name string, opts Options) (*Survey, *Log) {
+	if opts.Logger == nil {
+		opts.Logger = slog.Default()
+	}
+	l := &Log{name: name, dir: filepath.Join(dir, name), opts: opts, log: opts.Logger.With("wal", name), closed: true}
+	return l.survey(), l
+}
+
+// SegmentInfo is one segment as a start keeps it.
+type SegmentInfo struct {
+	File        string
+	First, Last uint64 // Last is First-1 for a segment with no record
+	Bytes       int64
+}
+
+// TornSegment is a last segment a crash left before its header reached the
+// disk; a start removes it.
+type TornSegment struct {
+	Segment string
+	Bytes   int64
+	path    string
+}
+
+// TornTail is a record cut short at the end of the last segment; a start
+// truncates the segment at Offset, dropping Bytes.
+type TornTail struct {
+	Segment string
+	Offset  int64
+	Index   uint64 // the record cut short
+	Reason  string
+	Bytes   int64
+	path    string
+}
+
+// Survey is what a start does to a log's segments: the segments it keeps,
+// the repairs it makes, and the error it refuses on, if any.
+type Survey struct {
+	Segments    []SegmentInfo
+	TornSegment *TornSegment
+	TornTail    *TornTail
+	Err         error
+	// NewSegment is the first index of the segment a start creates when no
+	// segment is left, 0 otherwise.
+	NewSegment uint64
+}
+
+// survey lists segments, validates headers and verifies every record of
+// every segment, writing nothing. It sets the log's segments and last index
+// as they are once the start's repairs are made.
+func (l *Log) survey() *Survey {
+	sv := &Survey{}
 	entries, err := os.ReadDir(l.dir)
 	if err != nil {
-		return 0, fmt.Errorf("wal %s: %w", l.name, err)
+		sv.Err = fmt.Errorf("wal %s: %w", l.name, err)
+		return sv
 	}
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), segmentExt) {
@@ -175,7 +237,8 @@ func (l *Log) scan() (uint64, error) {
 		}
 		first, err := strconv.ParseUint(strings.TrimSuffix(e.Name(), segmentExt), 10, 64)
 		if err != nil {
-			return 0, fmt.Errorf("wal %s: unexpected file %s", l.name, e.Name())
+			sv.Err = fmt.Errorf("wal %s: unexpected file %s", l.name, e.Name())
+			return sv
 		}
 		l.segments = append(l.segments, &segment{path: filepath.Join(l.dir, e.Name()), first: first})
 	}
@@ -183,20 +246,26 @@ func (l *Log) scan() (uint64, error) {
 	restart := uint64(1)
 	if n := len(l.segments); n > 0 {
 		s := l.segments[n-1]
-		removed, err := l.removeTornSegment(s)
+		torn, size, err := l.tornSegment(s)
 		if err != nil {
-			return 0, err
+			sv.Err = err
+			return sv
 		}
-		if removed {
+		if torn {
+			sv.TornSegment = &TornSegment{Segment: filepath.Base(s.path), Bytes: size, path: s.path}
 			l.segments = l.segments[:n-1]
 			restart = s.first
 		}
 	}
 	for i, s := range l.segments {
 		isLast := i == len(l.segments)-1
-		last, size, err := l.verify(s, isLast)
+		last, size, torn, err := l.inspect(s, isLast)
 		if err != nil {
-			return 0, err
+			sv.Err = err
+			return sv
+		}
+		if torn != nil {
+			sv.TornTail = torn
 		}
 		s.last, s.size = last, size
 		if last != 0 {
@@ -205,7 +274,18 @@ func (l *Log) scan() (uint64, error) {
 			l.last = s.first - 1
 		}
 	}
-	return restart, nil
+	for _, s := range l.segments {
+		last := s.last
+		if last == 0 {
+			last = s.first - 1
+		}
+		sv.Segments = append(sv.Segments, SegmentInfo{File: filepath.Base(s.path), First: s.first, Last: last, Bytes: s.size})
+	}
+	if len(l.segments) == 0 {
+		sv.NewSegment = restart
+		l.last = restart - 1
+	}
+	return sv
 }
 
 // tornSegment reports whether a segment of size bytes, whose first bytes are
@@ -226,39 +306,42 @@ func tornSegment(head []byte, size int64) bool {
 	return true
 }
 
-// removeTornSegment removes the last segment if a crash left it before its
-// header reached the disk. It holds no record.
-func (l *Log) removeTornSegment(s *segment) (bool, error) {
+// tornSegment reads whether the last segment is one a crash left before its
+// header reached the disk, and its size.
+func (l *Log) tornSegment(s *segment) (bool, int64, error) {
 	f, err := os.Open(s.path)
 	if err != nil {
-		return false, fmt.Errorf("wal %s: %w", l.name, err)
+		return false, 0, fmt.Errorf("wal %s: %w", l.name, err)
 	}
 	head := make([]byte, headerSize)
 	n, err := io.ReadFull(f, head)
 	_ = f.Close()
 	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
-		return false, fmt.Errorf("wal %s: %w", l.name, err)
+		return false, 0, fmt.Errorf("wal %s: %w", l.name, err)
 	}
 	size := int64(n)
 	if n == headerSize {
 		info, err := os.Stat(s.path)
 		if err != nil {
-			return false, fmt.Errorf("wal %s: %w", l.name, err)
+			return false, 0, fmt.Errorf("wal %s: %w", l.name, err)
 		}
 		size = info.Size()
 	}
-	if !tornSegment(head[:n], size) {
-		return false, nil
-	}
-	l.log.Warn("removing a segment cut short before its header", "segment", filepath.Base(s.path), "bytes", size)
-	if err := os.Remove(s.path); err != nil {
-		return false, fmt.Errorf("wal %s: %w", l.name, err)
+	return tornSegment(head[:n], size), size, nil
+}
+
+// removeTornSegment removes the segment the survey found cut before its
+// header. It holds no record.
+func (l *Log) removeTornSegment(t TornSegment) error {
+	l.log.Warn("removing a segment cut short before its header", "segment", t.Segment, "bytes", t.Bytes)
+	if err := os.Remove(t.path); err != nil {
+		return fmt.Errorf("wal %s: %w", l.name, err)
 	}
 	if err := syncDir(l.dir); err != nil {
-		return false, fmt.Errorf("wal %s: %w", l.name, err)
+		return fmt.Errorf("wal %s: %w", l.name, err)
 	}
 	l.removedSegments++
-	return true, nil
+	return nil
 }
 
 // OpenRepairs is what Open repaired: torn tails truncated, and segments a
@@ -267,24 +350,25 @@ func (l *Log) OpenRepairs() (tornTails, removedSegments int) {
 	return l.tornTails, l.removedSegments
 }
 
-// verify walks a segment, returning its last index and byte size. On the
-// last segment a short tail is truncated; elsewhere it is corruption.
-func (l *Log) verify(s *segment, isLast bool) (uint64, int64, error) {
-	f, err := os.OpenFile(s.path, os.O_RDWR, 0)
+// inspect walks a segment, returning its last index and byte size as they
+// are once a torn tail is cut. On the last segment a short tail is a torn
+// tail; elsewhere it is corruption. It writes nothing.
+func (l *Log) inspect(s *segment, isLast bool) (uint64, int64, *TornTail, error) {
+	f, err := os.Open(s.path)
 	if err != nil {
-		return 0, 0, fmt.Errorf("wal %s: %w", l.name, err)
+		return 0, 0, nil, fmt.Errorf("wal %s: %w", l.name, err)
 	}
 	defer func() { _ = f.Close() }()
 	first, err := readHeader(f, l.name, filepath.Base(s.path))
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, nil, err
 	}
 	if first != s.first {
-		return 0, 0, fmt.Errorf("wal %s: segment %s header says first index %d", l.name, filepath.Base(s.path), first)
+		return 0, 0, nil, fmt.Errorf("wal %s: segment %s header says first index %d", l.name, filepath.Base(s.path), first)
 	}
 	info, err := f.Stat()
 	if err != nil {
-		return 0, 0, fmt.Errorf("wal %s: %w", l.name, err)
+		return 0, 0, nil, fmt.Errorf("wal %s: %w", l.name, err)
 	}
 	r := bufio.NewReader(f)
 	offset := int64(headerSize)
@@ -296,17 +380,17 @@ func (l *Log) verify(s *segment, isLast bool) (uint64, int64, error) {
 			break
 		}
 		if err == io.ErrUnexpectedEOF || (err == nil && n < recordHeader) {
-			return l.torn(f, s, isLast, offset, index+1, "record header cut short")
+			return l.torn(s, isLast, info.Size(), offset, index+1, "record header cut short")
 		}
 		if err != nil {
-			return 0, 0, fmt.Errorf("wal %s: %w", l.name, err)
+			return 0, 0, nil, fmt.Errorf("wal %s: %w", l.name, err)
 		}
 		length := binary.BigEndian.Uint32(hdr[0:4])
 		typ := hdr[4]
 		want := binary.BigEndian.Uint32(hdr[5:9])
 		left := info.Size() - offset - recordHeader
 		if int64(length) > maxRecordBytes {
-			return 0, 0, &CorruptError{Log: l.name, Segment: filepath.Base(s.path), Offset: offset, Index: index + 1,
+			return 0, 0, nil, &CorruptError{Log: l.name, Segment: filepath.Base(s.path), Offset: offset, Index: index + 1,
 				Reason: fmt.Sprintf("record length %d over the maximum", length)}
 		}
 		if int64(length) > left {
@@ -315,44 +399,54 @@ func (l *Log) verify(s *segment, isLast bool) (uint64, int64, error) {
 			if isLast && !l.opts.IgnoreChecksum {
 				rest := make([]byte, max(left, 0))
 				if _, err := io.ReadFull(r, rest); err != nil {
-					return 0, 0, fmt.Errorf("wal %s: %w", l.name, err)
+					return 0, 0, nil, fmt.Errorf("wal %s: %w", l.name, err)
 				}
 				if lengthDamaged(typ, want, rest) {
-					return 0, 0, &CorruptError{Log: l.name, Segment: filepath.Base(s.path), Offset: offset, Index: index + 1,
+					return 0, 0, nil, &CorruptError{Log: l.name, Segment: filepath.Base(s.path), Offset: offset, Index: index + 1,
 						Reason: fmt.Sprintf("record length %d damaged (past the end of the segment)", length)}
 				}
 			}
-			return l.torn(f, s, isLast, offset, index+1, "record payload cut short")
+			return l.torn(s, isLast, info.Size(), offset, index+1, "record payload cut short")
 		}
 		payload := make([]byte, length)
 		if _, err := io.ReadFull(r, payload); err != nil {
 			if err == io.EOF || err == io.ErrUnexpectedEOF {
-				return l.torn(f, s, isLast, offset, index+1, "record payload cut short")
+				return l.torn(s, isLast, info.Size(), offset, index+1, "record payload cut short")
 			}
-			return 0, 0, fmt.Errorf("wal %s: %w", l.name, err)
+			return 0, 0, nil, fmt.Errorf("wal %s: %w", l.name, err)
 		}
 		if crc(typ, payload) != want && !l.opts.IgnoreChecksum {
-			return 0, 0, &CorruptError{Log: l.name, Segment: filepath.Base(s.path), Offset: offset, Index: index + 1}
+			return 0, 0, nil, &CorruptError{Log: l.name, Segment: filepath.Base(s.path), Offset: offset, Index: index + 1}
 		}
 		index++
 		offset += int64(recordHeader) + int64(length)
 	}
-	return index, offset, nil
+	return index, offset, nil, nil
 }
 
-func (l *Log) torn(f *os.File, s *segment, isLast bool, offset int64, index uint64, what string) (uint64, int64, error) {
+func (l *Log) torn(s *segment, isLast bool, size, offset int64, index uint64, what string) (uint64, int64, *TornTail, error) {
 	if !isLast {
-		return 0, 0, &CorruptError{Log: l.name, Segment: filepath.Base(s.path), Offset: offset, Index: index}
+		return 0, 0, nil, &CorruptError{Log: l.name, Segment: filepath.Base(s.path), Offset: offset, Index: index}
 	}
-	l.log.Warn("truncating torn tail", "segment", filepath.Base(s.path), "offset", offset, "reason", what)
-	if err := f.Truncate(offset); err != nil {
-		return 0, 0, fmt.Errorf("wal %s: truncate: %w", l.name, err)
+	return index - 1, offset, &TornTail{Segment: filepath.Base(s.path), Offset: offset, Index: index, Reason: what, Bytes: size - offset, path: s.path}, nil
+}
+
+// truncateTornTail cuts the last segment at the survey's torn tail.
+func (l *Log) truncateTornTail(t TornTail) error {
+	l.log.Warn("truncating torn tail", "segment", t.Segment, "offset", t.Offset, "reason", t.Reason)
+	f, err := os.OpenFile(t.path, os.O_RDWR, 0)
+	if err != nil {
+		return fmt.Errorf("wal %s: %w", l.name, err)
+	}
+	defer func() { _ = f.Close() }()
+	if err := f.Truncate(t.Offset); err != nil {
+		return fmt.Errorf("wal %s: truncate: %w", l.name, err)
 	}
 	if err := f.Sync(); err != nil {
-		return 0, 0, err
+		return err
 	}
 	l.tornTails++
-	return index - 1, offset, nil
+	return nil
 }
 
 // lengthDamaged reports whether a record whose length reaches past the end of
@@ -815,6 +909,13 @@ func (l *Log) LatestCheckpoint() (uint64, []byte, bool) {
 func (l *Log) CheckpointIndex() (uint64, bool) {
 	idx, _, name, _ := l.latestCheckpoint()
 	return idx, name != ""
+}
+
+// Checkpoints is the newest checkpoint that verifies, its file name ("" with
+// none), and the newer files passed over to reach it, read without logging.
+func (l *Log) Checkpoints() (uint64, string, []SkippedCheckpoint) {
+	idx, _, name, skipped := l.latestCheckpoint()
+	return idx, name, skipped
 }
 
 func (l *Log) logSkipped(skipped []SkippedCheckpoint) {

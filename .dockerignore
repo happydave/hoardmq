@@ -1,0 +1,8 @@
+# The build context of the reference Dockerfile. .git stays out, so the
+# image's version comes only from the VERSION build argument.
+.git
+tmp/
+sim/results/
+*.test
+*.out
+/hoardmq

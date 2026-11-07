@@ -43,7 +43,7 @@ func TestCorpus(t *testing.T) {
 		acked += n
 		// The description in the corpus is derived from the schedule, so a
 		// generator change moves it rather than leaving a label that reads
-		// like a finding (WI 1579).
+		// like a finding.
 		if summary != "" && summary != c.What {
 			t.Errorf("seed %d is described as %q; its schedule is %q", c.Seed, c.What, summary)
 		}
@@ -51,7 +51,7 @@ func TestCorpus(t *testing.T) {
 	// Over the corpus as a whole, publishes must have been *accepted*:
 	// no-acknowledged-loss is a statement about acknowledged publishes only,
 	// so a build that refused everything would hold it over an empty ledger
-	// every time (WI 1308). `acked` is the count of accepted publishes; a
+	// every time. `acked` is the count of accepted publishes; a
 	// refused one is in the ledger's failures and in no property's subject.
 	t.Logf("exemptions fired over the corpus: %d", exemptionsFired)
 	if acked == 0 {

@@ -109,7 +109,7 @@ var checkpointChanges = []struct {
 // its session was read for a checkpoint and before the checkpoint is written
 // is recovered after a restart. A checkpoint that read the log's index after
 // the state would put such a record below its index and outside its state,
-// and recovery would never replay it (WI 1818).
+// and recovery would never replay it.
 func TestRecordAfterTheSnapshotSurvivesTheCheckpoint(t *testing.T) {
 	for _, tc := range checkpointChanges {
 		t.Run(tc.name, func(t *testing.T) {

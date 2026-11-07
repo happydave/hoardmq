@@ -28,6 +28,9 @@ type Connection interface {
 	Identity() *auth.Identity
 	Deliver(*packet.Publish) error
 	Send(packet.Packet) error
+	// Offer is Send that never waits: ErrBusy when the outbound queue is
+	// full, with a later Resume once it has room.
+	Offer(packet.Packet) error
 	Close(packet.ReasonCode)
 	SendQuota() int
 	SessionExpiryOverride() *uint32
@@ -94,6 +97,10 @@ type Session struct {
 	// shared-group choice, which runs under the router lock.
 	online   atomic.Bool
 	identity auth.Identity
+	// queueLimit is the queue bound the principal's authenticator set
+	// (QueueLimitAttribute) at the session's latest CONNECT, 0 for none; the
+	// manager's bound still caps it.
+	queueLimit int
 
 	expiryInterval uint32
 	expiresAt      time.Time
@@ -118,17 +125,18 @@ type Session struct {
 	inflightByID map[uint16]*inflight
 	queuedIDs    map[uint16]bool // identifiers reserved by queued messages
 	queue        []*queued
-	// queueCounted is the queue length last added to the manager's count of
-	// queued messages.
-	queueCounted int
-	nextID       uint16
-	drops        uint64
-	expired      uint64
+	// queueCounted and inflightCounted are the queue and in-flight lengths
+	// last added to the manager's counts.
+	queueCounted    int
+	inflightCounted int
+	nextID          uint16
+	drops           uint64
+	expired         uint64
 	// installed holds the identities of the messages this session held when
 	// it was installed here from a hand-over. A forward of one of them can be
 	// applied after the install: the previous owner sent it before sealing
 	// the session, and it waits in the routing plane's apply queue while the
-	// answer carrying the session is handled on arrival (WI 1521).
+	// answer carrying the session is handled on arrival.
 	installed map[message.ID]struct{}
 	// sent lists, on a node that forwards, the messages this session was sent
 	// within sentWindow, oldest first and at most sentMax: a hand-over
@@ -344,13 +352,23 @@ func (s *Session) countQueue() {
 		s.mgr.queued.Add(int64(d))
 		s.queueCounted = len(s.queue)
 	}
+	if d := len(s.inflight) - s.inflightCounted; d != 0 {
+		s.mgr.inflight.Add(int64(d))
+		s.inflightCounted = len(s.inflight)
+	}
 }
 
 // deliver hands one message to the session: sent at once when the connection
-// has room and nothing is queued ahead of it, queued otherwise. The caller
-// holds the session lock.
-func (s *Session) deliver(m *message.Message, t target, now time.Time, maxQueued int, dropNewest bool, j *journalWriter) {
+// has room and nothing is queued ahead of it, queued otherwise. With
+// DropOfflineQoS0 a QoS 0 delivery to a session with no connection is dropped
+// and counted instead; what is already queued stays. The caller holds the
+// session lock.
+func (s *Session) deliver(m *message.Message, t target, now time.Time, l *Limits, j *journalWriter) {
 	defer s.countQueue()
+	if s.conn == nil && t.qos == 0 && l.DropOfflineQoS0 {
+		s.notifyDrop(m, dropOfflineQoS0)
+		return
+	}
 	s.entrySeq++
 	seq := s.entrySeq
 	if s.conn != nil && len(s.queue) == 0 {
@@ -375,7 +393,7 @@ func (s *Session) deliver(m *message.Message, t target, now time.Time, maxQueued
 			s.reserve(q.id)
 		}
 	}
-	dropped, ok := s.enqueue(q, maxQueued, dropNewest)
+	dropped, ok := s.enqueue(q, queueBound(l.MaxQueued, s.queueLimit), l.DropNewest)
 	if dropped != nil {
 		j.dropped(s, dropped.seq)
 		s.notify(hook.Dropped, dropped.msg, dropped.qos)
@@ -392,6 +410,14 @@ func (s *Session) deliver(m *message.Message, t target, now time.Time, maxQueued
 		return
 	}
 	s.notify(hook.Queued, m, t.qos)
+}
+
+// notifyDrop reports a delivery dropped for reason, which the manager counts
+// under that reason and reports to observers as Dropped.
+func (s *Session) notifyDrop(m *message.Message, reason string) {
+	if s.mgr != nil {
+		s.mgr.dropped(reason, s, m, 0)
+	}
 }
 
 // notify reports a delivery event through the manager, when one is set.
@@ -498,7 +524,9 @@ func (s *Session) drain(now time.Time, j *journalWriter) {
 			if f.held {
 				continue
 			}
-			if err := s.conn.Send(&packet.Pubrel{Ack: packet.Ack{PacketID: f.id}}); err != nil {
+			// Offered, never waited for: the session lock is held, and a
+			// stalled client would hold every publisher to this session.
+			if err := s.conn.Offer(&packet.Pubrel{Ack: packet.Ack{PacketID: f.id}}); err != nil {
 				return
 			}
 			f.sent = true
@@ -525,7 +553,7 @@ func (s *Session) drain(now time.Time, j *journalWriter) {
 			// Sent at QoS 0, or expired on the way out: it never became
 			// in-flight, so its reservation is released here rather than by
 			// trySendID, and its entry leaves the log and the replicas, or a
-			// restart or a takeover would send it again (WI 1831).
+			// restart or a takeover would send it again.
 			s.release(q.id)
 			j.dropped(s, q.seq)
 		}

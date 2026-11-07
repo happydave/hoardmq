@@ -143,10 +143,10 @@ const maxCatchUpWindow = time.Minute
 // stall over 30 periods delivered 10 against 29. The deficit is permanent,
 // not repaid later.
 //
-// Against the 7.18 s whole-process stall round 12 recorded at the 100 ms
-// product tick, that is on the order of seventy ticks — seven election
-// timeouts — that the node never counted, which is why it can go far longer
-// than its stated timeout without campaigning.
+// Against the 7.18 s whole-process stall a 100,000-client failover recorded
+// at the 100 ms product tick, that is on the order of seventy ticks — seven
+// election timeouts — that the node never counted, which is why it can go far
+// longer than its stated timeout without campaigning.
 //
 // The catch-up is delivered in full up to the bound, and a burst cannot
 // disrupt a healthy leader: raftConfig sets PreVote, so a node that
@@ -429,16 +429,10 @@ func (c *Core) send(n raft.Node, _ raftlog.Durable, msgs []*pb.Message) {
 			c.log.Error("marshal raft message", "err", err)
 			continue
 		}
-		// Raft messages ride the control connection, which is never shared
-		// with data (WI 1340), so a send may wait up to an election timeout
-		// for its queue rather than the one tick that, on a shared queue
-		// under a storm, turned every raft message into a drop.
-		ctx, cancel := context.WithTimeout(context.Background(), c.o.Tick*time.Duration(c.o.ElectionTicks))
-		err = c.o.Transport.Send(ctx, to, transport.Consensus, append([]byte{envRaft}, b...))
-		cancel()
-		if err != nil {
-			n.ReportUnreachable(m.GetTo())
-		}
+		// Marshalled here, on the loop, as the library requires; sent from
+		// the peer's own queue, so a peer whose link is slow holds up its
+		// own messages and nobody else's heartbeats.
+		c.enqueue(to, m.GetTo(), append([]byte{envRaft}, b...))
 	}
 }
 
@@ -446,8 +440,8 @@ func (c *Core) send(n raft.Node, _ raftlog.Durable, msgs []*pb.Message) {
 // The restore runs silently and the components reconcile once against the
 // restored state, so nothing acts on the intermediate picture. A snapshot at
 // or below the applied index is counted, not refused: refusing one was tried
-// and reverted in WI 1273 because it starved a node that needed the snapshot
-// to catch up (WI 1291 has the record).
+// and reverted because it starved a node that needed the snapshot to catch
+// up.
 func (c *Core) installSnapshot(snap *pb.Snapshot) error {
 	var staged *consensus.StagedMachine
 	var machine []byte
@@ -743,7 +737,7 @@ func (c *Core) handleJoin(n raft.Node, ev joinEvent) {
 	default:
 		// The leader names itself, so every answer from a group that exists
 		// names a leader — including a refusal. That is what the joiner reads
-		// to know there is something to join (WI 1504).
+		// to know there is something to join.
 		resp.Leader = c.o.Node
 		m, ok := c.members.Lookup(ev.meta.ID)
 		c.mu.Lock()

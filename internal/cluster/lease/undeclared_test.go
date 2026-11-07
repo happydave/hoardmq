@@ -198,11 +198,11 @@ func undeclaredCluster(t *testing.T, fb func(context.Context, string, string, st
 	return b, stop
 }
 
-// TestTakeoverFromAnUndeclaredOwnerFoundNowhereWaitsForTheDeclaration is WI
-// 1759's acceptance test on the takeover path. The previous owner could not be
-// asked and the log says it is alive; every replica answers "not found". The
-// client is refused and the adoption kept until the leader declares the owner
-// dead, and then served a fresh session, counted.
+// TestTakeoverFromAnUndeclaredOwnerFoundNowhereWaitsForTheDeclaration: on the
+// takeover path, the previous owner could not be asked and the log says it is
+// alive; every replica answers "not found". The client is refused and the
+// adoption kept until the leader declares the owner dead, and then served a
+// fresh session, counted.
 func TestTakeoverFromAnUndeclaredOwnerFoundNowhereWaitsForTheDeclaration(t *testing.T) {
 	b, stop := undeclaredCluster(t, func(context.Context, string, string, string) (*store.SessionState, bool) { return nil, true })
 	res, err := acquire(t, b, "x", nil, 300, false)

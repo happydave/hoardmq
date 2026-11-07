@@ -16,7 +16,7 @@ import (
 // subscriber completes the message on A, disconnects, and connects to B,
 // which takes the session over from A no longer holding the message. When
 // the forward is applied the subscriber must not be given the message a
-// second time (WI 1832).
+// second time.
 func TestCompletedMessageIsNotGivenAgainByALateForward(t *testing.T) {
 	for _, qos := range []byte{0, 1, 2} {
 		t.Run(fmt.Sprintf("QoS %d", qos), func(t *testing.T) { runCompletedLateForward(t, qos) })

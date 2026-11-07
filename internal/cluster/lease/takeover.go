@@ -16,7 +16,7 @@ type takeoverRequest struct {
 	Namespace string `json:"ns"`
 	ClientID  string `json:"id"`
 	Epoch     uint64 `json:"epoch"`
-	// Requester attribution (WI 1338): a duration, so clocks need not agree.
+	// Requester attribution: a duration, so clocks need not agree.
 	ConnAgeMs   int64 `json:"connAgeMs,omitempty"`
 	Prebuffered bool  `json:"prebuffered,omitempty"`
 	Attributed  bool  `json:"attributed,omitempty"` // the requester filled the fields above
@@ -63,7 +63,7 @@ func (s *Service) pull(ctx context.Context, prev, ns, id string, epoch uint64, f
 	sctx, cancel := context.WithTimeout(ctx, s.o.TakeoverTimeout)
 	defer cancel()
 	// Timed from the send: the wait this measures is the one a CONNECT's
-	// handshake slot is held for (WI 1691).
+	// handshake slot is held for.
 	asked := time.Now()
 	if err := s.o.Transport.Send(sctx, prev, transport.TakeoverRequest, body); err != nil {
 		s.log.Warn("takeover pull: previous owner unreachable", "owner", prev, "client", id, "err", err)
@@ -86,7 +86,7 @@ func (s *Service) pull(ctx context.Context, prev, ns, id string, epoch uint64, f
 
 // pendingTakeover is one request waiting for a pass over its key. queuedAt
 // is when it was handed to the queue, so the pass can say how long it waited
-// for a worker (WI 1691); it is this node's own clock on both readings.
+// for a worker; it is this node's own clock on both readings.
 type pendingTakeover struct {
 	req      takeoverRequest
 	peer     string
@@ -138,7 +138,7 @@ func (s *Service) serveTakeover(k key, payloads []any) {
 			s.takeoverTimes.noteQueued(began.Sub(pt.queuedAt))
 		}
 	}
-	// Attribution before the detach (WI 1338): when this node still serves
+	// Attribution before the detach: when this node still serves
 	// the client live, a requester accepted after that connection was made
 	// is either a second client with the same identifier or a socket that
 	// waited in a listen backlog while the client went elsewhere; a
@@ -185,7 +185,7 @@ func (s *Service) serveTakeover(k key, payloads []any) {
 			}
 		}
 	}
-	// What this takeover cost (WI 1495). liveAge above already says whether a
+	// What this takeover cost. liveAge above already says whether a
 	// connection is here and how old it is; until now that answer was used
 	// only for the attribution branch and then discarded. A lease move that
 	// detaches a live client costs that client a reconnect; one that finds
@@ -314,7 +314,7 @@ func (s *Service) answerTakeover(pt pendingTakeover, st *store.SessionState, sup
 	ctx, cancel := context.WithTimeout(context.Background(), s.o.TakeoverTimeout)
 	defer cancel()
 	// The acknowledgement carries the session's state, so it rides the data
-	// connection (WI 1340); when that connection is momentarily absent while
+	// connection; when that connection is momentarily absent while
 	// the peer is up it goes on the control connection instead — the
 	// requester is waiting, and a lost acknowledgement costs it the state.
 	if err := s.o.Transport.Send(ctx, pt.peer, transport.TakeoverAck, body); errors.Is(err, transport.ErrPeerDown) {

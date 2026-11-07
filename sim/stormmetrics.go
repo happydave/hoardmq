@@ -28,35 +28,35 @@ var stormMetricFamilies = map[string]bool{
 	// separate a frame that never left (`send`), a link that dropped with
 	// frames in flight (`link-reset`) and a hole the receiver reported
 	// (`sequence-gap`) — which is what tells a lost frame from a reordered
-	// one without reading a node log (WI 1706).
+	// one without reading a node log.
 	"hoardmq_forward_failures_total":             true,
 	"hoardmq_replication_barrier_failures_total": true,
 	// A forwarded frame that arrived below the sequence expected of it: the
 	// frame a gap already reported missing, arriving late. It is what tells a
-	// phantom hole from a lost one (WI 1708).
+	// phantom hole from a lost one.
 	"hoardmq_forward_late_frames_total": true,
 	// A frame below the expectation that no reported hole accounts for: the
 	// sender started a new stream. And every forward sent, by kind, which
-	// gives the gap and late counts their denominator (WI 1708).
+	// gives the gap and late counts their denominator.
 	"hoardmq_forward_stream_restarts_total": true,
 	"hoardmq_forwards_total":                true,
 	// A dispatch owner's relay of a group give's outcome to the publisher's
-	// node, by outcome (WI 1896): what the probe's groups exercise (WI 1962).
+	// node, by outcome: what the probe's groups exercise.
 	"hoardmq_group_gives_relayed_total": true,
 	// A lost owner's routes forgotten because its sessions are served
-	// elsewhere: WI 1625's end to the refusals a hidden owner causes, dated
-	// against the recovery instant by the snapshot taken at it (WI 1734).
+	// elsewhere: the end to the refusals a hidden owner causes, dated against
+	// the recovery instant by the snapshot taken at it.
 	"hoardmq_route_owners_forgotten_total": true,
 	// A replication refusal the sender could not scope, by why: each one
-	// blocks the stream to that peer whole until a resync (WI 1802).
+	// blocks the stream to that peer whole until a resync.
 	"hoardmq_replication_refusal_fallback_total": true,
 	// A move a new owner's confirmation resolved, and the publishes a move
-	// would have refused that were accepted on its proof, by path (WI 1806).
+	// would have refused that were accepted on its proof, by path.
 	"hoardmq_moves_resolved_total":       true,
 	"hoardmq_move_refusals_lifted_total": true,
 	// This node's served fact by how its proposal ended, and the gaps it found
 	// in a peer's route updates, each of which holds a forget back until that
-	// peer's next full set (WI 1633).
+	// peer's next full set.
 	"hoardmq_route_served_proposals_total": true,
 	"hoardmq_route_update_gaps_total":      true,
 	// With a JWT-authenticated population: the key-set fetches and the held
@@ -64,12 +64,12 @@ var stormMetricFamilies = map[string]bool{
 	"hoardmq_auth_jwt_key_fetches_total": true,
 	"hoardmq_auth_rechecks_total":        true,
 	// The password verifications that derived a key and those the cache
-	// answered, and the CONNECTs a connect-rate limit refused (WI 1283).
+	// answered, and the CONNECTs a connect-rate limit refused.
 	"hoardmq_auth_password_derivations_total": true,
 	"hoardmq_auth_password_cache_hits_total":  true,
 	"hoardmq_auth_password_cache_entries":     true,
 	"hoardmq_connect_rate_refused_total":      true,
-	// The overload tier (WI 1314): the stress level, node and cluster, and its
+	// The overload tier: the stress level, node and cluster, and its
 	// indicators; what it refused and paused; the ban list's size, what it
 	// refused and the detector's trips and bans; how connections ended; the
 	// deliveries a full outbound queue deferred; the clients throttled and

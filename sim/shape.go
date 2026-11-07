@@ -14,9 +14,9 @@ import (
 // when the window closes first, the count at that moment. Neither says what
 // the run did in between, and the two are not measured over the same span —
 // a round that reaches the finish line stops being watched, a round that
-// misses it is watched for the rest of the window. Round 12 published
-// "88,570 of 100,000" as its result; its peak had been 99,911 at 3m50s, and
-// the difference decided a roadmap (WI 1373).
+// misses it is watched for the rest of the window. One 100,000-client run
+// published "88,570 of 100,000" as its result; its peak had been 99,911 at
+// 3m50s, and the difference decided a roadmap.
 //
 // Peak, trough and the time to 99% are the three figures that distinguish
 // "recovered and could not close the tail" from "did not recover".
@@ -31,7 +31,7 @@ type onlineShape struct {
 	ninetyNine time.Duration
 	// nineNineNine is the same mark at 99.9%. At a hundred thousand clients
 	// the last thousand are a different question from the last ten thousand,
-	// and the headline is the whole population (WI 1618).
+	// and the headline is the whole population.
 	nineNineNine time.Duration
 	seen         bool
 	// fell says the count has been seen below the 99% line, which is what
@@ -51,8 +51,8 @@ func newOnlineShape(target int, from time.Time) *onlineShape {
 //
 // Peak and trough are of the online count, which every published batch
 // reports, so the two remain comparable. The 99% and 99.9% marks are of the
-// recovered count: they are the shape of the headline, and since WI 1618 the
-// headline counts a client only when its subscriptions are granted too.
+// recovered count: they are the shape of the headline, and the headline
+// counts a client only when its subscriptions are granted too.
 //
 // The first sample is the pre-storm level: the loop starts at the crash and
 // the clients have not necessarily noticed it yet. That is what peak is for

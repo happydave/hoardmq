@@ -72,7 +72,7 @@ func fill(t *testing.T, c *Core) {
 	}
 }
 
-// TestSnapshotMessageIsNeverDropped is work item 1345's negative control.
+// TestSnapshotMessageIsNeverDropped is the inbox's negative control.
 // Every other raft message has a retry behind it -- the leader resends an
 // append, a candidate re-campaigns after a lost vote -- so discarding one
 // under pressure costs a round trip. A snapshot has no such retry: the

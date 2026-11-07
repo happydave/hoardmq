@@ -69,7 +69,7 @@ func headOf(t *testing.T, dir string) string {
 	return strings.TrimSpace(string(out))
 }
 
-// TestTreeRecordsCommitAndDirtyState is plan B1's scenario: a modified tracked
+// TestTreeRecordsCommitAndDirtyState: a modified tracked
 // file is named, the tree is marked dirty, and a second, different
 // modification gives a different digest.
 func TestTreeRecordsCommitAndDirtyState(t *testing.T) {
@@ -127,7 +127,7 @@ func TestTreeUnavailableWithoutGit(t *testing.T) {
 	}
 }
 
-// TestTreeChangeDuringRunIsDetected is plan B4: a tracked change is caught,
+// TestTreeChangeDuringRunIsDetected: a tracked change is caught,
 // an untracked file — which the measurement itself writes — is not.
 func TestTreeChangeDuringRunIsDetected(t *testing.T) {
 	dir := gitRepo(t)
@@ -152,7 +152,7 @@ func TestTreeChangeDuringRunIsDetected(t *testing.T) {
 	}
 }
 
-// TestEffectiveTimingsAreTheClustersOwn is plan B2: the record reads the
+// TestEffectiveTimingsAreTheClustersOwn: the record reads the
 // timings through the resolution the nodes are configured with, so the two
 // cannot disagree.
 func TestEffectiveTimingsAreTheClustersOwn(t *testing.T) {
@@ -183,7 +183,7 @@ func TestEffectiveTimingsAreTheClustersOwn(t *testing.T) {
 	}
 }
 
-// TestProvenanceSectionTracesOnItsOwn is plan B5's content: a published report
+// TestProvenanceSectionTracesOnItsOwn: a published report
 // names the commit, the settings, the effective timings and the command.
 func TestProvenanceSectionTracesOnItsOwn(t *testing.T) {
 	dirty, changed := true, false

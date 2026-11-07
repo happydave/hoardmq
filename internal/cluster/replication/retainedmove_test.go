@@ -135,8 +135,9 @@ func sh(leader string, followers ...string) shardmap.Shard {
 func writeRetained(h *harness, node, topic, payload string) error {
 	n := h.nodes[node]
 	m := &message.Message{Namespace: "default", Topic: topic, Payload: []byte(payload), Retain: true}
-	if n.rep.StoreRetained(m) {
-		n.sessions.InjectRetained(m)
+	if local, epoch := n.rep.StoreRetainedAt(m, SourceClient); local {
+		// As the manager does: stamped at the shard's leader.
+		n.sessions.InjectRetainedWriteAt(m, epoch)
 	}
 	return n.rep.Barrier(context.Background(), []store.Scope{{Namespace: "default", Topic: topic}})
 }
@@ -301,8 +302,8 @@ func TestHandOnDoesNotReplaceANewerMessage(t *testing.T) {
 	h.applyMap(moveMap(h, 2, sh("n1", "n3"), sh("n2", "n3")))
 	waitSettled(h, 2)
 	// n3 is given a newer message for tp before it leads, as a write the
-	// former leader made would reach it.
-	h.nodes["n3"].sessions.InjectRetained(&message.Message{Namespace: "default", Topic: tp, Payload: []byte("newer"), Retain: true})
+	// former leader made under v2 would reach it: stamped at v2's epoch.
+	h.nodes["n3"].sessions.InjectRetainedAt(&message.Message{Namespace: "default", Topic: tp, Payload: []byte("newer"), Retain: true}, store.Version{E: 2, N: 1 << 62}, false)
 	for _, peer := range []string{"n2", "n3"} {
 		dropAll(h, "n1", peer, 14)
 	}
@@ -435,7 +436,7 @@ func TestPushIsOrderedAgainstTaps(t *testing.T) {
 					go func() {
 						defer close(wrote)
 						m := &message.Message{Namespace: "default", Topic: tp, Payload: []byte("newer"), Retain: true}
-						n1.sessions.InjectRetained(m)
+						n1.sessions.InjectRetainedWriteAt(m, 2)
 					}()
 					if c.unordered {
 						// Without the lock the write's tap runs now, before

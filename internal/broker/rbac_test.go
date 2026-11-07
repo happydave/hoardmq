@@ -89,7 +89,7 @@ func call(t *testing.T, srv *Server, method, path, token, body string) (int, []b
 	return api(t, &fixture{t: t, srv: srv}, method, path, token, body)
 }
 
-// The workitem's three criteria on a live node: a role lacking a scope is
+// Roles, single sign-on and API keys on a live node: a role lacking a scope is
 // refused and the refusal is in the node's audit log; an ID token from the
 // configured provider is an identity with its mapped roles; an API key is
 // scoped, revocable, never in the audit log or the server's log, and kept
@@ -110,7 +110,7 @@ func TestRolesOIDCAndAPIKeysOnANode(t *testing.T) {
 		t.Fatalf("the key directory exists before any key: %v", err)
 	}
 
-	// AC 1.
+	// A viewer lists clients but is refused a disconnect, and the refusal is audited.
 	if code, _ := call(t, srv, "GET", "/api/v1/clients", adminViewer, ""); code != 200 {
 		t.Fatalf("viewer lists clients: %d", code)
 	}
@@ -121,14 +121,14 @@ func TestRolesOIDCAndAPIKeysOnANode(t *testing.T) {
 		t.Fatal("the viewer's refusal is not in the node's audit log")
 	}
 
-	// AC 2.
+	// An ID token from the configured provider is an identity with its mapped roles.
 	code, data2 := call(t, srv, "GET", "/api/v1/whoami", idp.Mint(t, idp.Claims()), "")
 	who := decode[admin.WhoAmI](t, data2)
 	if code != 200 || who.Name != "oidc:00u-alice" || strings.Join(who.Roles, ",") != "operator" {
 		t.Fatalf("whoami with an ID token: %d %s", code, data2)
 	}
 
-	// AC 3.
+	// An API key is scoped and revocable, audited, and never written to a log.
 	code, data2 = call(t, srv, "POST", "/api/v1/apikeys", adminOps, `{"name":"k1","scopes":["clients:read"]}`)
 	k1 := decode[admin.CreatedAPIKey](t, data2)
 	if code != 201 {

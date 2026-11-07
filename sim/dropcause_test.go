@@ -8,7 +8,7 @@ import (
 )
 
 // TestDropCauseMapping is the pure half: a reason code to a bucket, testable
-// without a connection. The codes that matter to WI 1495 are named
+// without a connection. The codes that matter here are named
 // individually because the whole question is whether an excess drop was a
 // takeover detaching a live client.
 func TestDropCauseMapping(t *testing.T) {
@@ -40,8 +40,8 @@ func TestDropCauseMapping(t *testing.T) {
 	}
 }
 
-// TestDropCausesAreWindowedAndSumToDrops is the accounting claim the plan
-// makes: the buckets cover the window, not the run, and they add up to the
+// TestDropCausesAreWindowedAndSumToDrops is the accounting claim: the
+// buckets cover the window, not the run, and they add up to the
 // same Drops figure the artifact already reports. A histogram that does not
 // sum to the count it explains is not an explanation.
 func TestDropCausesAreWindowedAndSumToDrops(t *testing.T) {
@@ -88,14 +88,14 @@ func TestDropCausesAreWindowedAndSumToDrops(t *testing.T) {
 		t.Errorf("the artifact map lost a bucket: %v", m)
 	}
 	// Zero buckets are kept, so a cause that did not occur is a measurement
-	// rather than an absent field (the WI 1509 lesson).
+	// rather than an absent field.
 	if _, ok := m["server-shutting-down"]; !ok {
 		t.Error("a cause that did not occur was dropped from the map")
 	}
 }
 
-// TestDropCausesCrossTheDriverSocket covers the hop that would fail silently,
-// as WI 1509's did: in remote mode the summary is computed on another host.
+// TestDropCausesCrossTheDriverSocket covers the hop that would fail silently:
+// in remote mode the summary is computed on another host.
 func TestDropCausesCrossTheDriverSocket(t *testing.T) {
 	var sent driverSummary
 	causes := [dropCauseCount]int64{}

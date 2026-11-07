@@ -79,8 +79,15 @@ func (j *fakeJournal) Dropped(k store.Key, seq uint64) error {
 	j.log("dropped " + k.ClientID)
 	return nil
 }
-func (j *fakeJournal) Retain(m *message.Message) error     { j.log("retain " + m.Topic); return nil }
-func (j *fakeJournal) RetainDelete(ns, topic string) error { j.log("retain- " + topic); return nil }
+func (j *fakeJournal) Retain(m *message.Message, _ store.Version) error {
+	j.log("retain " + m.Topic)
+	return nil
+}
+func (j *fakeJournal) RetainDrop(ns, topic string) error { j.log("retain- " + topic); return nil }
+func (j *fakeJournal) RetainClear(ns, topic string, _ store.Version) error {
+	j.log("retain- " + topic)
+	return nil
+}
 func (j *fakeJournal) Sync() error {
 	j.mu.Lock()
 	b := j.barrier
@@ -381,13 +388,14 @@ func (r *recordingJournal) Sent(k store.Key, _ uint64, _ uint16) error        { 
 func (r *recordingJournal) InflightState(k store.Key, _ uint16, _ byte) error { return r.note(k) }
 func (r *recordingJournal) Complete(k store.Key, _ uint16) error              { return r.note(k) }
 func (r *recordingJournal) Dropped(k store.Key, _ uint64) error               { return r.note(k) }
-func (r *recordingJournal) Retain(_ *message.Message) error                   { return nil }
-func (r *recordingJournal) RetainDelete(_, _ string) error                    { return nil }
+func (r *recordingJournal) Retain(_ *message.Message, _ store.Version) error  { return nil }
+func (r *recordingJournal) RetainDrop(_, _ string) error                      { return nil }
+func (r *recordingJournal) RetainClear(_, _ string, _ store.Version) error    { return nil }
 func (r *recordingJournal) Sync() error                                       { return nil }
 
 // TestImportWritesTheDeleteFirst: an import journals the session whole, and
 // whole begins with the delete — so the log, and every replica applying it,
-// replaces what it held rather than merging the new state into it (WI 1563).
+// replaces what it held rather than merging the new state into it.
 func TestImportWritesTheDeleteFirst(t *testing.T) {
 	j := newFakeJournal()
 	m, _ := newManager(t, func(o *Options) { o.Journal = j })

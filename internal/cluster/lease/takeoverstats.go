@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-// TakeoverStats divides what a takeover pull waits for (WI 1691). The
+// TakeoverStats divides what a takeover pull waits for. The
 // requester's figures and the previous owner's are recorded on the node that
 // runs each stage, so no figure depends on two nodes' clocks agreeing: a
 // requester's wait is its own, and the queue wait and pass are the owner's.

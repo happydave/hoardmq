@@ -10,7 +10,7 @@ import (
 // TestTakeoverQueueServesItsWorkersWorthOfKeysAtOnce: takeover passes for
 // different clients run at the same time, up to the queue's worker count.
 // That is what the count buys — at 30,000 clients a pull spent 332 ms of its
-// 350 ms waiting for a worker, against 4.2 ms for the pass itself (WI 1691) —
+// 350 ms waiting for a worker, against 4.2 ms for the pass itself —
 // and it is what a build with fewer workers cannot do.
 func TestTakeoverQueueServesItsWorkersWorthOfKeysAtOnce(t *testing.T) {
 	c := newCluster(t, []string{"n1", "n2"}, 2*time.Second, nil)

@@ -25,7 +25,10 @@
       "type": "object",
       "propertyNames": { "pattern": "^[a-z]+\\.[a-z0-9]+$" },
       "properties": {
-        "sink.kafka": { "$ref": "#/$defs/sinkKafka" }
+        "sink.kafka": { "$ref": "#/$defs/sinkKafka" },
+        "auth.http": { "$ref": "#/$defs/authHttp" },
+        "events.http": { "$ref": "#/$defs/eventsHttp" },
+        "schema.json": { "$ref": "#/$defs/schemaJson" }
       },
       "additionalProperties": { "type": "object" }
     },
@@ -39,6 +42,109 @@
     "admin": { "$ref": "#/$defs/admin" }
   },
   "$defs": {
+    "schemaJson": {
+      "description": "Payload schema validation: each client publish a rule's filter matches is checked against that rule's JSON Schema (draft 2020-12, a closed subset), from the publish admission check.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rules"],
+      "properties": {
+        "rules": {
+          "description": "In order; the first whose filter matches decides. At most 1000.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "filter"],
+            "properties": {
+              "name": { "description": "Unique; labels the metrics and audit records.", "type": "string", "pattern": "^[a-z0-9_-]{1,64}$" },
+              "filter": { "description": "An MQTT topic filter, not a shared one.", "type": "string", "minLength": 1 },
+              "namespace": { "description": "Default the node's default namespace.", "type": "string" },
+              "schema": { "description": "The JSON Schema, inline; or give schemaFile.", "type": ["object", "boolean"] },
+              "schemaFile": { "description": "A file holding the JSON Schema; or give schema.", "type": "string", "minLength": 1 },
+              "onInvalid": { "description": "drop (default) refuses, disconnect refuses and closes, continue delivers and counts.", "type": "string", "enum": ["drop", "disconnect", "continue"] },
+              "reason": { "description": "The refusal's reason code. Default 153 (0x99, Payload format invalid).", "type": "integer", "enum": [128, 131, 135, 144, 151, 153] }
+            }
+          }
+        },
+        "audit": { "description": "Record each refusal in the audit log as payload.invalid. Default false.", "type": "boolean" }
+      }
+    },
+    "authHttp": {
+      "description": "Authentication and authorization by an HTTP endpoint, in EMQX's request and response shapes.",
+      "type": "object",
+      "required": ["url"],
+      "properties": {
+        "url": { "description": "The endpoint, an absolute http or https URL.", "type": "string", "pattern": "^https?://" },
+        "timeoutMs": { "description": "One request's bound.", "type": "integer", "minimum": 100, "maximum": 30000 },
+        "caFile": { "description": "PEM CA certificates the endpoint's certificate is verified against; default the system pool.", "type": "string" },
+        "certFile": { "description": "PEM client certificate; give keyFile too.", "type": "string" },
+        "keyFile": { "description": "PEM client key; give certFile too.", "type": "string" },
+        "bearerTokenFile": { "description": "A file holding a token sent as Authorization: Bearer; never logged.", "type": "string" },
+        "headers": { "description": "Headers sent with every request; their values are never logged.", "type": "object", "additionalProperties": { "type": "string" } },
+        "followRedirects": { "description": "Follow a redirect. Default false: a redirect is an unavailable answer.", "type": "boolean" },
+        "authenticate": { "description": "Ask the endpoint about each CONNECT. Default true.", "type": "boolean" },
+        "authorize": { "description": "Ask the endpoint about each publish, subscribe and unsubscribe. Default true.", "type": "boolean" },
+        "onUnavailable": {
+          "description": "An endpoint that does not answer, answers late, or answers anything but 200 or 204 with a readable body: deny (default) or pass to the next module in the chain.",
+          "type": "string", "enum": ["deny", "pass"]
+        },
+        "sendPassword": { "description": "Send the client's password in a CONNECT request. Default true; use https.", "type": "boolean" },
+        "cache": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "maxEntries": { "description": "Authorization answers held; 0 holds none. Default 100000.", "type": "integer", "minimum": 0, "maximum": 1000000 }
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "eventsHttp": {
+      "description": "Event webhooks: the events the extension API carries, posted to an HTTP endpoint.",
+      "type": "object",
+      "required": ["url"],
+      "properties": {
+        "url": { "description": "The endpoint, an absolute http or https URL.", "type": "string", "pattern": "^https?://" },
+        "timeoutMs": { "description": "One request's bound.", "type": "integer", "minimum": 100, "maximum": 30000 },
+        "caFile": { "description": "PEM CA certificates the endpoint's certificate is verified against; default the system pool.", "type": "string" },
+        "certFile": { "description": "PEM client certificate; give keyFile too.", "type": "string" },
+        "keyFile": { "description": "PEM client key; give certFile too.", "type": "string" },
+        "bearerTokenFile": { "description": "A file holding a token sent as Authorization: Bearer; never logged.", "type": "string" },
+        "headers": { "description": "Headers sent with every request; their values are never logged.", "type": "object", "additionalProperties": { "type": "string" } },
+        "followRedirects": { "description": "Follow a redirect. Default false: a redirect is an unavailable answer.", "type": "boolean" },
+        "events": {
+          "description": "The events posted. Default all.",
+          "type": "array",
+          "items": { "type": "string", "enum": ["client.connected", "client.disconnected", "session.subscribe", "session.unsubscribe", "message.publish", "message.delivered", "message.acked", "message.queued", "message.dropped", "message.expired", "retained.changed", "will.published", "cluster.member.joined", "cluster.member.left", "cluster.lease.moved", "cluster.drain.started"] }
+        },
+        "mode": { "description": "async (default) through a bounded buffer, or sync on the path that raised the event.", "type": "string", "enum": ["async", "sync"] },
+        "buffer": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "maxEvents": { "description": "Events held while async; past it a new event is dropped and counted. Default 10000.", "type": "integer", "minimum": 1, "maximum": 1000000 }
+          }
+        },
+        "batch": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "maxEvents": { "description": "Events a request; above 1 the body is a JSON array. Default 1.", "type": "integer", "minimum": 1, "maximum": 1000 },
+            "maxDelayMs": { "description": "How long a partial batch waits. Default 100.", "type": "integer", "minimum": 0, "maximum": 10000 }
+          }
+        },
+        "retry": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "maxAttempts": { "description": "Attempts a batch gets. Default 3.", "type": "integer", "minimum": 1, "maximum": 10 },
+            "backoffMs": { "description": "The first wait between attempts, doubled up to 5 s. Default 200.", "type": "integer", "minimum": 10, "maximum": 10000 }
+          }
+        },
+        "payload": { "description": "A message payload as base64 (default) or left out.", "type": "string", "enum": ["base64", "omit"] }
+      },
+      "additionalProperties": false
+    },
     "sinkKafka": {
       "description": "The Kafka forwarder: every publish this node accepts on a topic a route matches is produced to the route's Kafka topic. MQTT to Kafka only.",
       "type": "object",
@@ -58,9 +164,9 @@
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "caFile": { "description": "PEM CA certificates; default the system pool.", "type": "string" },
-            "certFile": { "description": "PEM client certificate; give keyFile too.", "type": "string" },
-            "keyFile": { "description": "PEM client key; give certFile too.", "type": "string" },
+          "caFile": { "description": "PEM CA certificates; default the system pool.", "type": "string" },
+          "certFile": { "description": "PEM client certificate; give keyFile too.", "type": "string" },
+          "keyFile": { "description": "PEM client key; give certFile too.", "type": "string" },
             "serverName": { "description": "The name the server certificate must carry, when not the broker's host.", "type": "string" }
           }
         },
@@ -86,8 +192,18 @@
               "filter": { "description": "An MQTT topic filter, not a shared one.", "type": "string", "minLength": 1 },
               "topic": { "description": "The Kafka topic: 1 to 249 of A-Z, a-z, 0-9, '.', '_' and '-'.", "type": "string", "pattern": "^[A-Za-z0-9._-]{1,249}$" },
               "key": {
-                "description": "The record key: the MQTT topic (default), the publisher's client identifier, the user property keyProperty names, or none.",
-                "type": "string", "enum": ["topic", "clientId", "userProperty", "none"]
+                "description": "The record key: topic (the MQTT topic, default), clientId, userProperty (with keyProperty) or none; or {\"segment\": n, \"fallback\": topic|clientId|none}, level n of the topic counting from 0, with the fallback (default topic) for a topic with fewer levels.",
+                "type": ["string", "object"],
+                "additionalProperties": false,
+                "required": ["segment"],
+                "properties": {
+                  "segment": { "type": "integer", "minimum": 0, "maximum": 127 },
+                  "fallback": { "type": "string", "enum": ["topic", "clientId", "none"] }
+                }
+              },
+              "headers": {
+                "description": "Static headers on every record the route makes, after the others, in name order. At most 32.",
+                "type": "object", "additionalProperties": { "type": "string" }
               },
               "keyProperty": { "description": "The user property whose value is the key, with key userProperty.", "type": "string", "minLength": 1 },
               "namespace": { "description": "The namespace whose messages the route matches. Default the node's default namespace.", "type": "string" }
@@ -99,7 +215,9 @@
           "additionalProperties": false,
           "properties": {
             "metadata": { "description": "Write the mqtt.* headers (topic, QoS, source, client identifier and the MQTT 5 properties that are set). Default true.", "type": "boolean" },
-            "userProperties": { "description": "Write each MQTT 5 user property as a header, in order. Default true.", "type": "boolean" }
+            "userProperties": { "description": "Write each MQTT 5 user property as a header, in order. Default true.", "type": "boolean" },
+            "prefix": { "description": "The metadata headers' name prefix. Default mqtt.; may be empty.", "type": "string" },
+            "userPropertyPrefix": { "description": "Put before each user property's name. Default empty.", "type": "string" }
           }
         },
         "acks": {
@@ -248,6 +366,7 @@
         "replication": { "$ref": "#/$defs/replication" },
         "drain": { "$ref": "#/$defs/drain" },
         "readiness": { "$ref": "#/$defs/readiness" },
+        "records": { "$ref": "#/$defs/records" },
         "advertise": { "description": "Client-facing address other nodes may hand out in a Server Reference.", "type": "string" }
       }
     },
@@ -261,6 +380,14 @@
         "confirmTimeoutMs": { "description": "How long a drain waits, after handing its leases off, for every session it held to be confirmed held by its receiver; sessions still unconfirmed then are counted and logged.", "type": "integer", "minimum": 1000 },
         "onSignal": { "description": "Drain on SIGTERM before exiting, for setups without a preStop hook (bare containers, systemd). SIGINT and a second SIGTERM still shut down immediately.", "type": "boolean" },
         "holdExitMs": { "description": "After a drain that no signal started completes, how long the process stays up waiting for SIGINT or SIGTERM before it exits; the signal ends the wait at once. For a Kubernetes preStop hook that waits on the drain: the hook reads the completion and exits before the process does. 0 exits as the drain completes.", "type": "integer", "minimum": 0 }
+      }
+    },
+    "records": {
+      "description": "The replicated records store: credentials (auth.db), API keys, bans and administered limits.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxPerCollection": { "description": "The most records a write from this node may leave one collection holding; a new key past it is refused. Each costs about 400 B of heap on every node and 250 B of snapshot (a PBKDF2 credential).", "type": "integer", "minimum": 1, "maximum": 1000000 }
       }
     },
     "readiness": {
@@ -367,6 +494,10 @@
       "properties": {
         "maxPacketSize": { "type": "integer", "minimum": 16, "maximum": 268435455 },
         "receiveMaximum": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "maxInflightMessages": {
+          "description": "QoS 1 and 2 messages the broker has in flight to one client at once, unacknowledged; a client whose Receive Maximum is lower keeps its own, and every 3.1.1 client, which has none, gets this. Further messages wait in the session's queue (maxQueuedMessages). Counted with the queued ones in the overload indicator. Read at start. The default, 65535, is the protocol's largest Receive Maximum.",
+          "type": "integer", "minimum": 1, "maximum": 65535
+        },
         "maxQueuedMessages": { "type": "integer", "minimum": 0 },
         "maxKeepAlive": {
           "description": "Upper bound on a client's keep alive in seconds; 0 accepts the client's value.",
@@ -379,6 +510,10 @@
         "queueDrop": {
           "description": "Which message a full session queue drops: the oldest queued or the newest arriving.",
           "type": "string", "enum": ["oldest", "newest"]
+        },
+        "offlineQoS0": {
+          "description": "What a QoS 0 delivery to a session with no connection does: queue it (the default), or drop it, counted as hoardmq_drops_total{reason=\"offline_qos0\"}. A message already queued stays queued.",
+          "type": "string", "enum": ["queue", "drop"]
         },
         "connectRate": {
           "description": "CONNECTs a second this node admits across every listener; one over it is refused before any credential is examined. 0, the default, is unlimited.",
@@ -401,6 +536,14 @@
         "maxSubscriptions": {
           "description": "Topic filters one client's session may hold; a SUBSCRIBE filter that would pass it is refused with Quota exceeded (0x97; 0x80 below MQTT 5.0) and the others in the packet are handled as usual. 0, the default, is unlimited.",
           "type": "integer", "minimum": 0
+        },
+        "maxRetainedTopics": {
+          "description": "Retained topics one namespace may hold on this node, the topics it stores as their shard's leader; a retained PUBLISH that would add one past it is refused with Quota exceeded (0x97; the connection closed below MQTT 5.0 and for QoS 0) and reaches no subscriber, or, forwarded to a leader on another node, its acknowledgement is refused. A replacement, and a clear of a held topic, is never refused, and lowering it removes nothing. A cleared or expired topic is held as a tombstone, which counts against the limit while it is kept (retainedTombstoneHold), so a clear of a topic not held is refused at the limit once no tombstone can be dropped. 0, the default, is unlimited.",
+          "type": "integer", "minimum": 0
+        },
+        "retainedTombstoneHold": {
+          "description": "Seconds a shard's leader keeps a retained topic's tombstone (a clear's or an expiry's) at least, so that an older copy handed over later does not bring the topic back. It is dropped once this has passed, the shard's followers hold it, and every old holder of the shard has been released. Default 3600.",
+          "type": "integer", "minimum": 1
         },
         "clientMessageRate": {
           "description": "PUBLISH packets a second each client may send; one over it is read later, not refused (the broker stops reading the socket until the rate allows). 0, the default, is unlimited.",
@@ -426,7 +569,7 @@
       "additionalProperties": false,
       "properties": {
         "queuedMessages": {
-          "description": "Messages queued across this node's sessions. Default 1000000.",
+          "description": "Messages this node's sessions hold for their clients, queued or in flight. Default 1000000.",
           "type": "integer", "minimum": 0
         },
         "replicationLag": {
@@ -573,7 +716,7 @@
     "adminScope": {
       "description": "read is every :read scope; admin is every scope.",
       "type": "string",
-      "enum": ["admin", "read", "clients:read", "clients:write", "retained:read", "retained:write", "cluster:read", "cluster:drain", "config:read", "config:write", "traces:read", "traces:write", "modules:read", "modules:write", "audit:read", "apikeys:read", "apikeys:write", "credentials:read", "credentials:write", "bans:read", "bans:write", "limits:read", "limits:write"]
+      "enum": ["admin", "read", "clients:read", "clients:write", "retained:read", "retained:write", "cluster:read", "cluster:drain", "cluster:members", "config:read", "config:write", "traces:read", "traces:write", "modules:read", "modules:write", "audit:read", "apikeys:read", "apikeys:write", "credentials:read", "credentials:write", "bans:read", "bans:write", "limits:read", "limits:write"]
     },
     "hooks": {
       "description": "How modules are called: the timeout and fallback of every hook call, and the module order.",

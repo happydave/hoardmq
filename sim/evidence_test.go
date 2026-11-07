@@ -16,7 +16,7 @@ import (
 
 // TestNodeAndClientGoroutinesCarryTheirLabels: a node's goroutines and a
 // client's inherit the labels their start ran under, which is what lets the
-// storm's CPU profile be split into client and node CPU (WI 1474). The
+// storm's CPU profile be split into client and node CPU. The
 // goroutine profile carries the same labels as the CPU profile and can be
 // read without a profile parser.
 func TestNodeAndClientGoroutinesCarryTheirLabels(t *testing.T) {

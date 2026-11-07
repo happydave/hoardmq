@@ -5,11 +5,10 @@ import (
 	"time"
 )
 
-// TestGroupCommitCallerInTheSealWindowIsCovered forces the interleaving WI
-// 1490 found: the leader has read its covered index and released the store
-// lock, and before it seals its group a second caller appends and syncs. The
-// second caller must not be released by the leader's fsync, which cannot
-// cover its record.
+// TestGroupCommitCallerInTheSealWindowIsCovered forces this interleaving: the
+// leader has read its covered index and released the store lock, and before it
+// seals its group a second caller appends and syncs. The second caller must
+// not be released by the leader's fsync, which cannot cover its record.
 func TestGroupCommitCallerInTheSealWindowIsCovered(t *testing.T) {
 	s := openStore(t, t.TempDir(), Options{})
 	defer func() { _ = s.Close() }()

@@ -62,7 +62,7 @@ func requireReleasedRecovered(t *testing.T, dir string, d *faultdisk.Disk, calle
 // every page of the log that was dirty when it ran, and a later fsync that
 // succeeds does not write them again. So a caller whose record such an fsync
 // covered is released only once its record can be recovered, whichever fsync
-// failed and whichever group the caller is in (WI 1812).
+// failed and whichever group the caller is in.
 func TestFailedFsyncReleasesNoCallerItMayHaveDropped(t *testing.T) {
 	t.Run("caller syncs after the failed group", func(t *testing.T) {
 		dir := t.TempDir()
@@ -158,8 +158,8 @@ func TestFailedFsyncReleasesNoCallerItMayHaveDropped(t *testing.T) {
 // TestFailureReportedToAConcurrentFsyncReleasesNothing: Linux reports a
 // write-back error to one fsync of a file. When a roll's or a checkpoint's
 // fsync of the active segment runs while a group's is in flight and takes the
-// error, the group's returns success over pages the failure dropped (WI 1812;
-// known gap 18 of the data-plane design). The group's fsync is held in the
+// error, the group's returns success over pages the failure dropped. The
+// group's fsync is held in the
 // hook; the other is started and, if it reaches the disk while the held one is
 // in flight, it is the one that fails. It reports the failure either before
 // the group's returns or only after the group has read the failure count.

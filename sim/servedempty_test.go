@@ -160,7 +160,7 @@ func TestSessionWithNoCopyLeftIsCountedServedEmptyOnce(t *testing.T) {
 // violation is set aside and reported as fired; the same violation on another
 // seed, and another property on the exempted seed, are judged.
 func TestExemptionCoversOnlyItsSeedAndProperty(t *testing.T) {
-	exemptions := map[int64]map[string]string{4: {PropNoServedEmpty: "WI 0000: an example"}}
+	exemptions := map[int64]map[string]string{4: {PropNoServedEmpty: "an example"}}
 	served := Violation{Property: PropNoServedEmpty, Detail: "n2 served 1"}
 	other := Violation{Property: PropNoAckedLoss, Detail: "lost"}
 	judged, fired := exempt(exemptions, 4, []Violation{served, other})

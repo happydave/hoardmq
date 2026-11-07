@@ -24,7 +24,7 @@ type Publication struct {
 	AckedAt time.Time // zero for QoS 0
 	// Node is the node that answered. A loss is a statement about what one
 	// node knew, and without this the checker can name the message but not
-	// the broker that got it wrong (WI 1354).
+	// the broker that got it wrong.
 	Node string
 }
 
@@ -54,7 +54,7 @@ type Ledger struct {
 // The total alone was already reported as publishErrors, which cannot
 // distinguish one node refusing everything from every node refusing a little —
 // and one node refusing everything is what four defects this month looked
-// like (WI 1502).
+// like.
 type PublishFailure struct {
 	Client string
 	Node   string

@@ -28,6 +28,7 @@ import (
 	"github.com/happydave/hoardmq/internal/oidc/oidctest"
 	"github.com/happydave/hoardmq/internal/otel/otlptest"
 	"github.com/happydave/hoardmq/internal/packet"
+	"github.com/happydave/hoardmq/internal/testlog"
 )
 
 // Options shape a harness cluster.
@@ -68,14 +69,15 @@ type Options struct {
 	// TakeoverDelay, when set, gives a node's broker.Hooks.TakeoverDelay
 	// each time it starts.
 	TakeoverDelay func(node string) time.Duration
-	// Log, when set, receives every node's debug log prefixed by node.
+	// Log receives every node's debug log prefixed by node. Unset, it is the
+	// test's node-log file, kept and named if the test fails (testlog).
 	Log io.Writer
 	// Timings is the set every node timing comes from (clusterTimings);
 	// empty is TimingsHarness.
 	Timings TimingSet
 	// ListenAddrs, when set, are the nodes' client listener addresses in node
 	// order, each also its advertised address: the remote-client mode's
-	// addresses on the broker host (WI 1480). Empty draws loopback ports.
+	// addresses on the broker host. Empty draws loopback ports.
 	ListenAddrs []string
 	// FileUsers is how many of the population's clients the users file holds
 	// when they authenticate by one (HOARDMQ_SIM_AUTH=file).
@@ -94,7 +96,7 @@ const (
 
 // clusterTimings is every timing a node's configuration carries. The harness
 // writes each of these, so each belongs to the set: a knob left outside it
-// runs the harness's value under the product's label (WI 1805).
+// runs the harness's value under the product's label.
 type clusterTimings struct {
 	HeartbeatMs, HeartbeatMisses, RaftTickMs int
 	TTL                                      time.Duration
@@ -293,7 +295,7 @@ func (c *Cluster) ApplyStalls() map[string]uint64 {
 
 // Dir is the root every node's store is under. It is published in the
 // failover artifact so a driver that ends a run early — before t.TempDir's
-// cleanup can run — knows what to remove (WI 1377).
+// cleanup can run — knows what to remove.
 func (c *Cluster) Dir() string { return c.dir }
 
 // New starts a cluster and waits for it to settle.
@@ -310,6 +312,10 @@ func New(t testing.TB, o Options) *Cluster {
 	}
 	if o.TTL == 0 {
 		o.TTL = timingDefaults(o.Timings).TTL
+	}
+	if o.Log == nil {
+		// Before any node starts, so the file outlives their shutdown.
+		o.Log = testlog.Writer(t)
 	}
 	dir := t.TempDir()
 	secret := filepath.Join(dir, "secret")
@@ -352,7 +358,7 @@ func New(t testing.TB, o Options) *Cluster {
 	// re-draw alone, because the nodes started before it already list its
 	// address as a peer, so the whole cluster is stopped and started again on
 	// new addresses, in a fresh directory rather than over the stores the
-	// failed attempt created (WI 1488).
+	// failed attempt created.
 	for attempt := 1; ; attempt++ {
 		err := c.startAll()
 		if err == nil {
@@ -445,8 +451,8 @@ func (n *Node) Running() bool { return n.running.Load() }
 func (c *Cluster) timings() clusterTimings {
 	t := setTimings(c.o.Timings, c.o.TTL)
 	// Per-knob variables override the set, so a measurement can vary one
-	// timing (WI 1342: how much of a storm's election churn is the harness's
-	// own aggressiveness).
+	// timing (to find, say, how much of a storm's election churn is the
+	// harness's own aggressiveness).
 	t.HeartbeatMs = envInt("HOARDMQ_SIM_HEARTBEAT_MS", t.HeartbeatMs)
 	t.HeartbeatMisses = envInt("HOARDMQ_SIM_HEARTBEAT_MISSES", t.HeartbeatMisses)
 	t.RaftTickMs = envInt("HOARDMQ_SIM_RAFT_TICK_MS", t.RaftTickMs)
@@ -461,9 +467,8 @@ func (c *Cluster) timings() clusterTimings {
 // applyTimings writes the cluster's timings into a node's configuration.
 func (c *Cluster) applyTimings(doc *config.Document) {
 	// HOARDMQ_SIM_WAL_GROUP_DELAY_MS sets the journal's group-commit hold
-	// for a measurement (WI 1292 round 4 compares 0 and 1 ms at 100k); the
-	// harness builds its configuration directly, so the broker's env
-	// overrides do not reach it.
+	// for a measurement; the harness builds its configuration directly, so
+	// the broker's env overrides do not reach it.
 	if v := os.Getenv("HOARDMQ_SIM_WAL_GROUP_DELAY_MS"); v != "" {
 		if ms, err := strconv.Atoi(v); err == nil {
 			doc.Node.WALGroupMaxDelayMs = ms
@@ -577,10 +582,6 @@ func (c *Cluster) start(n *Node) error {
 	if n.running.Load() {
 		return nil
 	}
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	if c.o.Log != nil {
-		logger = slog.New(slog.NewTextHandler(c.o.Log, &slog.HandlerOptions{Level: slog.LevelDebug})).With("node", n.Name)
-	}
 	hooks := broker.Hooks{
 		Clock:            func() time.Time { return time.Now().Add(time.Duration(n.skew.Load())) },
 		Steady:           time.Now,
@@ -610,7 +611,7 @@ func (c *Cluster) start(n *Node) error {
 	var srv *broker.Server
 	var err error
 	nodeLabels(n.Name, func() {
-		srv, err = broker.NewWithHooks(c.config(n), logger, hooks)
+		srv, err = broker.NewWithHooks(c.config(n), c.logger(n), hooks)
 		if err == nil {
 			err = srv.Start()
 		}
@@ -625,6 +626,15 @@ func (c *Cluster) start(n *Node) error {
 	return nil
 }
 
+// logger is a node's debug log, to the cluster's Log.
+func (c *Cluster) logger(n *Node) *slog.Logger {
+	w := c.o.Log
+	if w == nil {
+		w = io.Discard
+	}
+	return slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: slog.LevelDebug})).With("node", n.Name)
+}
+
 // TryStart is Start for a node expected to refuse (a corrupted log); it
 // returns the start error instead of failing the test.
 func (c *Cluster) TryStart(n *Node) error {
@@ -635,7 +645,7 @@ func (c *Cluster) TryStart(n *Node) error {
 	var srv *broker.Server
 	var err error
 	nodeLabels(n.Name, func() {
-		srv, err = broker.NewWithHooks(c.config(n), slog.New(slog.NewTextHandler(io.Discard, nil)), hooks)
+		srv, err = broker.NewWithHooks(c.config(n), c.logger(n), hooks)
 		if err == nil {
 			err = srv.Start()
 		}
@@ -879,7 +889,7 @@ func (c *Cluster) WaitSettled(d time.Duration) {
 //
 // Measured on this: two gate tests that publish immediately after New were
 // refused 6 times in 100 runs under the load of a whole-module gate, always
-// "a frame was not delivered" to one peer (WI 1661).
+// "a frame was not delivered" to one peer.
 func (c *Cluster) WaitAccepting(d time.Duration) {
 	c.t.Helper()
 	deadline := time.Now().Add(d)
@@ -904,14 +914,14 @@ func (c *Cluster) Settled() bool { return c.unsettled() == "" }
 
 // WaitServing waits for a settled cluster that will also take a publish: one
 // where every node knows every owner's routes and no replication stream
-// carries a hole. Both are refusals a publisher meets — WI 1351's, and a
-// barrier over a stream awaiting its resync — and a scenario that publishes
-// at the return of a wait would otherwise race them (WI 1570).
+// carries a hole. Both are refusals a publisher meets — a node without an
+// owner's routes, and a barrier over a stream awaiting its resync — and a
+// scenario that publishes at the return of a wait would otherwise race them.
 //
 // It is not what WaitSettled means, and deliberately so: a run that heals a
-// fault measures how long a node takes to accept a publish *after* the heal
-// (WI 1519), and that measurement needs the healed instant, not the instant
-// the refusals stopped.
+// fault measures how long a node takes to accept a publish *after* the heal,
+// and that measurement needs the healed instant, not the instant the
+// refusals stopped.
 func (c *Cluster) WaitServing(d time.Duration) {
 	c.t.Helper()
 	deadline := time.Now().Add(d)
@@ -1030,7 +1040,7 @@ var handedPorts = map[int]bool{}
 // evidence sampler filters `ss` by the cluster's ports, so one node's cluster
 // port being 8001 made that filter match every client connection to every
 // node. At 250,000 clients one run's artifact reached 937 MB and each sample
-// took 286 ms to read (WI 1511).
+// took 286 ms to read.
 func reserveListenPorts(addrs []string) {
 	portMu.Lock()
 	defer portMu.Unlock()

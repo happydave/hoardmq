@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -67,5 +68,100 @@ func TestOCSPReplayWithoutNextUpdate(t *testing.T) {
 	respond(now.Add(-61 * time.Minute))
 	if got := rv.Authenticate(ctx, req); got.Decision != Deny || got.Reason != "x509: revocation unknown" {
 		t.Fatalf("61 minutes old under an hour's maximum: %+v, want Deny (revocation unknown)", got)
+	}
+}
+
+// A responder whose answers carry a nextUpdate a year ahead is replayed: one
+// produced a minute ago admits the certificate; the same response eleven days
+// old does not, though its nextUpdate is still far off.
+func TestOCSPReplayWithFarNextUpdate(t *testing.T) {
+	ctx := context.Background()
+	p := newPKI(t)
+	var mu sync.Mutex
+	var served []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		der := served
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/ocsp-response")
+		_, _ = w.Write(der)
+	}))
+	t.Cleanup(srv.Close)
+	leaf, err := p.ca.IssueWith("device", 3, testcert.Options{OCSPServer: []string{srv.URL}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().Truncate(time.Second)
+	respond := func(thisUpdate time.Time) {
+		der, err := testcert.OCSPResponse(testcert.ResponseSpec{Issuer: p.ca.Cert, Serial: big.NewInt(3),
+			CertStatus: "good", ThisUpdate: thisUpdate, NextUpdate: now.Add(365 * 24 * time.Hour), Signer: p.ca.Cert, SignerKey: p.ca.Key})
+		if err != nil {
+			t.Fatal(err)
+		}
+		mu.Lock()
+		served = der
+		mu.Unlock()
+	}
+	// Each case asks afresh: a new Revocation has an empty cache.
+	fresh := func() *Revocation {
+		return &Revocation{OCSP: true, FetchWait: 2 * time.Second, Timeout: 5 * time.Second, Client: &http.Client{},
+			Now: func() time.Time { return now }}
+	}
+	req := &Request{CertCN: "device", CertChain: []*x509.Certificate{leaf.Cert, p.ca.Cert}}
+
+	respond(now.Add(-time.Minute))
+	if got := fresh().Authenticate(ctx, req); got.Decision != Allow {
+		t.Fatalf("a response produced a minute ago: %+v, want Allow", got)
+	}
+	respond(now.Add(-11 * 24 * time.Hour))
+	if got := fresh().Authenticate(ctx, req); got.Decision != Deny || got.Reason != "x509: revocation unknown" {
+		t.Fatalf("the same response eleven days old, nextUpdate a year ahead: %+v, want Deny (revocation unknown)", got)
+	}
+
+	// A configured maximum lifetime replaces the default.
+	configured := func() *Revocation {
+		rv := fresh()
+		rv.OCSPMaxLifetime = time.Hour
+		return rv
+	}
+	respond(now.Add(-59 * time.Minute))
+	if got := configured().Authenticate(ctx, req); got.Decision != Allow {
+		t.Fatalf("59 minutes old under an hour's maximum lifetime: %+v, want Allow", got)
+	}
+	respond(now.Add(-61 * time.Minute))
+	if got := configured().Authenticate(ctx, req); got.Decision != Deny || got.Reason != "x509: revocation unknown" {
+		t.Fatalf("61 minutes old under an hour's maximum lifetime: %+v, want Deny (revocation unknown)", got)
+	}
+}
+
+// A cached answer is used only within its lifetime: eleven days on, an answer
+// with a year to its nextUpdate is fetched again, and the responder's same
+// old answer is refused.
+func TestOCSPCachedAnswerPastItsLifetime(t *testing.T) {
+	ctx := context.Background()
+	p := newPKI(t)
+	start := time.Now().Truncate(time.Second)
+	resp := testcert.NewResponder(t, p.ca)
+	resp.Lock()
+	resp.Now, resp.Lifetime = func() time.Time { return start }, 365*24*time.Hour
+	resp.Unlock()
+	leaf, err := p.ca.IssueWith("device", 3, testcert.Options{OCSPServer: []string{resp.URL + "/ocsp"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var clock atomic.Int64
+	clock.Store(start.UnixNano())
+	rv := &Revocation{OCSP: true, FetchWait: 2 * time.Second, Timeout: 5 * time.Second, Client: &http.Client{},
+		Now: func() time.Time { return time.Unix(0, clock.Load()) }}
+	req := &Request{CertCN: "device", CertChain: []*x509.Certificate{leaf.Cert, p.ca.Cert}}
+	if got := rv.Authenticate(ctx, req); got.Decision != Allow || resp.Count("ocsp") != 1 {
+		t.Fatalf("first CONNECT: %+v after %d fetches, want Allow after 1", got, resp.Count("ocsp"))
+	}
+	clock.Store(start.Add(11 * 24 * time.Hour).UnixNano())
+	if got := rv.Authenticate(ctx, req); got.Decision != Deny || got.Reason != "x509: revocation unknown" {
+		t.Fatalf("eleven days on: %+v, want Deny (revocation unknown)", got)
+	}
+	if n := resp.Count("ocsp"); n != 2 {
+		t.Fatalf("eleven days on the responder was asked %d times in all, want 2: the cached answer was used", n)
 	}
 }

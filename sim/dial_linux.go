@@ -18,7 +18,7 @@ const ipBindAddressNoPort = 0x18
 // where it need only be unique for the four-tuple. Chosen at bind(), the port
 // must be unique for the address across every destination: at a hundred
 // thousand reconnecting clients over eight loopback addresses that search
-// took most of the host's recorded CPU (WI 1476). A socket that refuses the
+// took most of the host's recorded CPU. A socket that refuses the
 // option fails the dial rather than silently measuring the old mode.
 func sourceControl(_ context.Context, _, _ string, c syscall.RawConn) error {
 	var serr error

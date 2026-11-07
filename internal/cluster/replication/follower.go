@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/happydave/hoardmq/internal/cluster/shardmap"
 	"github.com/happydave/hoardmq/internal/cluster/transport"
 	"github.com/happydave/hoardmq/internal/message"
 	"github.com/happydave/hoardmq/internal/store"
@@ -61,7 +62,7 @@ func (f *follower) snapshot(kind int) *store.State {
 // checkpointState is the snapshot a checkpoint of the replica store writes. A
 // record is appended and applied under f.mu, so the state read under it holds
 // every record appended so far and no other: it is exact at the store's last
-// appended index read here (WI 1818).
+// appended index read here.
 func (f *follower) checkpointState(appended func() uint64) *store.State {
 	f.mu.Lock()
 	defer f.unlock(holdCheckpoint, time.Now())
@@ -97,12 +98,17 @@ func (f *follower) find(ns, id string) (*store.SessionState, bool) {
 // apply persists and materialises one record, both under f.mu, so a
 // checkpoint's snapshot never reads a state behind the store (checkpointState).
 func (f *follower) apply(rec store.Record) (store.Unapplied, error) {
-	return f.applyTimed(rec, nil, holdApplyOther)
+	return f.applyTimed(rec, nil, holdApplyOther, "", "")
 }
 
 // applyTimed is apply, adding its parts to a sampled batch's timing when t is
-// not nil; kind names the holder for the lock's trace.
-func (f *follower) applyTimed(rec store.Record, t *batchTiming, kind int) (store.Unapplied, error) {
+// not nil; kind names the holder for the lock's trace. With path set, a
+// retained record that merges (a message, or a clear) is counted on that
+// path of hoardmq_retained_merges_total; a copy drop is not a merge. On the
+// append path, from names the leader whose stream carried the record, and an
+// install into an empty topic at or below the shard's dropped-through version
+// is counted below-dropped (belowDropped).
+func (f *follower) applyTimed(rec store.Record, t *batchTiming, kind int, path, from string) (store.Unapplied, error) {
 	var asked, appended time.Time
 	if t != nil {
 		asked = time.Now()
@@ -123,12 +129,30 @@ func (f *follower) applyTimed(rec store.Record, t *batchTiming, kind int) (store
 	if f.afterAppend != nil {
 		f.afterAppend()
 	}
+	var merge func()
+	if path != "" && store.IsRetained(rec.Type) {
+		in, clear := store.RecordVersion(rec)
+		if clear || !store.IsRetainedDelete(rec.Type) {
+			heldRV, exists, _ := f.state.RetainedHeld(rec.Key.Namespace, rec.Key.Topic)
+			installed := store.MergeRetained(heldRV, exists, in, false)
+			merge = func() {
+				f.r.countMerge(path, rec.Key.Topic, installed, heldRV, in)
+				if installed && path == "append" {
+					shard := f.r.o.Map.ShardOf(rec.Key.Namespace, rec.Key.Topic)
+					f.r.belowDropped(shard, path, from, &message.Message{Namespace: rec.Key.Namespace, Topic: rec.Key.Topic}, in, !exists)
+				}
+			}
+		}
+	}
 	un, err := f.state.ApplyReport(rec.Type, rec.Payload)
 	if t != nil {
 		t.s.ApplyNs += time.Since(appended).Nanoseconds()
 	}
 	if err != nil {
 		return "", err
+	}
+	if merge != nil {
+		merge()
 	}
 	f.r.gauge("hoardmq_replicas_held", float64(len(f.state.Sessions)))
 	return un, nil
@@ -142,15 +166,17 @@ func (f *follower) holds(ns, id string) bool {
 	return f.state.Find(ns, id) != nil
 }
 
-// retainedIn lists the replica retained copies of a shard, each a copy.
-func (f *follower) retainedIn(shard int) []*message.Message {
+// retainedIn lists the replica retained entries of a shard, each a copy:
+// messages at their versions, and tombstones.
+func (f *follower) retainedIn(shard int) []store.RetainedEntry {
 	f.mu.Lock()
 	defer f.unlock(holdFind, time.Now())
-	var out []*message.Message
-	for _, m := range f.state.Retained {
-		if f.r.o.Map.ShardOf(m.Namespace, m.Topic) == shard {
-			c := *m
-			out = append(out, &c)
+	var out []store.RetainedEntry
+	for _, e := range replicaEntries(f.state) {
+		if f.r.o.Map.ShardOf(e.Msg.Namespace, e.Msg.Topic) == shard {
+			c := *e.Msg
+			e.Msg = &c
+			out = append(out, e)
 		}
 	}
 	return out
@@ -170,10 +196,10 @@ func (f *follower) copyEpoch(ns, id string) (uint64, bool) {
 }
 
 // dropCopy removes this node's replica copy of a session it must not hold:
-// one of a session this node owns, which is older than the session it serves
-// (WI 1293), or one of a session this node is not a target for, which
-// receives nothing and would hand a takeover a queue from before the map
-// moved (WI 1569). Either would replace a current copy with a stale one.
+// one of a session this node owns, which is older than the session it serves,
+// or one of a session this node is not a target for, which receives nothing
+// and would hand a takeover a queue from before the map moved. Either would
+// replace a current copy with a stale one.
 func (f *follower) dropCopy(ns, id string, reason string) bool {
 	if !f.holds(ns, id) {
 		return false
@@ -245,8 +271,7 @@ func (f *follower) stale(peer, ns, id string, epoch uint64) (bool, string) {
 		// carries none, and "older than the table's" is not a judgement that
 		// can be made about it. What can be judged is where it came from: the
 		// node the table names as owner holds the newest state there is, so
-		// refusing its record costs the client a publish and repairs nothing
-		// (WI 1570).
+		// refusing its record costs the client a publish and repairs nothing.
 		if l.Owner != peer {
 			return true, fmt.Sprintf("no epoch, and %s is not the owner", peer)
 		}
@@ -273,9 +298,9 @@ func (f *follower) noteToken(ns, id string, epoch uint64) {
 // session's owner may be applied: the epoch is the table's current one — the
 // copy is the owner's state as the holder replicated it — and this node
 // holds nothing for the session yet. A holder that stops holding a copy on a
-// map change hands it to the new holders this way (WI 1289). The owner's own
-// push, if it arrives, replaces the copy whole; if it was lost, the gap in
-// the owner's stream resyncs it.
+// map change hands it to the new holders this way. The owner's own push, if
+// it arrives, replaces the copy whole; if it was lost, the gap in the owner's
+// stream resyncs it.
 func (f *follower) handedOver(peer, ns, id string, epoch uint64) bool {
 	l, ok := f.r.o.Leases.Lookup(ns, id)
 	if !ok || l.Epoch != epoch || l.Owner == peer || l.Owner == f.r.o.Node {
@@ -288,13 +313,13 @@ func (f *follower) handedOver(peer, ns, id string, epoch uint64) bool {
 	}
 	if f.r.o.KeepUnfedCopies || !f.r.ownerAlive(ns, id) {
 		// With the owner gone the copy being handed over may be the last one,
-		// and no target is being fed either (WI 1289).
+		// and no target is being fed either.
 		return true
 	}
 	// Otherwise the copy is taken only where the owner's records will reach
 	// it: a holder this session is not replicated to receives nothing after
 	// this, and a takeover that read it would hand the client a queue from
-	// before the map moved (WI 1569).
+	// before the map moved.
 	shard := f.r.o.Map.ShardOf(ns, id)
 	return contains(f.r.o.Map.Current().Targets(shard, l.Owner), f.r.o.Node)
 }
@@ -513,6 +538,18 @@ func (w *worker) process(batch []frame) {
 			}
 			w.applyRetainedWrite(fr)
 			highest = fr.Seq
+		case kindRetainedTombstonesDropped:
+			if dirty {
+				w.settle(highest, true, since)
+				dirty = false
+				since = w.f.syncFailures()
+			}
+			if w.applyTombstoneDrops(fr) {
+				dirty = true
+			} else if w.gate.open() {
+				w.sendAck(ack{Seq: fr.Seq, Unapplied: true})
+			}
+			highest = fr.Seq
 		case kindRetainedRelease:
 			if r.o.PreRetainedMoves {
 				// The older build's arm: acknowledged unapplied, as below.
@@ -574,7 +611,11 @@ func (w *worker) process(batch []frame) {
 
 // refuse rejects one frame to its sender and records it in the trace.
 func (w *worker) refuse(fr frame, reason string) {
-	w.sendAck(rejection(fr, reason))
+	a := rejection(fr, reason)
+	if reason == misroutedReason {
+		a.Map = w.f.r.o.Map.Current().Version
+	}
+	w.sendAck(a)
 	s := RejectSample{Seq: fr.Seq, Kind: kindLabel(kindIndex(fr.Kind)), Client: fr.ClientID, Topic: fr.Topic,
 		Epoch: fr.Epoch, Class: rejectClass(reason), Reason: reason}
 	if fr.Kind == kindAppend {
@@ -763,7 +804,9 @@ func (w *worker) applyAppend(fr frame) (rejected bool, reason string) {
 	} else if stale, _, why := w.staleTimed(fr, false); stale {
 		return true, why
 	}
-	un, err := f.applyTimed(store.Record{Type: fr.Type, Key: store.Key{Namespace: fr.Namespace, ClientID: fr.ClientID, Topic: fr.Topic}, Payload: fr.Payload}, w.timing, holdApply)
+	// A new follower's push and a resync send retained records as these same
+	// append frames, so their merges are counted on the append path too.
+	un, err := f.applyTimed(store.Record{Type: fr.Type, Key: store.Key{Namespace: fr.Namespace, ClientID: fr.ClientID, Topic: fr.Topic}, Payload: fr.Payload}, w.timing, holdApply, "append", w.peer)
 	if err != nil {
 		f.r.log.Error("replica apply failed", "peer", w.peer, "err", err)
 		return true, err.Error()
@@ -803,7 +846,7 @@ func (w *worker) applySnapshot(fr frame) (rejected bool, reason string) {
 		w.timing.s.SnapshotRecords += len(recs)
 	}
 	for _, rec := range recs {
-		if _, err := f.applyTimed(rec, w.timing, holdApply); err != nil {
+		if _, err := f.applyTimed(rec, w.timing, holdApply, "", ""); err != nil {
 			f.r.log.Error("replica snapshot apply failed", "peer", w.peer, "err", err)
 			return true, err.Error()
 		}
@@ -828,9 +871,37 @@ func (w *worker) staleTimed(fr frame, snapshot bool) (refused, handed bool, why 
 	return refused, handed, why
 }
 
+// shardLeader is a shard's leader under m, local for a shard m does not have,
+// as the table's Leader reads it.
+func shardLeader(m shardmap.Map, shard int, local string) string {
+	if shard < 0 || shard >= len(m.Shards) {
+		return local
+	}
+	return m.Shards[shard].Leader
+}
+
+// misroutedReason refuses a forwarded retained write at a node that does not
+// lead its shard under the map it has applied.
+const misroutedReason = "retained write to a node that does not lead the shard"
+
+// misroutedForward decides whether a retained write is refused as misrouted: a
+// forward, not a hand-over (R6 judges those), at a node that does not lead the
+// shard. installAnyway is the control that installs it, as before. It is pure.
+func misroutedForward(leads, handOver, installAnyway bool) bool {
+	return !leads && !handOver && !installAnyway
+}
+
 // notJournaledReason refuses a retained write whose record this node's
 // journal did not take: appended and synced.
 const notJournaledReason = "retained record not journaled"
+
+// retainedLimitReason refuses a forwarded write the leader's retained-topic
+// limit did not take.
+const retainedLimitReason = "retained topic limit reached"
+
+// versionedHeldReason refuses an unversioned retained write to a topic the
+// leader holds a versioned entry for (store.UnversionedRefused).
+const versionedHeldReason = "retained write unversioned over a versioned entry"
 
 // notLeaderHandOverReason refuses a retained hand-over at a node that does
 // not lead the shard and keeps copies of it; the sender makes it again.
@@ -845,43 +916,105 @@ func (w *worker) applyRetainedWrite(fr frame) {
 		return
 	}
 	shard := r.o.Map.ShardOf(fr.Msg.Namespace, fr.Msg.Topic)
-	if r.o.Map.Leader(shard, r.o.Node) != r.o.Node {
-		// The map moved under the sender; install anyway rather than lose
-		// the write, and let the next map change hand it on.
+	handOver := fr.Handover && !r.o.PreRetainedMoves
+	// One map snapshot decides leadership and gives a forward's stamp its
+	// epoch: read twice, a map applied between the reads would have this
+	// node stamp in an epoch that names another leader.
+	m := r.o.Map.Current()
+	leads := shardLeader(m, shard, r.o.Node) == r.o.Node
+	if !leads {
 		r.count("hoardmq_retained_forwards_total", map[string]string{"outcome": "misrouted"}, 1)
 	}
-	handOver := fr.Handover && !r.o.PreRetainedMoves
+	if misroutedForward(leads, handOver, r.o.InstallMisrouted) {
+		// The map moved under the sender. Installed here, the write would be
+		// held by a node that serves none of the shard, and the barrier, which
+		// names the map's leader, would pass on nothing.
+		r.log.Debug("retained write refused: this node does not lead the shard", "peer", w.peer, "topic", fr.Msg.Topic, "map", fr.Epoch)
+		w.refuse(fr, misroutedReason)
+		return
+	}
 	if handOver {
 		holds := len(r.o.Local.RetainedFor(fr.Msg.Namespace, fr.Msg.Topic, r.o.Clock())) > 0
-		leads := r.o.Map.Leader(shard, r.o.Node) == r.o.Node
 		note, noted := r.keptNote(shard)
 		if r.o.AnswerHandOverAnywhere {
 			leads = true
 		}
-		switch judgeHandOver(leads, holds, noted && note.Own) {
-		case handOverRefuse:
+		verdict := judgeHandOver(leads, holds, noted && note.Own)
+		if verdict == handOverRefuse {
 			r.count("hoardmq_retained_handovers_total", map[string]string{"outcome": "refused-not-leader"}, 1)
 			r.log.Debug("retained hand-over refused: this node does not lead the shard and keeps copies of it", "peer", w.peer, "topic", fr.Msg.Topic, "map", fr.Epoch)
 			w.refuse(fr, notLeaderHandOverReason)
 			return
-		case handOverHeld:
-			// The leader holds a message for the topic, which the hand-over's
-			// older copy must not replace; what the sender holds is held here.
+		}
+		_, heldBefore := r.o.Local.HeldRetained(fr.Msg.Namespace, fr.Msg.Topic)
+		var installed, durable bool
+		var heldRV store.Version
+		if r.o.FillOnlyMerge {
+			// The control: install only where no message is held, over a
+			// tombstone too.
+			if verdict == handOverInstall {
+				r.o.Sessions.InjectRetained(&message.Message{Namespace: fr.Msg.Namespace, Topic: fr.Msg.Topic})
+				installed = true
+				durable, _ = r.o.Sessions.InjectRetained(fr.Msg)
+			} else {
+				durable = true
+			}
+		} else {
+			// The copy is installed only if its version outranks what is held
+			// (store.MergeRetained), a tombstone included; the answer waits on
+			// what is held being durable here.
+			installed, durable, heldRV = r.o.Sessions.InjectRetainedAt(fr.Msg, frameVersion(fr), true)
+		}
+		if !durable {
+			w.refuse(fr, notJournaledReason)
+			return
+		}
+		r.countMerge("handover", fr.Msg.Topic, installed, heldRV, frameVersion(fr))
+		if !installed {
 			r.count("hoardmq_retained_handovers_total", map[string]string{"outcome": "held"}, 1)
-			r.log.Debug("retained hand-over not installed: a message for the topic is held", "peer", w.peer, "topic", fr.Msg.Topic, "map", fr.Epoch)
+			r.log.Debug("retained hand-over not installed: the topic is held at a version as high", "peer", w.peer, "topic", fr.Msg.Topic, "map", fr.Epoch, "rv", frameVersion(fr).String(), "held_rv", heldRV.String())
 			if w.gate.open() {
 				w.sendAck(ack{Seq: fr.Seq})
 			}
+			r.noteHandOverIn(w.peer, shard)
 			return
 		}
+		r.log.Debug("retained hand-over installed", "peer", w.peer, "topic", fr.Msg.Topic, "map", fr.Epoch, "rv", frameVersion(fr).String())
+		r.belowDropped(shard, "handover", w.peer, fr.Msg, frameVersion(fr), !heldBefore)
+		w.barrierThenAck(fr, true)
+		r.noteHandOverIn(w.peer, shard)
+		return
 	}
-	if !r.o.Sessions.InjectRetained(fr.Msg) {
+	var durable bool
+	var refusal store.RetainRefusal
+	if fr.Handover {
+		// A hand-over at a node of the build before retained moves
+		// (PreRetainedMoves), which takes it as an unversioned write.
+		durable, refusal = r.o.Sessions.InjectRetained(fr.Msg)
+	} else {
+		// A client's write forwarded to this node, the shard's leader under
+		// the snapshot read above: stamped with that map's version.
+		durable, refusal = r.o.Sessions.InjectRetainedWriteAt(fr.Msg, m.Version)
+	}
+	switch refusal {
+	case store.RetainOverLimit:
+		w.refuse(fr, retainedLimitReason)
+		return
+	case store.RetainVersionedHeld:
+		w.refuse(fr, versionedHeldReason)
+		return
+	}
+	if !durable {
 		w.refuse(fr, notJournaledReason)
 		return
 	}
-	if handOver {
-		r.log.Debug("retained hand-over installed", "peer", w.peer, "topic", fr.Msg.Topic, "map", fr.Epoch)
-	}
+	w.barrierThenAck(fr, false)
+}
+
+// barrierThenAck waits for this node's followers to hold an installed
+// retained write, then acknowledges it, or refuses it when they did not.
+func (w *worker) barrierThenAck(fr frame, handOver bool) {
+	r := w.f.r
 	// The injected record is keyed by topic, so naming it is what lets a
 	// refusal of this write fail here instead of blocking every session's
 	// barrier to the same peer.

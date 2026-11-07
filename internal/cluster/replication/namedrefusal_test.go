@@ -103,9 +103,9 @@ func deepStream(t *testing.T, k string) *outbound {
 	return p
 }
 
-// TestRefusalOutsideTheWindowIsScopedByItsName is WI 1802's defect at the
-// size of one stream: a refusal the window has lost blocked every barrier to
-// the peer. Named by the follower, it is held against its own key only.
+// TestRefusalOutsideTheWindowIsScopedByItsName pins a defect at the size of
+// one stream: a refusal the window has lost blocked every barrier to the peer.
+// Named by the follower, it is held against its own key only.
 func TestRefusalOutsideTheWindowIsScopedByItsName(t *testing.T) {
 	k := store.Scope{Namespace: "default", ClientID: "k"}
 	unrelated := store.Scope{Namespace: "default", ClientID: "o7"}

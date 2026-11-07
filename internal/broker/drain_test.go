@@ -187,7 +187,7 @@ func TestDrainAloneClosesClients(t *testing.T) {
 	}
 }
 
-// TestReadinessTracksTopologyAndDrain (AC 2): readiness is false while the
+// TestReadinessTracksTopologyAndDrain: readiness is false while the
 // topology changed within the stable interval and during a drain, true once
 // the topology has settled.
 func TestReadinessTracksTopologyAndDrain(t *testing.T) {

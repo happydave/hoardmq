@@ -59,7 +59,7 @@ func heldEnv(t *testing.T) (*Manager, *fakeClock, *switchReplication, *fakeConn)
 // TestPubcompFollowsADurableRelease: the PUBCOMP goes out only once the
 // identifier's release is synced, so a power cut after it leaves the
 // identifier closed and the client's next QoS 2 message under it is
-// delivered, not answered as a duplicate and dropped (WI 2031).
+// delivered, not answered as a duplicate and dropped.
 func TestPubcompFollowsADurableRelease(t *testing.T) {
 	dir := t.TempDir()
 	d := faultdisk.New()

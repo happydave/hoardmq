@@ -390,23 +390,11 @@ func (c *Core) stageSnapshot(d snapDesc) (*consensus.StagedMachine, error) {
 		h.stageDelay()
 	}
 	path := filepath.Join(c.snapDir, d.Name)
-	f, err := os.Open(path)
+	f, fr, hd, err := openSnapshotFile(path, d)
 	if err != nil {
-		return nil, fmt.Errorf("snapshot file %s: %w", path, err)
+		return nil, err
 	}
 	defer func() { _ = f.Close() }()
-	if st, err := f.Stat(); err != nil {
-		return nil, err
-	} else if uint64(st.Size()) != d.Size {
-		return nil, fmt.Errorf("snapshot file %s: %d bytes, the descriptor says %d", path, st.Size(), d.Size)
-	}
-	fr, hd, err := consensus.NewFileReader(f)
-	if err != nil {
-		return nil, fmt.Errorf("snapshot file %s: %w", path, err)
-	}
-	if hd.Index != d.Index || hd.Term != d.Term {
-		return nil, fmt.Errorf("snapshot file %s: at %d/%d, the descriptor says %d/%d", path, hd.Index, hd.Term, d.Index, d.Term)
-	}
 	st, err := c.machine.Stage(fr, hd)
 	if err != nil {
 		return nil, fmt.Errorf("snapshot file %s: %w", path, err)
@@ -415,6 +403,56 @@ func (c *Core) stageSnapshot(d snapDesc) (*consensus.StagedMachine, error) {
 		return nil, fmt.Errorf("snapshot file %s: digest does not match the descriptor", path)
 	}
 	return st, nil
+}
+
+// openSnapshotFile opens a stored snapshot's file and checks it against its
+// descriptor: its size, and its header's index and term.
+func openSnapshotFile(path string, d snapDesc) (*os.File, *consensus.FileReader, consensus.FileHeader, error) {
+	fail := func(f *os.File, err error) (*os.File, *consensus.FileReader, consensus.FileHeader, error) {
+		if f != nil {
+			_ = f.Close()
+		}
+		return nil, nil, consensus.FileHeader{}, err
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return fail(nil, fmt.Errorf("snapshot file %s: %w", path, err))
+	}
+	if st, err := f.Stat(); err != nil {
+		return fail(f, err)
+	} else if uint64(st.Size()) != d.Size {
+		return fail(f, fmt.Errorf("snapshot file %s: %d bytes, the descriptor says %d", path, st.Size(), d.Size))
+	}
+	fr, hd, err := consensus.NewFileReader(f)
+	if err != nil {
+		return fail(f, fmt.Errorf("snapshot file %s: %w", path, err))
+	}
+	if hd.Index != d.Index || hd.Term != d.Term {
+		return fail(f, fmt.Errorf("snapshot file %s: at %d/%d, the descriptor says %d/%d", path, hd.Index, hd.Term, d.Index, d.Term))
+	}
+	return f, fr, hd, nil
+}
+
+// CheckStoredSnapshot returns the error a start refuses a stored snapshot
+// on, up to staging it into the machine, reading only: the form, and for a
+// file the descriptor, the file's size and its header.
+func CheckStoredSnapshot(snapDir string, snap *pb.Snapshot) error {
+	if raft.IsEmptySnap(snap) {
+		return nil
+	}
+	if snapshotForm(snap.Data) == consensus.FileFormat {
+		d, _, err := decodeDesc(snap.Data)
+		if err != nil {
+			return err
+		}
+		f, _, _, err := openSnapshotFile(filepath.Join(snapDir, d.Name), d)
+		if err != nil {
+			return err
+		}
+		return f.Close()
+	}
+	_, _, _, err := unwrapSnapshot(snap.Data)
+	return err
 }
 
 // holdReceived pins a received file until the loop has installed it or

@@ -7,9 +7,9 @@ import (
 )
 
 // TestDecideJoinCharacterisation records what the leader decides for every
-// reachable state of a join request. Work item 1350 requires the current
-// behaviour to be characterised before it is changed, so this table is the
-// record, not only the assertion.
+// reachable state of a join request. The current behaviour is
+// characterised before it is changed, so this table is the record, not only
+// the assertion.
 func TestDecideJoinCharacterisation(t *testing.T) {
 	const name = "n1"
 	voter := consensus.Member{ID: 7, Name: name, Role: consensus.Voter}
@@ -42,12 +42,12 @@ func TestDecideJoinCharacterisation(t *testing.T) {
 	}
 }
 
-// TestVoterWithAnEmptyLogIsNeverFastPathed is work item 1350's negative
-// control. Every joiner arrives with an empty log, and a member that is a
-// voter in the committed configuration has held a log by construction --
-// promotion requires a match index above zero. Admitting one without
-// resetting its progress returns it to the group as a voter with an empty
-// log and no recorded vote, which is the double-vote hazard.
+// TestVoterWithAnEmptyLogIsNeverFastPathed is the double-vote window's
+// negative control. Every joiner arrives with an empty log, and a member that
+// is a voter in the committed configuration has held a log by construction --
+// promotion requires a match index above zero. Admitting one without resetting
+// its progress returns it to the group as a voter with an empty log and no
+// recorded vote, which is the double-vote hazard.
 //
 // The leader's progress for a member reads zero for every member
 // immediately after an election, so the "match zero" arm is not an exotic

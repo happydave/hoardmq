@@ -355,19 +355,36 @@ func TestBehindOnlyAsAFollowingMember(t *testing.T) {
 // TestSlowFollowerUnderLoadIsNeverBehind: a follower whose every Ready is
 // delayed 50 ms trails the leader's commit while proposals run from four
 // goroutines for 5 s, but its applies advance, so it is never reported
-// behind and no stall is counted. The test sees the follower's applied index
-// below the leader's commit, and a target answered, so the follower was
-// behind and asking, not idle.
+// behind and no stall is counted.
+//
+// Both preconditions are the test's own doing, so a loaded host cannot leave
+// them unmet: the follower's first Ready is held until the leader's commit is
+// 20 past its applied index, for at most half the stall timeout so the hold is
+// never itself a stall, and the follower's catch-up target is raised to
+// the leader's commit as the run goes, as an answered catch-up request does.
+// The request itself is timing-bound; TestVoterBehindTheCompactedLogIsNotReady
+// holds that path.
 func TestSlowFollowerUnderLoadIsNeverBehind(t *testing.T) {
 	var slow atomic.Pointer[string]
+	var hold atomic.Pointer[func()]
 	_, lead, follower, _ := behindCluster(t, func(o *Options) {
 		name := o.Node
 		o.ReadyGate = func() {
 			if p := slow.Load(); p != nil && *p == name {
+				if h := hold.Swap(nil); h != nil {
+					(*h)()
+				}
 				time.Sleep(50 * time.Millisecond)
 			}
 		}
 	})
+	held := func() {
+		until := time.Now().Add(500 * time.Millisecond)
+		for time.Now().Before(until) && lead.core.Status().Commit < follower.core.machine.Applied()+20 {
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	hold.Store(&held)
 	slow.Store(&follower.name)
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
@@ -391,12 +408,14 @@ func TestSlowFollowerUnderLoadIsNeverBehind(t *testing.T) {
 	target := follower.core.catchUpTarget.Load()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
+		commit := lead.core.Status().Commit
+		raiseTo(&follower.core.catchUpTarget, commit)
 		if follower.core.Behind() {
 			close(stop)
 			wg.Wait()
 			t.Fatalf("a slow follower whose applies advance was reported behind: applied %d, target %d", follower.core.machine.Applied(), follower.core.catchUpTarget.Load())
 		}
-		if follower.core.machine.Applied() < lead.core.Status().Commit {
+		if follower.core.machine.Applied() < commit {
 			trailed = true
 		}
 		time.Sleep(5 * time.Millisecond)
@@ -404,7 +423,8 @@ func TestSlowFollowerUnderLoadIsNeverBehind(t *testing.T) {
 	close(stop)
 	wg.Wait()
 	if !trailed || follower.core.catchUpTarget.Load() <= target {
-		t.Fatalf("precondition not reached: trailed the leader's commit %v, target %d from %d", trailed, follower.core.catchUpTarget.Load(), target)
+		t.Fatalf("precondition: not reached (the leader's commit did not advance past the follower's applied index): trailed %v, target %d from %d",
+			trailed, follower.core.catchUpTarget.Load(), target)
 	}
 	if n := follower.core.Stalls(); n != 0 {
 		t.Errorf("%d stalls counted on a slow follower whose applies advance", n)

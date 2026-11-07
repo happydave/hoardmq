@@ -10,8 +10,8 @@ import (
 // repeated enqueues of one key into one pass that sees every payload
 // attached since the last pass. It replaces a goroutine per event on the
 // takeover, lost-lease and adoption paths: under a reconnect storm that
-// shape put over a million goroutines on the session manager's lock
-// (WI 1292 round 2), and a mutex with that many waiters serves none of them.
+// shape put over a million goroutines on the session manager's lock, and a
+// mutex with that many waiters serves none of them.
 // The queue bounds the lock's waiters to the worker count and the memory to
 // the node's session count. Nothing is dropped: a key is queued until a pass
 // runs it, and a pass acknowledges every payload it was handed.

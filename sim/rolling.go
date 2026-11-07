@@ -12,18 +12,18 @@ import (
 	"github.com/happydave/hoardmq/internal/module"
 )
 
-// The rolling-restart arm (WI 2208): every node drained, stopped and
-// restarted in turn, as a StatefulSet rolls, with the publish probe running.
-// Since WI 1788 a draining node leaves the shard map before it stops, so each
-// step moves the copies of the sessions that targeted it and moves them back
-// when it rejoins; the record says what that cost per step.
+// The rolling-restart arm: every node drained, stopped and restarted in turn,
+// as a StatefulSet rolls, with the publish probe running.
+// A draining node leaves the shard map before it stops, so each step moves
+// the copies of the sessions that targeted it and moves them back when it
+// rejoins; the record says what that cost per step.
 
 const (
 	rollEnv            = "HOARDMQ_SIM_ROLL"
 	rollDrainLimitEnv  = "HOARDMQ_SIM_ROLL_DRAIN_LIMIT_SEC"
 	rollDrainLimitDflt = 1800 * time.Second
 	// rollCutEnv cuts a drain still running that many seconds after it
-	// began, as the kubelet does at a pod's termination grace (WI 2251).
+	// began, as the kubelet does at a pod's termination grace.
 	rollCutEnv = "HOARDMQ_SIM_ROLL_CUT_SEC"
 	// rollKillAfter is how long a cut node's shutdown may run: the kubelet
 	// sends SIGTERM when the grace ends and SIGKILL two seconds later.
@@ -37,7 +37,8 @@ const (
 	// no kubelet, so a drain past it is reported, and cut only at rollCutEnv.
 	rollChartGraceSec = 75.0
 	// rollReferenceRate is the most the chart's rolling-restart runbook
-	// refused after WI 1788: 23 of 600 (hoardmq sim/results/leaving-2026-10-05).
+	// refused once a draining node left the shard map before it stopped: 23 of
+	// 600 (hoardmq sim/results/leaving-2026-10-05).
 	rollReferenceRate = 23.0 / 600.0
 )
 
@@ -139,7 +140,8 @@ type rollStep struct {
 	Changes       []changeLag             `json:"changes"`
 	Confirms      map[string]confirmDelta `json:"confirms"`
 	Probe         windowCounts            `json:"probe"`
-	// Failures is the rise of the forward and barrier failure counters over
+	// Failures is the rise of the forward and barrier failure counters, and of
+	// the retained forwards by outcome (misrouted refusals among them), over
 	// the step, summed over the nodes running at both ends.
 	Failures map[string]float64 `json:"failures"`
 	// Copies is the rise of the replica copies dropped and kept, by reason,
@@ -420,7 +422,8 @@ func rollDrainMetric(name string) bool {
 
 // rollFailureMetric is a family a step's failures sum.
 func rollFailureMetric(name string) bool {
-	return name == "hoardmq_forward_failures_total" || name == "hoardmq_replication_barrier_failures_total"
+	return name == "hoardmq_forward_failures_total" || name == "hoardmq_replication_barrier_failures_total" ||
+		name == "hoardmq_retained_forwards_total"
 }
 
 // rollEmptyMetric is the family a step's served_empty sums.

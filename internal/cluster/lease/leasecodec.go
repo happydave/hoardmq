@@ -20,6 +20,7 @@ const (
 	lWill
 	lExpiresAt
 	lDisconnectedAt
+	lPrincipal
 )
 
 const (
@@ -61,7 +62,8 @@ func flag(on bool, f uint64) uint64 {
 // encodeCompactLease writes one lease.
 func encodeCompactLease(l *Lease) []byte {
 	e := &enc{b: make([]byte, 0, 64)}
-	flags := flag(l.Online, lOnline) | flag(l.Will != nil, lWill) | flag(!l.ExpiresAt.IsZero(), lExpiresAt) | flag(!l.DisconnectedAt.IsZero(), lDisconnectedAt)
+	flags := flag(l.Online, lOnline) | flag(l.Will != nil, lWill) | flag(!l.ExpiresAt.IsZero(), lExpiresAt) | flag(!l.DisconnectedAt.IsZero(), lDisconnectedAt) |
+		flag(l.Principal != 0, lPrincipal)
 	e.uv(flags)
 	e.str(l.Namespace)
 	e.str(l.ClientID)
@@ -76,6 +78,9 @@ func encodeCompactLease(l *Lease) []byte {
 	}
 	if l.Will != nil {
 		encodeWill(e, l.Will)
+	}
+	if l.Principal != 0 {
+		e.b = binary.BigEndian.AppendUint64(e.b, l.Principal)
 	}
 	return e.b
 }
@@ -213,6 +218,11 @@ func decodeCompactLease(b []byte) (*Lease, error) {
 	}
 	if flags&lWill != 0 {
 		l.Will = decodeWill(d)
+	}
+	if flags&lPrincipal != 0 {
+		if p := d.raw(8); len(p) == 8 {
+			l.Principal = binary.BigEndian.Uint64(p)
+		}
 	}
 	if d.err == nil && len(d.b) != 0 {
 		d.err = errCompactRecord

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
@@ -58,7 +59,7 @@ func TestFailover(t *testing.T) {
 			t.Fatalf("machine is not settled: %d TCP sockets in use or in TIME-WAIT (limit %d for %d clients); wait for them to drain — see ss -s", used, limit, clients)
 		}
 	}
-	// Evidence capture (WI 1284): with HOARDMQ_SIM_ARTIFACT set, the
+	// Evidence capture: with HOARDMQ_SIM_ARTIFACT set, the
 	// measurement writes its report, per-phase runtime deltas, profile
 	// snapshots (including one taken mid-storm), and a flight-recorder
 	// trace window into its own artifact directory. Never fatal: the
@@ -74,8 +75,8 @@ func TestFailover(t *testing.T) {
 	// Progress goes to stderr and, when an artifact directory exists, to a
 	// progress.log inside it. The file is the reliable channel: `go test`
 	// pipes and buffers the binary's stderr along with everything else
-	// unless run with -v, which is exactly the silence WI 1285 exists to
-	// end — an operator can tail the file regardless of how the test was
+	// unless run with -v, which is exactly the silence the progress lines
+	// exist to end — an operator can tail the file regardless of how the test was
 	// invoked. (Observed, not theorized: a 20,000-client run under a plain
 	// `go test` produced zero live lines on stderr.)
 	var progressFile *os.File
@@ -103,7 +104,7 @@ func TestFailover(t *testing.T) {
 			sources = append(sources, fmt.Sprintf("127.0.0.%d", i))
 		}
 	}
-	// The remote-client mode (WI 1480): the clients run in a driver process,
+	// The remote-client mode: the clients run in a driver process,
 	// usually on another host, dialling from the given sources at every client
 	// count, and the nodes listen on the given addresses.
 	remote, err := readRemoteSettings(os.Getenv, 3)
@@ -121,9 +122,9 @@ func TestFailover(t *testing.T) {
 	// snapshots are the default answer to "what were the nodes doing".
 	// HOARDMQ_SIM_NODELOG=1 (with an artifact dir) opts smaller runs in.
 	// A recorded run uses the product's timings, ttl included, and the gate
-	// the harness's (WI 1475). HOARDMQ_SIM_LEASE_TTL_MS still overrides the
-	// ttl (WI 1292 round 4: a storm-loaded consensus core against a 2 s ttl
-	// declared healthy survivors dead).
+	// the harness's. HOARDMQ_SIM_LEASE_TTL_MS still overrides the ttl (a
+	// storm-loaded consensus core against a 2 s ttl declared healthy survivors
+	// dead).
 	set, err := failoverTimings(record, os.Getenv)
 	if err != nil {
 		t.Fatal(err)
@@ -146,9 +147,14 @@ func TestFailover(t *testing.T) {
 			defer func() { _ = f.Close() }()
 		}
 	}
+	if record && opts.Log == nil {
+		// A measurement keeps node logs only on request (above): at its
+		// scale the default file is enormous.
+		opts.Log = io.Discard
+	}
 	c := New(t, opts)
 	// Taken before the fill so git never runs inside the storm, and read
-	// again when the artifact is written (WI 1379).
+	// again when the artifact is written.
 	prov := readProvenance(os.Args, os.Environ(), ".")
 	eff := c.effective(clients)
 	var pop population
@@ -197,7 +203,7 @@ func TestFailover(t *testing.T) {
 		t.Fatal(err)
 	}
 	start := time.Now()
-	// The direct pause observer and the per-interval series (WI 1352). The
+	// The direct pause observer and the per-interval series. The
 	// runtime's own metrics say what the runtime knows about; this says how
 	// long the process was not running, whatever the reason. Elapsed times
 	// are measured from the run's start, which the artifact records.
@@ -207,7 +213,7 @@ func TestFailover(t *testing.T) {
 	var intervalsMu sync.Mutex
 	prevRT := rtStart
 	// The nodes' stores are under t.TempDir(); the disk figures describe the
-	// device that directory is on, resolved rather than assumed (WI 1375).
+	// device that directory is on, resolved rather than assumed.
 	prevHost := readHost(os.TempDir())
 	// Called from the fill goroutine, from the reconnect loop and once at
 	// window end. Closing the fill goroutine's stop channel does not wait
@@ -232,7 +238,7 @@ func TestFailover(t *testing.T) {
 		defer intervalsMu.Unlock()
 		return append([]intervalSample(nil), intervals...)
 	}
-	// Fill-phase progress (WI 1285): a stderr line every 15 s from a
+	// Fill-phase progress: a stderr line every 15 s from a
 	// goroutine that reads one atomic and the runtime's own metrics —
 	// nothing under a product lock, nothing on the connect path.
 	var completed atomic.Int64
@@ -286,7 +292,7 @@ func TestFailover(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The node with the most clients by default; a victim policy can put the
-	// displaced clients' first target on the leader or away from it (WI 1493).
+	// displaced clients' first target on the leader or away from it.
 	names := make([]string, len(c.Nodes))
 	counts := make([]int, len(c.Nodes))
 	for i, n := range c.Nodes {
@@ -307,7 +313,7 @@ func TestFailover(t *testing.T) {
 	var profilesTaken []string
 	affected := count[victim.TCP]
 	before := leaseCounters(c, victim)
-	// The publish probe (WI 1618). It connects after the fill so the fill
+	// The publish probe. It connects after the fill so the fill
 	// time — a published figure — is unaffected, and publishes from here
 	// until watching ends. A probe that cannot be built is reported and does
 	// not fail the run: the measurement outlives its instrumentation.
@@ -330,9 +336,9 @@ func TestFailover(t *testing.T) {
 		emitProgress("client driver failed at the mark: " + err.Error())
 		t.Fatal(err)
 	}
-	// The flight recorder (WI 1284, Go 1.25+) keeps a moving window of the
+	// The flight recorder (Go 1.25+) keeps a moving window of the
 	// execution trace in memory. Snapshots are written when the first
-	// survivor fences (WI 1474: the window covers the leaderless stretch
+	// survivor fences (the window covers the leaderless stretch
 	// before it), when the stall detector fires — reconnects stopped making
 	// progress — and at window end if neither happened. The recorder failing
 	// never fails the measurement.
@@ -391,7 +397,7 @@ func TestFailover(t *testing.T) {
 		emitProgress("client driver failed at the crash: " + err.Error())
 		t.Fatal(err)
 	}
-	// WI 1474's evidence, from the crash: a CPU profile over the storm's first
+	// Diagnostic evidence, from the crash: a CPU profile over the storm's first
 	// minute, a one-second sampler of each survivor's peers and the cluster
 	// sockets, and a trace window taken at the first fence.
 	cpuRec := CPUProfileRecord{Unavailable: "no artifact directory"}
@@ -429,14 +435,14 @@ func TestFailover(t *testing.T) {
 	// Wait for every affected client to be back online. This is a
 	// measurement, not a bar: a run where some client never came back
 	// records that instead of failing, and the report says so.
-	// The loop is also the window's progress reporter and stall detector
-	// (WI 1285 / 1284): it already visits every client each pass, so the
+	// The loop is also the window's progress reporter and stall detector:
+	// it already visits every client each pass, so the
 	// periodic line and the storm capture add reads of client atomics and
 	// runtime metrics only — nothing under a product lock.
 	deadline := time.Now().Add(10 * time.Minute)
-	// The definition of recovered, owner-decided 2026-09-21 (WI 1618): the
-	// instant is the start of the earliest interval of length hold in which
-	// every still-trying client is recovered. recWatch decides it; connWatch
+	// The definition of recovered: the instant is the start of the earliest
+	// interval of length hold in which every still-trying client is
+	// recovered. recWatch decides it; connWatch
 	// runs the old reading — the first return of the *online* count — beside
 	// it, so one batch publishes both and the difference can be read.
 	hold := holdSeconds(record)
@@ -460,13 +466,14 @@ func TestFailover(t *testing.T) {
 	// The headline figure is an endpoint; these are the shape it hides. A
 	// round that closes its last clients stops being watched and a round
 	// that misses them is watched to the end of the window, so the miss case
-	// reports where it ended up rather than where it got to — round 12's
-	// headline was 88,570 when its peak had been 99,911 (WI 1373).
+	// reports where it ended up rather than where it got to — one round's
+	// headline was 88,570 when its peak had been 99,911.
 	shape := newOnlineShape(clients-failed, crashAt)
 	onlineSec := &onlineSeries{from: crashAt}
 	// The recovered count on the same once-a-second scale, beside the online
 	// one. The online series stays as it is: every batch published before
-	// this work item reports it, and the two are read against each other.
+	// the recovered series existed reports it, and the two are read against
+	// each other.
 	recoveredSec := &onlineSeries{from: crashAt}
 	prevOnline, lastIncrease := 0, time.Now()
 	lastProgress, prevWait := time.Now(), rtFill.MutexWaitSec
@@ -527,7 +534,7 @@ func TestFailover(t *testing.T) {
 		}
 		// Net progress resets the stall clock: at 100k the count oscillates by
 		// ±1 as clients drop and return, which "any increase" misread as
-		// recovery and the detector never fired (round 2).
+		// recovery and the detector never fired.
 		if online >= prevOnline+max(1, affected/1000) {
 			prevOnline, lastIncrease = online, now
 		}
@@ -557,7 +564,7 @@ func TestFailover(t *testing.T) {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	// The hold is inside the measurement (WI 1618), so this record describes
+	// The hold is inside the measurement, so this record describes
 	// the interval that confirmed the instant rather than a separate watch
 	// kept afterwards: its length, the lowest recovered count seen inside it,
 	// and where the counts ended.
@@ -617,7 +624,7 @@ func TestFailover(t *testing.T) {
 	after := leaseCounters(c, victim)
 	leaderAfter, _ := agreedLeader(leaderViews(c, victim))
 	// One final interval, so a run shorter than a progress interval still
-	// reports its pause figures rather than "not measured" (WI 1352).
+	// reports its pause figures rather than "not measured".
 	sampleInterval("window-end", time.Since(start), readRuntime())
 	series := snapshotIntervals()
 	prov.TreeAtEnd = checkTree(".", prov.Tree)
@@ -626,7 +633,7 @@ func TestFailover(t *testing.T) {
 	servedEmpty := servedEmptyTotals(endStats)
 	drop := newDropTimeline(crashAt, endRead, victim.Name, leaderAfter, endStats, instant, whyNot == recoveryReached)
 	// The run's artifact is assembled before its report, so the report and
-	// run.json state the same verdict against the pass bounds (WI 1734).
+	// run.json state the same verdict against the pass bounds.
 	art := failoverArtifact{
 		Clients: clients, Failed: failed, Victim: victim.Name, Affected: affected,
 		FillTime: fillTime, OnlineAtEnd: online, RecoveredAtEnd: recovered,
@@ -714,11 +721,11 @@ Whether a silence was this process or the peer: the four figures above come
 from a sampler that sleeps 50 ms and measures how long the sleep took, and
 from the runtime's own histograms **subtracted per interval** rather than
 read cumulatively — a cumulative quantile says "somewhere in this run", which
-is what made WI 1340 round 8's 21.5 s uninterpretable. The GC total is a
+is what once made a round's 21.5 s uninterpretable. The GC total is a
 bucket-midpoint approximation and the scheduler figure is a bucket's upper
 bound, so both are magnitudes, not measurements. The sampler reports how
 long the process was stopped and never why. **The host figures beside it now
-say why** (WI 1375): Linux pressure stall information gives, per interval,
+say why**: Linux pressure stall information gives, per interval,
 the time some task was stalled on cpu, io or memory and the time *every*
 runnable task was — the latter directly comparable with the stall figure —
 together with the data directory's device utilisation and queue depth, this
@@ -738,24 +745,23 @@ attempts a client waits a seeded backoff starting at %s and doubling to a
 cap of %s, jittered, and returning to the floor once a CONNACK accepts it.
 **Recovered means connected with every subscription granted on the current
 connection, and the instant is the start of the earliest interval of length
-%s throughout which every still-trying client was continuously recovered**
-(owner decision, 2026-09-21, WI 1618). The hold is part of the measurement,
+%s throughout which every still-trying client was continuously recovered**.
+The hold is part of the measurement,
 not a check after it: a population that comes back and is then closed moves
-the instant out to the interval that actually held, which is what WI 1515's
-defect did unobserved under the old reading. A run reports an instant only if
+the instant out to the interval that actually held, which is what an adoption queue's
+closed connections did unobserved under the old reading. A run reports an instant only if
 the recovered count was seen below the target after the crash. A round that
 reaches the finish line is not observed past its hold and a round that does
 not is observed to the end of the ten-minute window, so two rounds are not
 watched for the same length of time, and the "fewest online" row of a round
 that missed is a trough that a round which closed might also have had. Peak,
-trough and the two percentile figures are reported for exactly this reason
-(WI 1373).
+trough and the two percentile figures are reported for exactly this reason.
 The reconnect time is measured per client from its first
 dropped-connection event to the first CONNACK that accepted it afterwards,
 so the percentiles cover only clients that came back; those that never did
 contribute nothing to them and are counted in the row above. The reconnect percentiles are of the *connection*, not of the definition
 above: a client counts there at the CONNACK that accepted it, which is why
-the headline and the percentiles can differ. Until WI 1618 the headline was
+the headline and the percentiles can differ. Before the hold-based definition the headline was
 that same reading — a client whose resubscribe the broker refused was counted
 back while receiving nothing, and the refusals row was the only thing that
 said so, as an upper bound. It is now exact: such a client is not recovered
@@ -763,12 +769,11 @@ and the headline waits for it. The old reading is published beside the new
 one for this batch so the two can be compared. **A session the broker did not
 have** is the other way a client can be counted back to nothing: it
 reconnects, is told Session Present false, loses its queue, and re-subscribes
-into a session the broker built empty (WI 1653). That row counts it. Lease
+into a session the broker built empty. That row counts it. Lease
 operations and proposals are read from the survivors' metrics: the ratio of
 acquire operations to proposals is the batching the design counts on.
 
-Caveats: %s; no connect-rate limiter exists yet (work item 1283), so the
-survivors accept the storm as fast as it arrives. The number is a
+Caveats: %s; %s. The number is a
 measurement of this setup, not a bar.
 `, time.Now().Format("2006-01-02"), runtime.NumCPU(), memory(), runtime.Version(), topologyLine(remote), eff.TimingSet, c.o.TTL, eff.HeartbeatMs, eff.HeartbeatMisses, eff.RaftTickMs, eff.TakeoverTimeoutMs, eff.AckTimeoutMs, eff.ConnectTimeoutSec, strings.Join(sources, ", "), clients, failed, fillTime,
 		victim.Name, affected, hold, fullReconnect, connackLine(connackAt, connackWhyNot, crashAt), runsCovered(), shape.peakLine(), shape.troughLine(),
@@ -776,7 +781,7 @@ measurement of this setup, not a bar.
 		pct(0.5).Round(time.Millisecond), pct(0.9).Round(time.Millisecond), pct(0.99).Round(time.Millisecond), pct(1).Round(time.Millisecond),
 		len(times), droppedClients, refusals, drops, fails, sum.SubRefusals, sum.SubRefusedClients, deltas(before, after, "ops"), deltas(before, after, "proposals"),
 		worstIntervalStall(series), stallThreshold, stallSummary(stalls), gcTotal(series), worstIntervalSched(series),
-		hold, backoffFloor, backoffCap, caveatLine(remote)) + boundsSection(verdict) + remoteSection(remoteRec) + placementSection(victimPolicy, leaderBefore, leaderAfter, victim.Name, target) + provenanceSection(prov)
+		hold, backoffFloor, backoffCap, caveatLine(remote), c.knobs.connectRateCaveat()) + boundsSection(verdict) + remoteSection(remoteRec) + placementSection(victimPolicy, leaderBefore, leaderAfter, victim.Name, target) + provenanceSection(prov)
 	t.Log("\n" + report)
 	if path := treeReportPath(record, artifactDir, time.Now()); path != "" {
 		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
@@ -806,7 +811,7 @@ measurement of this setup, not a bar.
 		// and accept-queue counters are read at window end.
 		art.Window = deltaBetween(rtFill, rtEnd, int(refusals+fails)+len(times))
 		art.Storm, art.Netstat = stormStats(c, victim), netstatDelta(netStart, readNetstat())
-		// WI 1352: what the process itself was doing, per interval and at
+		// What the process itself was doing, per interval and at
 		// the moments it stopped. Elapsed times are measured from the run's
 		// start, and CrashAfterSec is where the crash falls on that scale.
 		art.Environment = readEnvironment()
@@ -830,7 +835,7 @@ measurement of this setup, not a bar.
 		// measurement is finished. Everything above it is what it certifies,
 		// so it must not move earlier — a marker written before the artifact
 		// certifies nothing, and a driver that ends the run on seeing it
-		// would truncate the files still being written (WI 1374).
+		// would truncate the files still being written.
 		if err := writeComplete(artifactDir, clients, fullReconnect); err != nil {
 			t.Logf("artifact: completion marker: %v", err)
 		}
@@ -859,14 +864,14 @@ type failoverArtifact struct {
 	Hold *holdRecord `json:"hold,omitempty"`
 	// StoreDir is the root every node's store is under. A driver that ends a
 	// run once its marker appears skips t.TempDir's cleanup, so it needs to
-	// be told what to remove rather than deriving it (WI 1377).
+	// be told what to remove rather than deriving it.
 	StoreDir string `json:"store_dir,omitempty"`
-	// Recovery is the report's headline in both forms, under the definition
-	// of WI 1618. RecoverySec is negative when no instant was reached, so
-	// "did not reach" can never be read as a duration of zero — two of the
-	// four runs in the 2026-09-07 repeat batch did not reach, and a driver
-	// that averaged them as zero would report the best result ever recorded
-	// (WI 1374).
+	// Recovery is the report's headline in both forms, under the hold-based
+	// definition of recovered. RecoverySec is negative when no instant was
+	// reached, so "did not reach" can never be read as a duration of zero —
+	// two of the four runs in the 2026-09-07 repeat batch did not reach, and
+	// a driver that averaged them as zero would report the best result ever
+	// recorded.
 	Recovery    string  `json:"recovery"`
 	RecoverySec float64 `json:"recovery_sec"`
 	// RecoveryReason is empty when an instant was reached and otherwise says
@@ -897,12 +902,12 @@ type failoverArtifact struct {
 	SubDowngraded int64            `json:"sub_downgraded"`
 	// Probe is the publish probe's record, absent when it did not run.
 	Probe *probeRecord `json:"probe,omitempty"`
-	// Bounds is the run judged against the owner's pass bounds (WI 1734).
+	// Bounds is the run judged against the owner's pass bounds.
 	Bounds *boundsVerdict `json:"bounds,omitempty"`
 	// DropTimeline is each step from the crash to the shard map dropping
 	// the crashed node, and each survivor's forget, from the crash mark.
 	DropTimeline *dropTimeline `json:"drop_timeline,omitempty"`
-	// The shape the headline hides (WI 1373), machine readable.
+	// The shape the headline hides, machine readable.
 	PeakOnline      int                `json:"peak_online"`
 	PeakAtSec       float64            `json:"peak_at_sec"`
 	TroughOnline    int                `json:"trough_online"`
@@ -925,14 +930,14 @@ type failoverArtifact struct {
 	MetricsTimedOutBefore []string                      `json:"metrics_timed_out_before,omitempty"`
 	// MetricsAtInstant is the same snapshot taken when the hold that
 	// confirmed the recovery instant began, so a counter can be split at the
-	// instant: what rose after it is MetricsAfter minus this (WI 1734).
+	// instant: what rose after it is MetricsAfter minus this.
 	// MetricsAtInstantTiming says when each read began after the instant and
 	// how long it took, or why there is no snapshot.
 	MetricsAtInstant       map[string]map[string]float64 `json:"metrics_at_instant,omitempty"`
 	MetricsAtInstantTiming *instantRecord                `json:"metrics_at_instant_timing,omitempty"`
 	MetricsTimedOutAfter   []string                      `json:"metrics_timed_out_after,omitempty"`
 	// Storm is each survivor's admission and lease-work picture at window
-	// end (WI 1292 round 3), read without the session manager's lock.
+	// end, read without the session manager's lock.
 	Storm map[string]broker.StormStats `json:"storm"`
 	// StormAtCrash is the same block read just before the crash. The counters
 	// are cumulative, so the storm's own share is Storm minus this.
@@ -941,13 +946,12 @@ type failoverArtifact struct {
 	// pause-accept, ListenOverflows/ListenDrops are the truth about the queue
 	// the broker deliberately lets build.
 	Netstat map[string]int64 `json:"netstat_delta"`
-	// Environment is what a starvation figure has to be read against
-	// (WI 1352).
+	// Environment is what a starvation figure has to be read against.
 	Environment Environment `json:"environment"`
 	// Provenance is how this run was produced: the command, the settings,
-	// the effective timings and the source tree (WI 1379).
+	// the effective timings and the source tree.
 	Provenance Provenance `json:"provenance"`
-	// WI 1474's evidence: the storm's CPU profile (split by the sim and node
+	// Diagnostic evidence: the storm's CPU profile (split by the sim and node
 	// pprof labels), the trace window taken at the first fence, and the
 	// one-second series of each survivor's peers and the cluster sockets.
 	CPUProfile         CPUProfileRecord `json:"cpu_profile"`
@@ -968,12 +972,12 @@ type failoverArtifact struct {
 	// bound and not kept, so a truncated list cannot read as a quiet run.
 	Stalls        []StallEvent `json:"stalls,omitempty"`
 	StallsDropped int          `json:"stalls_dropped,omitempty"`
-	// ClientMode is where the clients ran: "in-process" or "remote" (WI
-	// 1480). Remote carries the driver's build and host, the client host's
+	// ClientMode is where the clients ran: "in-process" or "remote".
+	// Remote carries the driver's build and host, the client host's
 	// per-second series and the client-limited verdict.
 	ClientMode string        `json:"client_mode"`
 	Remote     *remoteRecord `json:"remote_clients,omitempty"`
-	// Leader placement (WI 1493): the victim policy when one was set, the
+	// Leader placement: the victim policy when one was set, the
 	// leader every node agreed on before the crash and every survivor at
 	// window end, the node the displaced clients tried first, the online count
 	// once a second from the crash, and the fixed-time profiles written.
@@ -984,7 +988,7 @@ type failoverArtifact struct {
 	OnlineSeries      []int    `json:"online_series,omitempty"`
 	RecoveredSeries   []int    `json:"recovered_series,omitempty"`
 	ProfilesAt        []string `json:"profiles_at,omitempty"`
-	// Subscribe refusals during the window (WI 1509). A client that
+	// Subscribe refusals during the window. A client that
 	// reconnected but had its resubscribe refused is online, is counted in
 	// the recovery figure, and is subscribed to nothing.
 	//
@@ -998,8 +1002,8 @@ type failoverArtifact struct {
 	// counts as recovered at all is the owner's to settle.
 	SubRefusals       int64 `json:"sub_refusals"`
 	SubRefusedClients int   `json:"sub_refused_clients"`
-	// DropCauses says what ended each lost connection, keyed by cause name
-	// (WI 1495). `drops` alone is a count with no cause, which is why the
+	// DropCauses says what ended each lost connection, keyed by cause name.
+	// `drops` alone is a count with no cause, which is why the
 	// published batches cannot say whether an excess drop was a takeover
 	// detaching a live client or a transport that simply went away.
 	DropCauses map[string]int64 `json:"drop_causes,omitempty"`
@@ -1026,7 +1030,7 @@ func boundsInputOf(art *failoverArtifact) boundsInput {
 // stormStats reads every survivor's StormStats. Most of it is atomic reads,
 // but the lease liveness, consensus status and peer reads take locks a storm
 // can hold, which is why each part's read time is in StormStats.ReadMs
-// (WI 1474: one progress line's figures arrived about 25 s after its
+// (one progress line's figures arrived about 25 s after its
 // timestamp).
 // servedEmptyTotals sums the survivors' served-empty counts by reason.
 func servedEmptyTotals(stats map[string]broker.StormStats) map[string]int64 {

@@ -270,12 +270,12 @@ func (m *Manager) ended(s *Session) {
 // CONNECT arrived for the same client identifier. It is one of three sources
 // of a SessionTakenOver disconnect and the only one that involves no lease
 // movement at all, so a measurement that reads a client's disconnect reason
-// cannot attribute it without this figure (WI 1495).
+// cannot attribute it without this figure.
 func (m *Manager) Displaced() int64 { return m.displaced.Load() }
 
 // CloseCounts reports connections this node closed, by the call that closed
 // them. Together with Displaced they account for every SessionTakenOver a
-// client on this node can observe (WI 1495).
+// client on this node can observe.
 func (m *Manager) CloseCounts() (take, evict, detach int64) {
 	return m.closedTake.Load(), m.closedEvict.Load(), m.closedDetach.Load()
 }
@@ -296,5 +296,5 @@ func (m *Manager) ImportWaits() (seals, imports int64) {
 // EvictsFromImport is the subset of the evictions that came from adopting a
 // lease and pulling its state, rather than from the lease service's deferred
 // reclaim. The two are the same act with different causes and want telling
-// apart (WI 1513).
+// apart.
 func (m *Manager) EvictsFromImport() int64 { return m.closedEvictImport.Load() }

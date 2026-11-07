@@ -122,7 +122,7 @@ type walStore struct {
 	inner *store.Store
 }
 
-// SyncStats exposes the journal's group-commit counters (WI 1292 round 4)
+// SyncStats exposes the journal's group-commit counters
 // for the broker's lock-free StormStats; nil-safe before Open.
 func (w *walStore) SyncStats() extstore.SyncStats {
 	if w.inner == nil {

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/happydave/hoardmq/internal/broker"
 	"github.com/happydave/hoardmq/internal/config"
+	"github.com/happydave/hoardmq/internal/datadir"
 )
 
 // serveSignals is the set of signals that stop the broker; tests replace the
@@ -35,6 +37,14 @@ var reloaded = func(broker.ReloadResult) {}
 // the node's listeners and its drain.
 var started = func(*broker.Server) {}
 
+// lockDataDir takes the data directory's lock; tests replace it to stand in
+// for a filesystem that cannot lock.
+var lockDataDir = datadir.Exclusive
+
+// lockShared is wal verify's and a dry run's lock; tests replace it as they
+// do lockDataDir.
+var lockShared = datadir.Shared
+
 // shutdownGrace bounds how long serve waits for connections to end.
 const shutdownGrace = 5 * time.Second
 
@@ -55,6 +65,27 @@ func runServe(a *app, args []string) int {
 		fprintf(a.stderr, "hoardmq serve: %v\n", err)
 		return ExitProblems
 	}
+	// The lock is taken once the listeners are bound, so a start that fails
+	// to bind still writes nothing, and before any file of the node opens.
+	var lock *datadir.Lock
+	defer func() {
+		if lock != nil {
+			_ = lock.Release()
+		}
+	}()
+	srv.SetDataDirGuard(func() error {
+		lock = lockDataDir(doc.Node.DataDir)
+		switch lock.Outcome {
+		case datadir.HeldElsewhere:
+			return fmt.Errorf("data directory %s is in use: %s", doc.Node.DataDir, lock.Describe())
+		case datadir.Failed:
+			return fmt.Errorf("data directory %s: %s", doc.Node.DataDir, lock.Describe())
+		case datadir.Unsupported:
+			logger.Warn("the data directory cannot be locked, so nothing stops a second node from using it", "dataDir", doc.Node.DataDir, "err", lock.Err)
+		}
+		srv.SetDataDirLocked(lock.Outcome == datadir.Held)
+		return nil
+	})
 	srv.SetConfigSource(broker.ConfigSource{Path: path, Environ: a.environ, Level: level})
 	// SIGHUP is caught from before Start, so one arriving while the node
 	// starts does not end the process; it is acted on once Start returns.

@@ -104,6 +104,11 @@ type SessionState struct {
 type State struct {
 	Sessions []*SessionState `json:"sessions"`
 	Retained []*mqtt.Message `json:"retained"`
+	// RetainedVersions is the version of each retained message held at a
+	// stamped version; a message absent from it is unversioned.
+	RetainedVersions []RetainedVersion `json:"retainedVersions,omitempty"`
+	// RetainedTombstones are the topics cleared at a stamped version.
+	RetainedTombstones []Tombstone `json:"retainedTombstones,omitempty"`
 	// Through, in a checkpoint, lists the sessions whose state holds records
 	// after the checkpoint's index: each holds every record of its session up
 	// to Index and none after it. Recovery skips those records and clears it.
@@ -194,6 +199,16 @@ type droppedRecord struct {
 type retainKey struct {
 	Namespace string `json:"ns"`
 	Topic     string `json:"topic"`
+	// RV, set, makes the delete a clear: a tombstone at that version.
+	// Without it the delete is a copy drop, which removes whatever is held.
+	RV *Version `json:"rv,omitempty"`
+}
+
+// retainPayload is a retain record's payload: the message, and its version
+// when stamped. The key "rv" is reserved on mqtt.Message.
+type retainPayload struct {
+	*mqtt.Message
+	RV *Version `json:"rv,omitempty"`
 }
 
 // Find returns the session with the key, or nil.
@@ -434,42 +449,109 @@ func (st *State) ApplyReport(typ byte, payload []byte) (Unapplied, error) {
 			}
 		}
 	case RecordRetain:
-		var m mqtt.Message
-		if err := json.Unmarshal(payload, &m); err != nil {
+		p := retainPayload{Message: &mqtt.Message{}}
+		if err := json.Unmarshal(payload, &p); err != nil {
 			return "", err
 		}
-		st.setRetained(&m)
+		var v Version
+		if p.RV != nil {
+			v = *p.RV
+		}
+		st.MergeRetainedMessage(p.Message, v)
 	case RecordRetainDelete:
 		var k retainKey
 		if err := json.Unmarshal(payload, &k); err != nil {
 			return "", err
 		}
-		st.setRetained(&mqtt.Message{Namespace: k.Namespace, Topic: k.Topic})
+		if k.RV != nil {
+			st.MergeRetainedClear(k.Namespace, k.Topic, *k.RV)
+		} else {
+			st.DropRetained(k.Namespace, k.Topic)
+		}
 	default:
 		return "", fmt.Errorf("unknown record type %d", typ)
 	}
 	return un, nil
 }
 
-func (st *State) setRetained(m *mqtt.Message) {
-	for i, r := range st.Retained {
-		if r.Namespace == m.Namespace && r.Topic == m.Topic {
-			if len(m.Payload) == 0 {
-				st.Retained = append(st.Retained[:i], st.Retained[i+1:]...)
-			} else {
-				st.Retained[i] = m
-			}
-			return
+// RetainedHeld reports what the state holds for a topic: its version, whether
+// anything is held, and whether that is a tombstone.
+func (st *State) RetainedHeld(ns, topic string) (v Version, held, tombstone bool) {
+	for _, t := range st.RetainedTombstones {
+		if t.Namespace == ns && t.Topic == topic {
+			return t.RV, true, true
 		}
 	}
-	if len(m.Payload) > 0 {
-		st.Retained = append(st.Retained, m)
+	for _, r := range st.Retained {
+		if r.Namespace == ns && r.Topic == topic {
+			for _, rv := range st.RetainedVersions {
+				if rv.Namespace == ns && rv.Topic == topic {
+					return rv.RV, true, false
+				}
+			}
+			return Version{}, true, false
+		}
 	}
+	return Version{}, false, false
 }
 
-// SetRetained stores a retained message or, for an empty payload, removes
-// the topic's entry.
-func (st *State) SetRetained(m *mqtt.Message) { st.setRetained(m) }
+// MergeRetainedMessage installs a retained message at version v when it
+// outranks what is held (MergeRetained, on a stream or a reload), and reports
+// whether it did. An empty payload is a copy drop.
+func (st *State) MergeRetainedMessage(m *mqtt.Message, v Version) bool {
+	if len(m.Payload) == 0 {
+		st.DropRetained(m.Namespace, m.Topic)
+		return true
+	}
+	held, exists, _ := st.RetainedHeld(m.Namespace, m.Topic)
+	if !MergeRetained(held, exists, v, false) {
+		return false
+	}
+	st.DropRetained(m.Namespace, m.Topic)
+	st.Retained = append(st.Retained, m)
+	if !v.Zero() {
+		st.RetainedVersions = append(st.RetainedVersions, RetainedVersion{Namespace: m.Namespace, Topic: m.Topic, RV: v})
+	}
+	return true
+}
+
+// MergeRetainedClear installs a tombstone at version v when it outranks what
+// is held, and reports whether it did.
+func (st *State) MergeRetainedClear(ns, topic string, v Version) bool {
+	held, exists, _ := st.RetainedHeld(ns, topic)
+	if !MergeRetained(held, exists, v, false) {
+		return false
+	}
+	st.DropRetained(ns, topic)
+	st.RetainedTombstones = append(st.RetainedTombstones, Tombstone{Namespace: ns, Topic: topic, RV: v})
+	return true
+}
+
+// DropRetained removes whatever the state holds for a topic, message or
+// tombstone, outside the merge: a copy drop.
+func (st *State) DropRetained(ns, topic string) {
+	st.Retained = slices.DeleteFunc(st.Retained, func(r *mqtt.Message) bool { return r.Namespace == ns && r.Topic == topic })
+	st.RetainedVersions = slices.DeleteFunc(st.RetainedVersions, func(r RetainedVersion) bool { return r.Namespace == ns && r.Topic == topic })
+	st.RetainedTombstones = slices.DeleteFunc(st.RetainedTombstones, func(r Tombstone) bool { return r.Namespace == ns && r.Topic == topic })
+}
+
+// DropTombstoneIf removes a topic's tombstone only while it is still the one
+// at version v: a compare-and-delete. It reports whether it did.
+func (st *State) DropTombstoneIf(ns, topic string, v Version) bool {
+	for i, t := range st.RetainedTombstones {
+		if t.Namespace == ns && t.Topic == topic && t.RV == v {
+			st.RetainedTombstones = append(st.RetainedTombstones[:i], st.RetainedTombstones[i+1:]...)
+			return true
+		}
+	}
+	return false
+}
+
+// SetRetained merges a retained message at the zero Version
+// (MergeRetainedMessage): it is stored into an empty topic or over an
+// unversioned message, never over a stamped message or tombstone. An empty
+// payload drops the topic's entry (a copy drop).
+func (st *State) SetRetained(m *mqtt.Message) { st.MergeRetainedMessage(m, Version{}) }
 
 // Normalize sorts for deterministic snapshots and comparisons.
 func (st *State) Normalize() {
@@ -487,6 +569,20 @@ func (st *State) Normalize() {
 	}
 	sort.Slice(st.Retained, func(i, j int) bool {
 		a, b := st.Retained[i], st.Retained[j]
+		if a.Namespace != b.Namespace {
+			return a.Namespace < b.Namespace
+		}
+		return a.Topic < b.Topic
+	})
+	sort.Slice(st.RetainedVersions, func(i, j int) bool {
+		a, b := st.RetainedVersions[i], st.RetainedVersions[j]
+		if a.Namespace != b.Namespace {
+			return a.Namespace < b.Namespace
+		}
+		return a.Topic < b.Topic
+	})
+	sort.Slice(st.RetainedTombstones, func(i, j int) bool {
+		a, b := st.RetainedTombstones[i], st.RetainedTombstones[j]
 		if a.Namespace != b.Namespace {
 			return a.Namespace < b.Namespace
 		}
@@ -528,14 +624,43 @@ func DeleteRecord(ns, id string) Record {
 
 // RetainRecord is the record that stores a retained message or, for an
 // empty payload, removes the topic's entry.
-func RetainRecord(m *mqtt.Message) Record {
+func RetainRecord(m *mqtt.Message) Record { return RetainRecordVersioned(m, Version{}) }
+
+// RetainRecordVersioned is RetainRecord at a version: a message's record
+// carries it, and an empty payload at a stamped version is a clear (a
+// tombstone) rather than a copy drop.
+func RetainRecordVersioned(m *mqtt.Message, v Version) Record {
 	k := Key{Namespace: m.Namespace, Topic: m.Topic}
+	var rv *Version
+	if !v.Zero() {
+		rv = &v
+	}
 	if len(m.Payload) == 0 {
-		payload, _ := json.Marshal(retainKey{m.Namespace, m.Topic})
+		payload, _ := json.Marshal(retainKey{Namespace: m.Namespace, Topic: m.Topic, RV: rv})
 		return Record{Type: RecordRetainDelete, Key: k, Payload: payload}
 	}
-	payload, _ := json.Marshal(m)
+	payload, _ := json.Marshal(retainPayload{Message: m, RV: rv})
 	return Record{Type: RecordRetain, Key: k, Payload: payload}
+}
+
+// RecordVersion is a retained record's version and whether it is a clear;
+// the zero Version for an unversioned record, a copy drop when a delete.
+func RecordVersion(r Record) (v Version, clear bool) {
+	switch r.Type {
+	case RecordRetain:
+		var p struct {
+			RV *Version `json:"rv"`
+		}
+		if json.Unmarshal(r.Payload, &p) == nil && p.RV != nil {
+			return *p.RV, false
+		}
+	case RecordRetainDelete:
+		var k retainKey
+		if json.Unmarshal(r.Payload, &k) == nil && k.RV != nil {
+			return *k.RV, true
+		}
+	}
+	return Version{}, false
 }
 
 // RecordName is a record type's short name, for labels and messages.

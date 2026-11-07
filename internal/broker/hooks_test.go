@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/happydave/hoardmq/internal/auth"
 	"github.com/happydave/hoardmq/internal/config"
 	"github.com/happydave/hoardmq/internal/module"
 	"github.com/happydave/hoardmq/internal/module/testmod"
@@ -19,7 +20,8 @@ func withTestModule(t *testing.T, mutate func(*config.Document)) *fixture {
 	testmod.Register()
 	testmod.Shared.Reset()
 	testmod.Shared.Set(func(c *testmod.Control) {
-		c.Trigger, c.Rewrite, c.OutboundDrop, c.RefuseFilter = "", "", "", ""
+		c.Trigger, c.Rewrite, c.OutboundDrop, c.RefuseFilter, c.RefuseUnsubscribe = "", "", "", "", ""
+		c.AuthResult, c.MechAttributes = auth.Result{}, nil
 		c.LowerQoS, c.Panic, c.Sleep = false, false, 0
 		c.InboundOutcome = module.OK
 		c.AdmitTrigger, c.AdmitOutcome = "", module.OK

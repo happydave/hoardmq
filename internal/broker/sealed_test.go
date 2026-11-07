@@ -60,7 +60,7 @@ func giverDiesAfterTheHandOver(t *testing.T, removeOnHandOver bool) (ack *packet
 	}
 	pub, _ := nodes["n2"].connect("tcp", packet.V5, &packet.Connect{ClientID: "pub", CleanStart: true}, false)
 	// A freshly formed cluster can refuse the first QoS 1 publish forwarded to
-	// a peer (WI 1572): wait until n2 has forwarded one to a subscriber on n1.
+	// a peer: wait until n2 has forwarded one to a subscriber on n1.
 	w, _ := nodes["n1"].connect("tcp", packet.V5, &packet.Connect{ClientID: "warm", CleanStart: true}, false)
 	w.send(&packet.Subscribe{PacketID: 1, Subscriptions: []packet.Subscription{{Filter: "warm", QoS: 1}}})
 	if _, ok := w.read().(*packet.Suback); !ok {

@@ -29,6 +29,7 @@ type fakeBackend struct {
 	audits       []AuditEvent
 	lossy        []bool
 	disconnected []string
+	wills        []bool
 	drains       int
 	toggled      []string
 	errFor       map[string]error
@@ -125,17 +126,21 @@ func (f *fakeBackend) Client(id string) (ClientDetail, error) {
 func (f *fakeBackend) Subscriptions(id string) ([]Subscription, error) {
 	return []Subscription{{Filter: "a/#", QoS: 1}}, f.fail(id)
 }
-func (f *fakeBackend) Disconnect(id string) error {
+func (f *fakeBackend) Disconnect(id string, will bool) error {
 	if err := f.fail(id); err != nil {
 		return err
 	}
 	f.mu.Lock()
 	f.disconnected = append(f.disconnected, id)
+	f.wills = append(f.wills, will)
 	f.mu.Unlock()
 	return nil
 }
-func (f *fakeBackend) Invalidate(_ context.Context, id string) (Invalidated, error) {
-	return Invalidated{ClientID: id, Durable: true}, f.fail(id)
+func (f *fakeBackend) Invalidate(_ context.Context, id string, will bool) (Invalidated, error) {
+	f.mu.Lock()
+	f.wills = append(f.wills, will)
+	f.mu.Unlock()
+	return Invalidated{ClientID: id, Durable: true, WillPublished: will}, f.fail(id)
 }
 func (f *fakeBackend) Matchers(string) []Matcher { return nil }
 func (f *fakeBackend) Retained(string, string, int) ([]RetainedMessage, bool) {
@@ -150,6 +155,12 @@ func (f *fakeBackend) Lease(id string) (Lease, error) {
 	return Lease{ClientID: id, Owner: "n1"}, f.fail(id)
 }
 func (f *fakeBackend) DrainStatus() DrainStatus { return DrainStatus{} }
+func (f *fakeBackend) RemoveMember(_ context.Context, node string) (MemberRemoval, error) {
+	if err := f.fail(node); err != nil {
+		return MemberRemoval{}, err
+	}
+	return MemberRemoval{Node: node, Members: []Member{{Name: "n1", Role: "voter"}}}, nil
+}
 func (f *fakeBackend) Drain() DrainStatus {
 	f.mu.Lock()
 	f.drains++

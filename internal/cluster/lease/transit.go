@@ -13,7 +13,7 @@ import (
 // node's routes once every member that owns leases has its served fact in the
 // log and this node holds that member's routes up to the fact's mark
 // (routing/served.go), so without these entries the session's filters could
-// match nothing anywhere while the taker's import is still running (WI 1833).
+// match nothing anywhere while the taker's import is still running.
 //
 // The taker counts its takeover until it holds the session, and then puts a
 // newer fact in the log, whose route mark covers the session's routes. The

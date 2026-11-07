@@ -45,7 +45,7 @@ func TestHoldWatchVerdicts(t *testing.T) {
 			want:   30 * time.Second,
 		},
 		{
-			// C2 (WI 1515): a drop inside the hold restarts it, and the
+			// C2: a drop inside the hold restarts it, and the
 			// instant moves to the interval that actually held.
 			name: "drops inside the hold",
 			series: []reading{{0, 100}, {5 * time.Second, 40}, {30 * time.Second, 100},
@@ -53,7 +53,7 @@ func TestHoldWatchVerdicts(t *testing.T) {
 			want: 100 * time.Second,
 		},
 		{
-			// C3 (WI 1698): nothing ever dropped, so nothing recovered.
+			// C3: nothing ever dropped, so nothing recovered.
 			name:   "never fell",
 			series: []reading{{0, 100}, {30 * time.Second, 100}, {120 * time.Second, 100}},
 			want:   -1,

@@ -6,8 +6,7 @@ import (
 	"strings"
 )
 
-// The failover measurement's pass bounds, ratified by the owner on 2026-09-22
-// from WI 1618's batch (project.md Decisions) and applied by WI 1734.
+// The failover measurement's pass bounds, set from a measured batch of runs.
 //
 // A run is judged by judgeRun and a set of runs by judgeBatch. Both read a
 // boundsInput, which is decoded from run.json with the keys the artifact
@@ -75,22 +74,23 @@ type boundsInput struct {
 }
 
 // boundsEffective is the part of the effective timings the bounds read.
-// TakeoverTimeoutMs is nil in a record written before WI 1805.
+// TakeoverTimeoutMs is nil in a record written before the effective timings
+// carried the takeover timeout.
 type boundsEffective struct {
 	TimingSet         string `json:"timing_set"`
 	TakeoverTimeoutMs *int   `json:"takeover_timeout_ms"`
 }
 
-// preProductTimeouts says a run is labelled product but was recorded before
-// WI 1805, when every run's takeover and ack timeouts were the harness's
-// 1 s whatever the label. It is a note; it decides nothing.
+// preProductTimeouts says a run is labelled product but was recorded by an
+// earlier build, when every run's takeover and ack timeouts were the
+// harness's 1 s whatever the label. It is a note; it decides nothing.
 func (in boundsInput) preProductTimeouts() bool {
 	e := in.Provenance.Effective
 	return e != nil && e.TimingSet == boundsTimingSet && e.TakeoverTimeoutMs == nil
 }
 
 // preProductTimeoutsNote is the note such a run carries.
-const preProductTimeoutsNote = "recorded before WI 1805: its takeover and ack timeouts were the harness's 1 s, not the product's 5 s and 2 s"
+const preProductTimeoutsNote = "recorded before 2026-09-24: its takeover and ack timeouts were the harness's 1 s, not the product's 5 s and 2 s"
 
 // boundRow is one figure against its bound.
 type boundRow struct {
@@ -245,10 +245,9 @@ func undeliveredRow(p *probeRecord) boundRow {
 	return r
 }
 
-// refusalsRow gates on the probe's refusals after the instant: the owner
-// decided the row at 0 on 2026-09-22, gating once WI 1706 closed. As for the
-// acknowledged row, a probe that did not run or published nothing has no
-// figure, and a gating row with no figure does not pass.
+// refusalsRow gates on the probe's refusals after the instant, with a bound
+// of 0. As for the acknowledged row, a probe that did not run or published
+// nothing has no figure, and a gating row with no figure does not pass.
 func refusalsRow(p *probeRecord) boundRow {
 	r := boundRow{Name: rowRefusals, Bound: "0"}
 	switch {
@@ -450,7 +449,7 @@ func boundsTable(v boundsVerdict) string {
 
 // boundsSection is the report's section on the bounds.
 func boundsSection(v boundsVerdict) string {
-	return "\n## Pass bounds\n\nRatified by the owner on 2026-09-22 and applied by WI 1734. A bound judges a run only " +
+	return "\n## Pass bounds\n\nA bound judges a run only " +
 		"where the table says so, and a recorded row never gates.\n\n" +
 		boundsTable(v)
 }

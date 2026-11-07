@@ -223,7 +223,7 @@ func TestDropAndRefusalSourceSections(t *testing.T) {
 	}
 }
 
-// TestDegradedSecondsOverlapTheWindow (WI 1571): only the part of an
+// TestDegradedSecondsOverlapTheWindow: only the part of an
 // episode between the crash mark and the read counts, an open one runs to
 // the read, and a full list starting after the mark is named as cut.
 func TestDegradedSecondsOverlapTheWindow(t *testing.T) {

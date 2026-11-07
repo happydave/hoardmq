@@ -35,8 +35,14 @@ type servedResult struct {
 // serve to return.
 func startServe(t *testing.T, extra string) *servedNode {
 	t.Helper()
+	return startServeIn(t, filepath.Join(t.TempDir(), "data"), extra)
+}
+
+// startServeIn is startServe over the data directory data.
+func startServeIn(t *testing.T, data, extra string) *servedNode {
+	t.Helper()
 	dir := t.TempDir()
-	body := `{"version":1,"node":{"dataDir":"` + filepath.Join(dir, "data") + `"},` +
+	body := `{"version":1,"node":{"dataDir":"` + data + `"},` +
 		`"listeners":[{"name":"t","type":"tcp","address":"127.0.0.1:0"}],` +
 		`"observability":{"address":"127.0.0.1:0"},"modules":{"metrics.prometheus":{}},"log":{"format":"json"}`
 	if extra != "" {

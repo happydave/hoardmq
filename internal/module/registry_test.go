@@ -252,12 +252,12 @@ func TestHookTimeoutFallbackAndPanic(t *testing.T) {
 
 	// No timeout: the slow hook's Drop is honoured.
 	r, _ := New(cfgWith("hook.slow", "store.x", "metrics.x"), ctx(), hook.Policy{})
-	if out := r.Hooks().Inbound(context.Background(), info, pub); out.Action != hook.Drop {
+	if out, _ := r.Hooks().Inbound(context.Background(), info, pub); out.Action != hook.Drop {
 		t.Fatalf("inline: %v", out)
 	}
 	// A 10 ms timeout with the default fallback: continue, and a failure counted.
 	r, _ = New(cfgWith("hook.slow", "store.x", "metrics.x"), ctx(), hook.Policy{Timeout: 10 * time.Millisecond})
-	if out := r.Hooks().Inbound(context.Background(), info, pub); out.Action != hook.Continue {
+	if out, _ := r.Hooks().Inbound(context.Background(), info, pub); out.Action != hook.Continue {
 		t.Fatalf("timeout fallback continue: %v", out)
 	}
 	if r.Hooks().Failures()["hook.slow"] != 1 {
@@ -265,13 +265,13 @@ func TestHookTimeoutFallbackAndPanic(t *testing.T) {
 	}
 	// Fallback disconnect.
 	r, _ = New(cfgWith("hook.slow", "store.x", "metrics.x"), ctx(), hook.Policy{Timeout: 10 * time.Millisecond, Fallback: hook.Disconnect})
-	if out := r.Hooks().Inbound(context.Background(), info, pub); out.Action != hook.Disconnect || out.Reason != packet.ImplementationSpecificError {
+	if out, _ := r.Hooks().Inbound(context.Background(), info, pub); out.Action != hook.Disconnect || out.Reason != packet.ImplementationSpecificError {
 		t.Fatalf("timeout fallback disconnect: %v", out)
 	}
 	// A panic is recovered and treated as the fallback, inline and with a timeout.
 	for _, pol := range []hook.Policy{{}, {Timeout: time.Second}} {
 		r, _ = New(cfgWith("hook.panic", "store.x", "metrics.x"), ctx(), pol)
-		if out := r.Hooks().Inbound(context.Background(), info, pub); out.Action != hook.Continue {
+		if out, _ := r.Hooks().Inbound(context.Background(), info, pub); out.Action != hook.Continue {
 			t.Fatalf("panic fallback: %v", out)
 		}
 		if r.Hooks().Failures()["hook.panic"] != 1 {

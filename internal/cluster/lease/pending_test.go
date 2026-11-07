@@ -68,7 +68,7 @@ func TestWaitNoteKind(t *testing.T) {
 }
 
 // chainCluster is three nodes whose replica fallback is fb, with x owned by
-// n9 (undeclaredOwner) and n2 having refused the client for it (WI 1759). n3's
+// n9 (undeclaredOwner) and n2 having refused the client for it. n3's
 // table shows n2 as x's owner: the client's retry on n3 takes the lease from
 // the node that refused it. opts adjusts each node's options.
 func chainCluster(t *testing.T, fb func(context.Context, string, string, string) (*store.SessionState, bool), opts func(o *Options)) (c *tcluster, n2, n3 *tnode, stop func()) {
@@ -109,11 +109,11 @@ func adoptionPrev(n *tnode, id string) string {
 	return ""
 }
 
-// TestRetryOnAThirdNodeWaitsForTheOwnerTheRefusingNodeNamed is WI 1762's
-// acceptance test. The client, refused on n2 for an owner not yet declared
-// dead, retries on n3, which takes the lease from n2. n2 holds nothing and
-// names the owner it is waiting on; with no copy anywhere, n3 refuses the client
-// until that owner is declared dead, and then serves it fresh.
+// TestRetryOnAThirdNodeWaitsForTheOwnerTheRefusingNodeNamed: the client,
+// refused on n2 for an owner not yet declared dead, retries on n3, which takes
+// the lease from n2. n2 holds nothing and names the owner it is waiting on;
+// with no copy anywhere, n3 refuses the client until that owner is declared
+// dead, and then serves it fresh.
 func TestRetryOnAThirdNodeWaitsForTheOwnerTheRefusingNodeNamed(t *testing.T) {
 	_, n2, n3, stop := chainCluster(t, foundNowhere, heldBack)
 	res, err := acquire(t, n3, "x", nil, 300, false)
@@ -188,7 +188,7 @@ func TestNamedOwnerSurvivesAWorkerThatEndsTheAdoptionFirst(t *testing.T) {
 }
 
 // TestAdoptionFetchTakesTheWaitOverFromANamedOwner: n3's first pull of n2 goes
-// unanswered, so n3 refuses and keeps an adoption naming n2 (WI 1574). Its
+// unanswered, so n3 refuses and keeps an adoption naming n2. Its
 // retry pulls n2, which names n9: the adoption waits on n9 from then on, and is
 // served fresh only after n9's declaration.
 func TestAdoptionFetchTakesTheWaitOverFromANamedOwner(t *testing.T) {
@@ -220,8 +220,8 @@ func TestNamedOwnerDeclaredDeadHoldsNothingBack(t *testing.T) {
 }
 
 // silentChain is chainCluster with n3's first takeover left unanswered: n2's
-// answers to n3 are dropped, so n3 refuses and keeps an adoption naming n2
-// (WI 1574). The fault is cleared and n3's table shows its own grant.
+// answers to n3 are dropped, so n3 refuses and keeps an adoption naming n2.
+// The fault is cleared and n3's table shows its own grant.
 func silentChain(t *testing.T, fb func(context.Context, string, string, string) (*store.SessionState, bool)) (n2, n3 *tnode, stop func()) {
 	t.Helper()
 	_, n2, n3, stop = chainCluster(t, fb, heldBack)
@@ -292,7 +292,7 @@ func TestThirdNodeWithACopyIsServedAtOnce(t *testing.T) {
 
 // TestNewRequesterGivenAnAnswerWithoutAPendingOwnerJudgesAsBefore: n2 answers
 // as a build before this rule does. n3 finds no owner named and serves the
-// client fresh, as WI 1759's build does: a mixed pair behaves as its older
+// client fresh, as the older build does: a mixed pair behaves as its older
 // member.
 func TestNewRequesterGivenAnAnswerWithoutAPendingOwnerJudgesAsBefore(t *testing.T) {
 	_, n2, n3, _ := chainCluster(t, foundNowhere, func(o *Options) {
@@ -306,8 +306,8 @@ func TestNewRequesterGivenAnAnswerWithoutAPendingOwnerJudgesAsBefore(t *testing.
 	}
 }
 
-// takeoverAckBefore1762 is the takeover answer as builds before WI 1762
-// declare and decode it.
+// takeoverAckBefore1762 is the takeover answer as builds from before it
+// named a pending owner declare and decode it.
 type takeoverAckBefore1762 struct {
 	Req        uint64              `json:"req"`
 	State      *store.SessionState `json:"state,omitempty"`
@@ -346,7 +346,7 @@ func TestTakeoverAnswerDecodesInAnOlderBuild(t *testing.T) {
 // TestPendingOwnerRidesTheControlLane: an answer that took the control lane
 // (marker byte, then the same JSON) reaches the waiting pull with its owner.
 func TestPendingOwnerRidesTheControlLane(t *testing.T) {
-	s := &Service{pulls: map[uint64]chan takeoverAck{}}
+	s := bareService(t)
 	ch := make(chan takeoverAck, 1)
 	s.pulls[7] = ch
 	body, _ := json.Marshal(takeoverAck{Req: 7, Pending: "n9"})

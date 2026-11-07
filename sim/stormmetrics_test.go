@@ -32,7 +32,7 @@ func TestPickStormMetrics(t *testing.T) {
 }
 
 // A run records what the password cache did and what the connect-rate limits
-// refused, beside the rest of the storm (WI 1283).
+// refused, beside the rest of the storm.
 func TestStormMetricsCarryTheConnectPathBudget(t *testing.T) {
 	got := pickStormMetrics([]module.Metric{
 		{Name: "hoardmq_auth_password_derivations_total", Value: 40},
@@ -51,7 +51,7 @@ func TestStormMetricsCarryTheConnectPathBudget(t *testing.T) {
 	}
 }
 
-// A run records the overload tier's series (WI 1314).
+// A run records the overload tier's series.
 func TestStormMetricsCarryTheOverloadTier(t *testing.T) {
 	got := pickStormMetrics([]module.Metric{
 		{Name: "hoardmq_overload_level", Labels: map[string]string{"scope": "cluster"}, Value: 0},

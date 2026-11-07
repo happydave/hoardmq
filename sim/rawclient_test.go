@@ -14,8 +14,8 @@ import (
 // It exists so that a scenario reads reason codes by default. A scenario that
 // asserts only the *type* of a reply passes whenever a reply arrives, which is
 // how an exactly-once check stood for months while ignoring the error code
-// that said the exchange had not been confirmed (WI 1486), and it is the same
-// mistake sim.Client made about SUBACK until WI 1500.
+// that said the exchange had not been confirmed, and it is the same mistake
+// sim.Client once made about SUBACK.
 type rawClient struct {
 	t    *testing.T
 	conn net.Conn
@@ -69,7 +69,7 @@ func (c *rawClient) read() packet.Packet {
 // An acknowledgement of 0x83 means the broker could not confirm delivery in
 // time, which says nothing about the reason code a scenario is asking about;
 // under the whole-module gate's contention it happens, so such a publish is
-// retried as a new message within a time budget (WI 1487). `onExhausted`
+// retried as a new message within a time budget. `onExhausted`
 // supplies whatever diagnosis the scenario can give when the budget runs out,
 // because "it was refused for twenty seconds" is not a result and must not be
 // reported as one.

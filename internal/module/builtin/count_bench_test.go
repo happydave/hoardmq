@@ -9,7 +9,7 @@ import (
 
 // BenchmarkCountPerEvent is what one per-event counter costs metrics.internal
 // as the session manager calls it today (a label map built per call) and with
-// a label map built once: the input to WI 1323's decision on pre-built maps.
+// a label map built once: the input to a decision on pre-built maps.
 var countSink hook.Metrics
 
 func BenchmarkCountPerEvent(b *testing.B) {

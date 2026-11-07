@@ -10,7 +10,7 @@ import (
 // once its state is marshalled — the sync, the checkpoint file's write and
 // fsync, and the truncation — for n sessions, each with its metadata, a
 // subscription and a queued message. An append waits this long, and a
-// follower's apply waits it holding the follower's lock (WI 1818).
+// follower's apply waits it holding the follower's lock.
 func BenchmarkCheckpointHold(b *testing.B) {
 	for _, n := range []int{10000, 100000} {
 		b.Run("sessions="+strconv.Itoa(n), func(b *testing.B) {
@@ -43,7 +43,7 @@ func BenchmarkCheckpointHold(b *testing.B) {
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
 				b.StopTimer()
-				if err := s.Retain(msg("ns", "r", strconv.Itoa(i))); err != nil {
+				if err := s.Retain(msg("ns", "r", strconv.Itoa(i)), Version{}); err != nil {
 					b.Fatal(err)
 				}
 				b.StartTimer()

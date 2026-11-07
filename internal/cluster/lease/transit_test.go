@@ -1,8 +1,6 @@
 package lease
 
 import (
-	"io"
-	"log/slog"
 	"testing"
 	"time"
 
@@ -145,7 +143,8 @@ func transitTable(t *testing.T) (*Service, *Table, func(idx uint64, ops ...Op)) 
 	}
 	at(1, Op{Kind: OpAlive, Node: "a", Advertise: "a:1883"}, Op{Kind: OpAlive, Node: "b", Advertise: "b:1883"})
 	at(2, Op{Kind: OpAcquire, Namespace: "d", ClientID: "x", Node: "a", ExpiryInterval: 60})
-	s := &Service{table: tb, tokens: NewTokens(), transit: newTransitSet(), adopting: newAdoptionSet(), log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	s := bareService(t)
+	s.table = tb
 	s.o.Node, s.o.SealTimeout, s.o.Sessions = "a", time.Hour, newFakeSessions()
 	return s, tb, at
 }

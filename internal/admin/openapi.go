@@ -35,8 +35,11 @@ func OpenAPI(table []Route) ([]byte, error) {
 		}
 		for _, q := range rt.Query {
 			t := "string"
-			if q.Integer {
+			switch {
+			case q.Integer:
 				t = "integer"
+			case q.Boolean:
+				t = "boolean"
 			}
 			params = append(params, map[string]any{"name": q.Name, "in": "query", "required": q.Required, "schema": map[string]any{"type": t}, "description": q.Description})
 		}

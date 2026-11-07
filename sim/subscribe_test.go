@@ -15,8 +15,8 @@ import (
 // TestSubackError covers the decision alone: which SUBACK reason codes grant a
 // subscription and which refuse it. The granted cases come first on purpose —
 // a check that refused everything would pass the refusal cases while breaking
-// every scenario in the corpus, and that is the shape of mistake this whole
-// work item is about (WI 1500).
+// every scenario in the corpus, and that is the shape of mistake this test
+// exists to catch.
 func TestSubackError(t *testing.T) {
 	granted := []struct {
 		name  string
@@ -91,8 +91,8 @@ type fakeBroker struct {
 	dropAfterSuback bool
 
 	// presentFrom is the first connection number whose CONNACK reports
-	// Session Present true; 0 means never, which is what every test before
-	// WI 1618 assumed.
+	// Session Present true; 0 means never, which is what every earlier test
+	// assumed.
 	presentFrom int
 
 	mu         sync.Mutex
@@ -376,7 +376,7 @@ func TestSubscribeSettlesOnItsOwnSuback(t *testing.T) {
 // TestRefusedResubscribeIsCounted is the half of this defect that matters most.
 // After a reconnect reports no session present, the client re-issues its
 // subscriptions on the connect goroutine, before the reader starts — so it
-// cannot wait for the answers, and before WI 1500 it did not look at them at
+// cannot wait for the answers, and earlier builds did not look at them at
 // all. A client whose resubscribe is refused stays online and silently
 // receives nothing, which is the state a mass reconnect after a crash would
 // leave clients in.

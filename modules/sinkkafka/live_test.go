@@ -29,7 +29,7 @@ import (
 // The live test runs the default binary against a real Kafka. It runs only
 // when SINKKAFKA_LIVE_BROKERS names the Kafka (host:port) and
 // SINKKAFKA_LIVE_CONTAINER the podman container it runs in, which the test
-// pauses, stops and starts; the procedure is in the README's Kafka forwarder
+// pauses, stops and starts; the procedure is in docs/modules.md's Kafka forwarder
 // section. The names avoid the HOARDMQ_ prefix, which the broker it starts
 // would read as configuration overrides and refuse.
 func liveKafka(t *testing.T) (brokers, container string) {

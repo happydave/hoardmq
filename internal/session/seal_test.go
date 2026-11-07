@@ -51,8 +51,8 @@ func journalFor(j *fakeJournal, id string) []string {
 }
 
 // TestSealJournalsNothing: the hand-over's delete, journaled at the pass, is
-// what reached a follower ahead of the grant and removed the only copy
-// (WIs 1575, 1740). A seal writes no record; the old removal writes the delete.
+// what reached a follower ahead of the grant and removed the only copy. A
+// seal writes no record; the old removal writes the delete.
 func TestSealJournalsNothing(t *testing.T) {
 	m, j, _ := sealedFixture(t)
 	before := len(journalFor(j, "c"))
@@ -252,7 +252,7 @@ func TestImportReplacesASealedCopy(t *testing.T) {
 // TestCheckpointKeepsSealedCopies: a checkpoint replaces the journal, and a
 // seal journals nothing, so a checkpoint that left the sealed copy out would
 // delete it from disk before the new owner confirmed it; a drained node that
-// stopped then restarted could not recover it (WI 1763). The resync snapshot
+// stopped then restarted could not recover it. The resync snapshot
 // still leaves it out: the new owner feeds the replicas.
 func TestCheckpointKeepsSealedCopies(t *testing.T) {
 	noIndex := func() uint64 { return 0 }

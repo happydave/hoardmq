@@ -66,7 +66,7 @@ func TestApplyReport(t *testing.T) {
 		{"dropped, no entry", held, RecordDropped, rec(droppedRecord{ns, id, 99}), UnappliedNoEntry},
 		{"dropped, no session", empty, RecordDropped, rec(droppedRecord{ns, id, 1}), UnappliedNoSession},
 		{"retain", empty, RecordRetain, rec(mqtt.Message{Namespace: ns, Topic: "r", Payload: []byte("x")}), ""},
-		{"retain delete of an absent topic", empty, RecordRetainDelete, rec(retainKey{ns, "r"}), ""},
+		{"retain delete of an absent topic", empty, RecordRetainDelete, rec(retainKey{Namespace: ns, Topic: "r"}), ""},
 	} {
 		reported, plain := c.state(), c.state()
 		got, err := reported.ApplyReport(c.typ, c.payload)

@@ -98,9 +98,9 @@ func TestDriverBuildProblem(t *testing.T) {
 	}
 }
 
-// TestRemoteNodesDifferOnlyInAddress: invariant 2 of WI 1480. A node built
-// for the remote-client mode has exactly the in-process node's configuration
-// except for its listener and advertised addresses.
+// TestRemoteNodesDifferOnlyInAddress: a node built for the remote-client mode
+// has exactly the in-process node's configuration except for its listener and
+// advertised addresses.
 func TestRemoteNodesDifferOnlyInAddress(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "secret"), []byte("simulation-cluster-shared-secret-bytes"), 0o600); err != nil {
@@ -144,6 +144,7 @@ func TestRemoteNodesDifferOnlyInAddress(t *testing.T) {
 // TestClusterListensOnGivenAddresses: nodes given addresses listen there and
 // advertise them.
 func TestClusterListensOnGivenAddresses(t *testing.T) {
+	needAddresses(t, "127.0.0.21", "127.0.0.22", "127.0.0.23")
 	var addrs []string
 	for i := 0; i < 3; i++ {
 		_, port, _ := net.SplitHostPort(freePort(t))

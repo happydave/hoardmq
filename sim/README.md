@@ -13,36 +13,37 @@ cluster's acceptance gate: a build that fails a seed is not stable.
 | `HOARDMQ_SIM_SEED=n go test ./sim -run TestCorpus` | one seed; the schedule is printed. Add `-count=8` or more when a seed is suspected of being intermittent: a seed's rate is the evidence, one run is not (seed 2 was red about half the time while a single full run recorded green). After any change to the takeover or replication paths, run the seeds with `-count`, not once — and when a seed is intermittent, record its rate (failures per runs) in the work item's `test.md`, not just the last run's colour |
 | `HOARDMQ_SIM_RANDOM=k go test ./sim -run TestCorpus` | k random seeds, each printed before it runs (the nightly mode) |
 | `HOARDMQ_SIM_REDUCED=1 go test ./sim` | the first two seeds only |
-| `go test ./sim -run TestRestartNeedsSnapshot` | the fixed scenario that crashes a node long enough to need a snapshot to rejoin (WI 1291's case) |
+| `go test ./sim -run TestRestartNeedsSnapshot` | the fixed scenario that crashes a node long enough to need a snapshot to rejoin |
 | `go test ./sim -run 'TestSkewed|TestLeaderChangeToASkewed'` | the three clock scenarios: followers, the leader, and a leader change to a node whose wall clock is stepped ahead three ttls at a time, five times, at a stride that walks the step across the adoption tick (a single step always fell just after the leader's tick and passed on a defective build). No lease of a node that stayed up may move and none of its clients may lose its connection |
 | `HOARDMQ_SIM_REDUCED=1 go test -race -timeout 40m ./...` | the whole-module race run. Not a gate: only when a work item that tracks a race needs the whole module (`docs/dependency-policy.md`); the reduced corpus keeps `sim` inside ten minutes |
-| `HOARDMQ_SIM_FAILOVER=100000 go test ./sim -run TestFailover -timeout 1h` | the failover measurement **at the product's timings**. Its report goes to the artifact directory when `HOARDMQ_SIM_ARTIFACT` is set, and only there, so the checkout stays clean; without one it is written to `results/failover-<date>.md` (WI 1483). Timings: every timing the nodes read is the broker's own default — heartbeat 1 s × 3 misses, raft tick 100 ms, lease ttl 30 s, takeover timeout 5 s (also the routing plane's move grace), replication ack timeout 2 s, join timeout 30 s, connect timeout 10 s, readiness stable 5 s, drain 100 clients/s with a 30 s timeout and a 30 s confirmation. A recorded run defaults to the product's heartbeat, misses, tick and ttl since 2026-09-14 (WI 1475), and to the rest since 2026-09-24 (WI 1805); before that every run's takeover and ack timeouts were 1 s. The report and provenance name the set as `product` and record each value. A cold start waits out the 30 s join timeout before the designated node bootstraps, so the run's start is about half a minute longer than the harness set's. **The `-timeout` is not optional**: the storm window is ten minutes and Go's default test timeout is ten minutes, so without it the run panics at the moment the window closes and the report is never written. It cost WI 1292 a hundred-thousand-client run |
-| `HOARDMQ_SIM_REPEAT=N HOARDMQ_SIM_FAILOVER=<clients> HOARDMQ_SIM_ARTIFACT=<abs dir> go test ./sim -run TestFailoverRepeat -timeout 3h` | the failover measurement N times, reporting the distribution and writing `repeat-summary.json`. **One run cannot characterise a build**: rounds 13–16 of 2026-09-07 were the same commit and gave 1m39.804s, 5m36.225s and twice not-reached — a spread covering every outcome this project had read as a difference between builds. Each run is its own process with its own artifact, ended once its `complete` marker appears rather than when the process exits (the teardown of 100k clients outlives the measurement), and the driver waits between runs for the machine to settle on the measurement's own starting conditions rather than on a sleep: the socket count always, and for a remote-client batch the broker host's connection-tracking table as well, which holds the previous run's entries for about two minutes (WI 1496). Runs that did not reach are counted separately and never folded into the median. Because a run is ended by signal, `t.TempDir`'s cleanup never runs; the measurement publishes its store root as `store_dir` in `run.json` and the driver removes it between runs, refusing any path that is not under the process's temporary root (WI 1377) |
+| `HOARDMQ_SIM_FAILOVER=100000 go test ./sim -run TestFailover -timeout 1h` | the failover measurement **at the product's timings**. Its report goes to the artifact directory when `HOARDMQ_SIM_ARTIFACT` is set, and only there, so the checkout stays clean; without one it is written to `results/failover-<date>.md`. Timings: every timing the nodes read is the broker's own default — heartbeat 1 s × 3 misses, raft tick 100 ms, lease ttl 30 s, takeover timeout 5 s (also the routing plane's move grace), replication ack timeout 2 s, join timeout 30 s, connect timeout 10 s, readiness stable 5 s, drain 100 clients/s with a 30 s timeout and a 30 s confirmation. A recorded run defaults to the product's heartbeat, misses, tick and ttl since 2026-09-14, and to the rest since 2026-09-24; before that every run's takeover and ack timeouts were 1 s. The report and provenance name the set as `product` and record each value. A cold start waits out the 30 s join timeout before the designated node bootstraps, so the run's start is about half a minute longer than the harness set's. **The `-timeout` is not optional**: the storm window is ten minutes and Go's default test timeout is ten minutes, so without it the run panics at the moment the window closes and the report is never written. It has cost a hundred-thousand-client run |
+| `HOARDMQ_SIM_REPEAT=N HOARDMQ_SIM_FAILOVER=<clients> HOARDMQ_SIM_ARTIFACT=<abs dir> go test ./sim -run TestFailoverRepeat -timeout 3h` | the failover measurement N times, reporting the distribution and writing `repeat-summary.json`. **One run cannot characterise a build**: rounds 13–16 of 2026-09-07 were the same commit and gave 1m39.804s, 5m36.225s and twice not-reached — a spread covering every outcome this project had read as a difference between builds. Each run is its own process with its own artifact, ended once its `complete` marker appears rather than when the process exits (the teardown of 100k clients outlives the measurement), and the driver waits between runs for the machine to settle on the measurement's own starting conditions rather than on a sleep: the socket count always, and for a remote-client batch the broker host's connection-tracking table as well, which holds the previous run's entries for about two minutes. Runs that did not reach are counted separately and never folded into the median. Because a run is ended by signal, `t.TempDir`'s cleanup never runs; the measurement publishes its store root as `store_dir` in `run.json` and the driver removes it between runs, refusing any path that is not under the process's temporary root |
 | `HOARDMQ_SIM_ARTIFACT=<dir> …` | with any run: writes a per-run evidence directory (see Run artifacts below). Off by default; the gate's behaviour and budget are unchanged without it |
-| `HOARDMQ_SIM_LOG=<file> …` | with any run: the nodes' debug logs, all three interleaved, in one file. **Give it an absolute path.** The file is opened by the test binary, whose working directory is this package, so a relative path resolves under `sim/` — and a missing directory fails the run in about 7 ms, which a loop that greps the output for `VIOLATION` reads as a clean pass. That mistake cost a WI 1351 measurement twelve runs that had never started |
+| (nothing set) | every cluster a test builds without a log of its own writes its nodes' debug logs, interleaved, to `hoardmq-nodes-<test>-*.log` in the temporary directory (`GOTMPDIR`, else `TMPDIR` or `/tmp`). A failing test keeps the file and prints `node logs kept: <path>`; a passing one removes it. A recorded measurement (`HOARDMQ_SIM_FAILOVER`, `HOARDMQ_SIM_ROLL`) keeps its nodes' logs off unless `HOARDMQ_SIM_NODELOG` asks |
+| `HOARDMQ_SIM_LOG=<file> …` | with any run: the nodes' debug logs, all three interleaved, in that file rather than the default one (above). **Give it an absolute path.** The file is opened by the test binary, whose working directory is this package, so a relative path resolves under `sim/` — and a missing directory fails the run in about 7 ms, which a loop that greps the output for `VIOLATION` reads as a clean pass. That mistake once cost a measurement twelve runs that had never started |
 | `HOARDMQ_SIM_NODELOG=1 …` | with `HOARDMQ_SIM_ARTIFACT`, the failover measurement keeps its nodes' debug logs in the artifact (`nodes.log`). Off by default: at a hundred thousand clients the log is enormous, and the artifact's bounded per-node metrics snapshots are the default answer to "what were the nodes doing" |
 | `HOARDMQ_SIM_TIMINGS=harness …` | with a recorded failover run: the **stress variant**, the harness's timings: heartbeat 100 ms × 3, raft tick 10 ms, lease ttl 2 s, takeover and ack timeouts 1 s, join timeout 1 s, connect timeout 5 s, readiness stable 0, drain 1,000 clients/s with a 3 s timeout and a confirmation of the ttl (at least 1 s). Labelled `harness (stress)` in the report and provenance. It applies to recorded runs only; the gate in `go test ./sim` and the corpus always use the harness's timings, so their duration is unchanged. Every repeat batch before 2026-09-14's product batch ran this set; see [results/README.md](results/README.md). Shards are not a timing and differ in both sets: 16, where the product's default is 64 |
-| `HOARDMQ_SIM_HEARTBEAT_MS=<ms>`, `HOARDMQ_SIM_HEARTBEAT_MISSES=<n>`, `HOARDMQ_SIM_RAFT_TICK_MS=<ms>`, `HOARDMQ_SIM_TAKEOVER_TIMEOUT_MS=<ms>`, `HOARDMQ_SIM_ACK_TIMEOUT_MS=<ms>` … | override one timing of whichever set is in use; the label then reads, for example, `product, overridden: heartbeat 500 ms`, and `product, overridden: takeover 1000 ms, ack 1000 ms` reproduces the takeover and ack timeouts every run before WI 1805 ran. A 100 ms tick needs a ttl of at least three election timeouts (3 s), so the harness set with the product's tick fails configuration validation, and an ack timeout above the takeover timeout fails it too |
+| `HOARDMQ_SIM_HEARTBEAT_MS=<ms>`, `HOARDMQ_SIM_HEARTBEAT_MISSES=<n>`, `HOARDMQ_SIM_RAFT_TICK_MS=<ms>`, `HOARDMQ_SIM_TAKEOVER_TIMEOUT_MS=<ms>`, `HOARDMQ_SIM_ACK_TIMEOUT_MS=<ms>` … | override one timing of whichever set is in use; the label then reads, for example, `product, overridden: heartbeat 500 ms`, and `product, overridden: takeover 1000 ms, ack 1000 ms` reproduces the takeover and ack timeouts every run before 2026-09-24 ran. A 100 ms tick needs a ttl of at least three election timeouts (3 s), so the harness set with the product's tick fails configuration validation, and an ack timeout above the takeover timeout fails it too |
 | `HOARDMQ_SIM_LEASE_TTL_MS=<ms> …` | the failover measurement's lease ttl, overriding the set's (30 s at product timings, 2 s at harness), for measuring how the liveness margin behaves under a storm |
 | `HOARDMQ_SIM_WAL_GROUP_DELAY_MS=<ms> …` | with any run: the journal's group-commit hold (`node.walGroupMaxDelayMs`) for the nodes, for comparing holds in a measurement; unset = the product default (0) |
-| `HOARDMQ_SIM_CLIENT_COMMAND=<command> HOARDMQ_SIM_NODE_ADDRS=<ip:port,ip:port,ip:port> HOARDMQ_SIM_CLIENT_SOURCES=<ip,…> go test ./sim -run TestFailover …` | the failover measurement with its clients in a **separate driver process** (`sim/cmd/simclients`), usually on another host (WI 1480). See **Clients on another host** below. `HOARDMQ_SIM_CLIENT_BYTES=<n>` adds the driver's measured memory per client to its starting conditions |
+| `HOARDMQ_SIM_CLIENT_COMMAND=<command> HOARDMQ_SIM_NODE_ADDRS=<ip:port,ip:port,ip:port> HOARDMQ_SIM_CLIENT_SOURCES=<ip,…> go test ./sim -run TestFailover …` | the failover measurement with its clients in a **separate driver process** (`sim/cmd/simclients`), usually on another host. See **Clients on another host** below. `HOARDMQ_SIM_CLIENT_BYTES=<n>` adds the driver's measured memory per client to its starting conditions |
 | `HOARDMQ_SIM_HOLD_SEC=<s> …` | with the failover measurement: H, the interval a recovered population must hold for before the instant counts. Default 60 s for a recorded run, 2 s for the 1,000-client gate. See **What "recovered" counts** below |
-| `HOARDMQ_SIM_CRASH_AT_SEC=<s> …` | with the failover measurement: hold the crash until that many seconds after the run's start, and refuse a run that reaches the crash later. The survivors declare the crashed node dead on a lease tick whose schedule is set when their nodes start, so two builds whose fills take different times crash at different points of it and recover at different times for that alone; set it, past the slowest arm's crash point, whenever arms are compared (WI 2032). `crash_after_sec` in `run.json` shows where the crash fell |
-| `go run ./sim/cmd/failoverbounds <run.json or folder> …` | judges failover runs against the pass bounds and prints the set's verdict, each run's, when WI 1625's forget fell against the instant, each run's `drop_timeline`, when each survivor's adoptions finished and its served fact was committed against the forget and the instant, with the served proposals, and where refusals after the instant came from. See **The pass bounds** below |
+| `HOARDMQ_SIM_CRASH_AT_SEC=<s> …` | with the failover measurement: hold the crash until that many seconds after the run's start, and refuse a run that reaches the crash later. The survivors declare the crashed node dead on a lease tick whose schedule is set when their nodes start, so two builds whose fills take different times crash at different points of it and recover at different times for that alone; set it, past the slowest arm's crash point, whenever arms are compared. `crash_after_sec` in `run.json` shows where the crash fell |
+| `go run ./sim/cmd/failoverbounds <run.json or folder> …` | judges failover runs against the pass bounds and prints the set's verdict, each run's, when the forget of the victim's routes fell against the instant, each run's `drop_timeline`, when each survivor's adoptions finished and its served fact was committed against the forget and the instant, with the served proposals, and where refusals after the instant came from. See **The pass bounds** below |
 | `HOARDMQ_SIM_PROBE=<n> …` | with the failover measurement: publisher/subscriber pairs publishing QoS 1 through the crash and the hold (default 100; 0 disables). See **The publish probe** below |
-| `HOARDMQ_SIM_ROLL=<clients> HOARDMQ_SIM_ARTIFACT=<abs dir> go test ./sim -run '^TestRollingRestart$' -timeout 3h` | the rolling-restart measurement at the product's timings: every node drained, stopped and restarted in turn with the probe running (WI 2208). See **Rolling restart** below. `sim/results/roll/driver.sh` runs a batch. `HOARDMQ_SIM_ROLL_DRAIN_LIMIT_SEC` bounds the wait for one drain (default 1,800 s); `HOARDMQ_SIM_NODELOG=1` writes the nodes' debug log to the run's directory as `nodes.log` (about 47 MB at 10,000 clients); `HOARDMQ_SIM_ROLL_CUT_SEC=<s>` cuts a drain still running that many seconds after it began, as the kubelet does at a pod's termination grace: the node is shut down within 2 s (SIGTERM, then SIGKILL), and restarted (WI 2251); `HOARDMQ_SIM_ROLL_RETAINED=<topics>` adds the retained probe (WI 2207), off unless set |
-| `HOARDMQ_SIM_DRAIN_RATE=<n> …` | with any cluster: every node's `cluster.drain.ratePerSecond`, the least clients a drain redirects a second (the product's default is 100; a drain goes faster where that is what finishes its redirect by its deadline, WI 2251); recorded as `drain_rate` in `roll.json` (WI 2251) |
+| `HOARDMQ_SIM_ROLL=<clients> HOARDMQ_SIM_ARTIFACT=<abs dir> go test ./sim -run '^TestRollingRestart$' -timeout 3h` | the rolling-restart measurement at the product's timings: every node drained, stopped and restarted in turn with the probe running. See **Rolling restart** below. `sim/results/roll/driver.sh` runs a batch. `HOARDMQ_SIM_ROLL_DRAIN_LIMIT_SEC` bounds the wait for one drain (default 1,800 s); `HOARDMQ_SIM_NODELOG=1` writes the nodes' debug log to the run's directory as `nodes.log` (about 47 MB at 10,000 clients); `HOARDMQ_SIM_ROLL_CUT_SEC=<s>` cuts a drain still running that many seconds after it began, as the kubelet does at a pod's termination grace: the node is shut down within 2 s (SIGTERM, then SIGKILL), and restarted; `HOARDMQ_SIM_ROLL_RETAINED=<topics>` adds the retained probe, off unless set |
+| `HOARDMQ_SIM_DRAIN_RATE=<n> …` | with any cluster: every node's `cluster.drain.ratePerSecond`, the least clients a drain redirects a second (the product's default is 100; a drain goes faster where that is what finishes its redirect by its deadline); recorded as `drain_rate` in `roll.json` |
 | `HOARDMQ_SIM_PROBE_GROUPS=<n> …` | with the probe: shared subscription groups beside the pairs, alternately QoS 1 and 2, each with members on every node (default 6; 0 disables). See **The probe's shared groups** below |
-| `HOARDMQ_SIM_VICTIM=before-leader\|before-follower …` | with the failover measurement: crash a follower chosen so its clients reconnect first to the leader, or to the other follower, with no election (WI 1493). Unset or `most-clients` crashes the node with the most clients, which at even counts is `n1`, normally the leader. Every run records `leader_before_crash`, `leader_after`, `storm_target` and a once-a-second `online_series` in `run.json`, and the report's Leader placement section names them |
+| `HOARDMQ_SIM_VICTIM=before-leader\|before-follower …` | with the failover measurement: crash a follower chosen so its clients reconnect first to the leader, or to the other follower, with no election. Unset or `most-clients` crashes the node with the most clients, which at even counts is `n1`, normally the leader. Every run records `leader_before_crash`, `leader_after`, `storm_target` and a once-a-second `online_series` in `run.json`, and the report's Leader placement section names them |
 | `HOARDMQ_SIM_PROFILE_AT_SEC=<s,s,…> …` | with the failover measurement and an artifact directory: goroutine, mutex and block profiles tagged `at<s>` that many seconds after the crash. The mutex and block profiles are cumulative from process start, so compare two with `go tool pprof -diff_base`; the block profile is where goroutines waited on channels, conditions and selects, which a mutex profile does not show |
 | `HOARDMQ_SIM_AUTH=jwt\|ldap\|file …` | with any cluster: how the clients authenticate. Unset is anonymous. `jwt`: every client connects with an access token the nodes verify against an in-process JWKS. `ldap`: every client connects with a password the nodes bind with to an in-process directory. `file`: the population's clients (`f000000` upwards, as many as the run has) connect with passwords the nodes verify against a users file of PBKDF2 hashes at the product's 600,000 iterations, made once on every CPU before the fill (about 20 s for 10,000 clients on a 32-thread host), while probes and every other client connect anonymously beside them. `run.json`'s provenance records the mode (`auth`) |
-| `HOARDMQ_SIM_CONNECT_RATE=<rate>[,<burst>] …` | with any cluster: every node's client listener's `connectRate` and `connectBurst` (the product's default is no limit); recorded as `connect_rate` and `connect_burst` in the provenance (WI 1283) |
+| `HOARDMQ_SIM_CONNECT_RATE=<rate>[,<burst>] …` | with any cluster: every node's client listener's `connectRate` and `connectBurst` (the product's default is no limit); recorded as `connect_rate` and `connect_burst` in the provenance |
 | `HOARDMQ_SIM_AUTH_CACHE_TTL=<s> …` | with any cluster: `auth.cache.ttlSeconds` on every node; 0 turns the password-verification cache off. Recorded as `auth_cache_ttl_sec`. `storm.<node>.password_cache` in `run.json` says what the cache did (derivations, hits, entries) and `storm.<node>.connect_rate_refused` what a connect-rate limit refused |
 | `HOARDMQ_SIM_DUMP=<prefix> …` | with any run: `SIGUSR1` writes the full goroutine profile to `<prefix>-<time>.txt` and the run continues; the completion line on stderr says how long the stop-the-world took, which at a hundred thousand connections is over a minute and perturbs the measurement — take the dump from a run whose numbers you are not keeping. `pprof` caps the profile at 64 MiB. That cost belongs to this *text* dump (`debug=2`), which is per-goroutine and unaggregated and remains the only source of per-goroutine wait durations; for "which stacks is everyone piled on", the artifact's `debug=0` profiles answer it with a bounded pause — largely superseding hand-run dumps |
 
 Every sim binary runs with contention profiling on
-(`SetMutexProfileFraction(100)`, `SetBlockProfileRate(10000)`) — rates the
-WI 1329 research found negligible even under extreme contention. The
+(`SetMutexProfileFraction(100)`, `SetBlockProfileRate(10000)`) — rates found
+negligible even under extreme contention. The
 product does not import this package, so nothing leaks into it.
 
 Each run's artifact directory ends with a `complete` marker, written after
@@ -65,8 +66,8 @@ with the reason, never filled in. The repeat driver records its own invocation t
 `repeat-summary.json`.
 
 So a script that only launches a measurement is scaffolding, and a result is published with its
-`run.json` or its report, not with the script. This refines WI 1374's note that the throwaway batch
-scripts were a sketch rather than reversing it: before this record existed, one of those scripts was
+`run.json` or its report, not with the script. This refines, rather than reverses, the view that the
+throwaway batch scripts were a sketch: before this record existed, one of those scripts was
 the only statement of how rounds 14–16 ran. Rounds published before 2026-09-14, their surviving
 drivers and what cannot be traced are in [results/README.md](results/README.md).
 
@@ -100,7 +101,7 @@ first survivor fences, `trace-storm.out` at the stall, and
 the first thing to read after a bad run: it ranks locks by waiters × wait
 and names the convoy directly.
 
-Three more pieces of evidence come from the crash onward (WI 1474).
+Three more pieces of evidence come from the crash onward.
 
 - **`cpu-storm.pb.gz`** is a CPU profile of the storm's first minute, or of
   the window if that is shorter. Every node's goroutines carry the pprof
@@ -118,7 +119,7 @@ Three more pieces of evidence come from the crash onward (WI 1474).
   cap only fires when something is wrong — and once it did: a drawn cluster port collided with the remote mode's
   fixed client listener port, the filter matched every client connection, and one 250,000-client run wrote 6,421,763
   rows into a 937 MB artifact while spending 286 ms a second reading them. The collision itself is prevented now
-  (listener ports are kept out of the draw); the cap is what makes the next one cheap (WI 1511).
+  (listener ports are kept out of the draw); the cap is what makes the next one cheap.
 - **`peer_samples`** in `run.json` is one sample a second. Each sample
   holds every survivor's view of its peers: link state, read idle, and the
   frames queued for each connection's writer. It also holds `ss`'s receive
@@ -132,8 +133,8 @@ Three more pieces of evidence come from the crash onward (WI 1474).
   lease tick loop's own gap and core-status read time. The counters are
   `fences_leader_settled` and `fences_no_quorum`. Also carried are
   `loop_gap_max_ms` and `status_read_max_ms`.
-- **Each survivor's `storm.overload`** is what its stress controller saw
-  (WI 1314): the node and cluster level at the end, the highest of each
+- **Each survivor's `storm.overload`** is what its stress controller saw:
+  the node and cluster level at the end, the highest of each
   and when (`max_node_level`, `max_cluster_level`), the indicators' peaks
   (`peak_indicators`: queued messages, replication backlog, live heap) and
   the samples taken. Beside it, `overload_refused`, `bans_met`,
@@ -143,14 +144,14 @@ Three more pieces of evidence come from the crash onward (WI 1474).
 
 `storm.read_ms` times each part of the survivors' stats read. The lease
 liveness, consensus status and peer reads take locks a storm can hold,
-and a WI 1470 progress line's figures arrived about 25 s after its
-timestamp.
+and in one recorded batch a progress line's figures arrived about 25 s
+after its timestamp.
 
 ### Was it this process, or the peer?
 
 Two cluster connections falling silent at the same instant cannot be the
 peer's doing, and per-connection figures cannot tell a peer's silence from
-this process being stopped. WI 1340 round 8 ended on that ambiguity for a
+this process being stopped. One measurement round ended on that ambiguity for a
 5.8 s silence, and the answer turned out to be *in* its artifact and unread.
 The failover measurement now answers it directly:
 
@@ -159,7 +160,7 @@ The failover measurement now answers it directly:
   stop-the-world, scheduler starvation under a lock convoy, CPU steal on a
   shared host, swap. It reports how long and never why: at six seconds all
   four are consistent, and choosing one in an artifact is a conclusion
-  nobody checked. The **host figures** beside it now say why (WI 1375): each
+  nobody checked. The **host figures** beside it now say why: each
   interval carries Linux pressure stall information for cpu, io and memory
   (`some` — any task waiting — and `full` — every runnable task waiting, the
   figure directly comparable with the stall), the data directory's device
@@ -177,7 +178,7 @@ The failover measurement now answers it directly:
 - The runtime's own histograms — `/sched/pauses/total/gc:seconds` and
   `/sched/latencies:seconds` — are **subtracted per interval** rather than
   read cumulatively. A cumulative quantile answers "somewhere in this run",
-  which is exactly what made round 8's 21.5 s scheduler latency
+  which is exactly what made one run's 21.5 s scheduler latency
   uninterpretable. `run.json`'s `intervals` carries each interval's own GC
   pause total and worst scheduler latency, with `measured` distinguishing
   "nothing happened" from "could not be subtracted", and a `host` block with
@@ -220,16 +221,16 @@ renew=<ok>/<attempts> skipped=<launches over the in-flight bound> fallback=<rene
 streak=<longest current failure streak> fail: timeout=… noleader=… lane=… other=<failed renewals by cause>
 takeovers: older=<requests whose live connection is older> stale=<of those, prebuffered>
 raft: <node>=<role>/t<term>/L<leader>/lag<commit−applied>/ctl:up<peers>/idle<ms>/hmax<ms>@<class>/data:up<peers>/idle<ms>/qwait<ms>`
-— per survivor, the consensus core's view and, for each of the two cluster connections
-(WI 1340), how many peers are up, how long the reader has gone without a frame, the
+— per survivor, the consensus core's view and, for each of the two cluster connections,
+how many peers are up, how long the reader has gone without a frame, the
 worst handler time and its class, and the longest a frame waited in a dispatch queue.
 The lease figures are the liveness timeline: a survivor that fences or whose
 leases get adopted while it is healthy is the false-death cascade the round-4
 100k run showed; the renewal figures say whether the urgent lane is carrying
-the signal (WI 1337); `prebuffered` and the takeover figures are WI 1338's
-attribution of backlog-delayed sockets taking over live sessions, and
+the signal; `prebuffered` and the takeover figures attribute
+backlog-delayed sockets taking over live sessions, and
 `abandoned` counts the CONNECTs refused before their lease was acquired
-because the client had already given up and closed (WI 1485).
+because the client had already given up and closed.
 The failover `run.json` carries the same per survivor (`storm`) plus the
 kernel's `TcpExt` deltas over the run (`netstat_delta`: `ListenOverflows`,
 `ListenDrops`, …) — under pause-accept (`listener.maxHandshakes`, default
@@ -252,9 +253,9 @@ give-ups and the takeover acknowledgements that outlived their pull. `refusalarm
 acquires refused because the owner is alive and unreachable — proposed and refused at apply, or refused locally —
 beside the handshake slot time and the pause, from the crash on. `movegrace.py` prints the move grace's share of the
 routing plane's refusals (`storm.<node>.routing_refusals`), over the whole run and after the recovery instant, with
-the takeover timeout each run recorded (WI 1805). `movepath.py`, over a run directory with its `nodes.log`, names
+the takeover timeout each run recorded. `movepath.py`, over a run directory with its `nodes.log`, names
 the path each move-grace refusal after the instant fell on (made on the old node, forwarded from the new owner, from a
-third node, or a stale route) and whether the old node had acted on the new owner's confirmation yet (WI 1834). `fetcharms.py`, `unansweredarms.py` and `refusalarms.py` group runs by **placement**
+third node, or a stale route) and whether the old node had acted on the new owner's confirmation yet. `fetcharms.py`, `unansweredarms.py` and `refusalarms.py` group runs by **placement**
 and compare arms within each as well as overall. The crashed node's clients all retry first on one node, the
 storm target (`storm_target` in `run.json`); when it wins the election (`leader_after`) they land on the adopter
 of their leases, and when the other survivor wins they land beside it and take every lease over from it. The
@@ -264,12 +265,13 @@ whether every arm has K runs of each kind; the balancing driver is beside the ai
 repo.
 
 There is no CI system in this repository yet; the gate is `go test ./sim`
-in the build sequence documented in the repository README.
+in the build sequence documented in
+[docs/development.md](../docs/development.md#building-and-testing).
 
 ## Rolling restart
 
-`TestRollingRestart` measures what a rolling upgrade costs since WI 1788, which takes a draining node out of the
-shard map before it stops (WI 2208). It fills the population as the failover measurement does, starts the probe
+`TestRollingRestart` measures what a rolling upgrade costs on builds that take a draining node out of the shard
+map before it stops. It fills the population as the failover measurement does, starts the probe
 (pairs and groups), then takes each node in the order a StatefulSet does, highest name first: it drains the node
 (`Server.Drain`, waiting for `Drained`), stops it, restarts it over its data, and moves on once the node reports ready.
 After the last step the probe runs for the hold and is read with the roll's end as its instant, so its refusals
@@ -308,19 +310,19 @@ drained node seen in its step, every node ready again, the probe publishing in e
   the rate refused or failed;
 - the rise of the forward and barrier failure counters over the step, by reason.
 
-With `HOARDMQ_SIM_ROLL_RETAINED=<topics>` (16 in the gate) a retained probe runs beside the pairs (WI 2207): one
+With `HOARDMQ_SIM_ROLL_RETAINED=<topics>` (16 in the gate) a retained probe runs beside the pairs: one
 publisher per node writes QoS 1 retained messages round-robin over its share of `rprobe/0000`… (the topics cover every
 shard), one a second, each topic's sequence counting up. `roll.json`'s `retained` holds what it published, what was
 acknowledged and refused (by reason code), its outcomes per step and over the roll, and an end check: after the hold a
 fresh client subscribes `rprobe/#`, and a topic served an older message than its last acknowledged one, or none, is
 listed in `lost`. The gate requires it to have published and been acknowledged, and every acknowledged topic served.
 The retained probe loads the cluster the pairs share: on `main` at 10,000 clients the pairs were refused 23–25% over a
-roll with it running (`results/roll2207-10k-2026-10-08/`), against 0.65–0.88% in WI 2252's rolls without it (WI 2265).
+roll with it running (`results/roll2207-10k-2026-10-08/`), against 0.65–0.88% in rolls without it.
 
 `findings` names every drain that did not complete, was cut, ended with sessions unconfirmed, placed other than
 `left` or outlasted the chart's grace; a step whose nodes served a session empty (not counting `no-expiry`: the
 retained probe's publishers connect with no session expiry, and a drain that redirects one ends its session); a node not ready again; a probe loss or a QoS 2 group duplicate; a session rebuilt
-empty; a client not back; and a roll refusal rate above the chart runbook's worst after WI 1788, 23 of 600
+empty; a client not back; and a roll refusal rate above the chart runbook's worst once a draining pod leaves the shard map, 23 of 600
 (3.83%, `results/leaving-2026-10-05/`). The test fails on none of them.
 
 ## What "deterministic" means here
@@ -372,8 +374,7 @@ broker refused the subscription. It is worth stating because the opposite —
 treating any SUBACK as a grant — makes the properties below vacuous rather than
 wrong: a client that believes it is subscribed when it is not receives nothing,
 and `no-acknowledged-loss` and `no-double-delivery` cannot fail when nobody is
-listening. The corpus would go green *because* the broker refused a subscribe
-(WI 1500).
+listening. The corpus would go green *because* the broker refused a subscribe.
 
 `Client.resubscribe`, which re-issues the subscriptions after a reconnect finds
 no session, cannot wait for the acknowledgements: it runs on the connect
@@ -386,7 +387,7 @@ worth watching.
 A refused subscription during the fill counts the client as failed, so a run's
 client count reflects clients that are actually subscribed.
 
-`subscribe-granted` is the property that reads those refusals (WI 1509). It
+`subscribe-granted` is the property that reads those refusals. It
 fails on any of them, naming the client, the node, the reason code and the
 time, and it **also fails a run in which nothing was granted at all** — a run
 that subscribed to nothing has no refusals either, and would otherwise report
@@ -404,8 +405,7 @@ defect, as `replication-recovers` below now is too.
 **A client is recovered when it holds a live connection whose CONNACK was
 Success and every filter it holds was granted on that same connection.** The
 cluster's recovery instant is the start of the earliest interval of length H
-throughout which every still-trying client is continuously recovered. Owner
-decision, 2026-09-21, built by WI 1618.
+throughout which every still-trying client is continuously recovered.
 
 Four things follow from it:
 
@@ -424,8 +424,8 @@ Four things follow from it:
   why the gate does not spend a minute re-exercising it.
 - **A run reports an instant only if the recovered count was seen below the
   target after the crash.** A run where nothing dropped has not recovered; it
-  reports "never fell". The remote driver required this from WI 1480 and the
-  in-process mode did not, which was WI 1698.
+  reports "never fell". The remote driver required this and the in-process
+  mode did not.
 - **The old reading is published beside the new one.** `connack_recovery_sec`
   is the first return of the *online* count, with no hold and no
   subscriptions, computed by the same code with H set to zero. The two agree
@@ -437,10 +437,10 @@ Four things follow from it:
 Counted and reported beside it, and judged against the pass bounds below:
 `session_lost` and `session_lost_clients` (a reconnecting client
 told Session Present false although it held a session — its queue is gone and
-the resubscribe hides the event, which is how thousands a run went unseen
-before WI 1653), with `session_lost_sample` naming up to 1,000 of those clients
+the resubscribe hides the event, which is how thousands a run once went
+unseen), with `session_lost_sample` naming up to 1,000 of those clients
 (in-process populations) and `served_empty` the survivors' own count of the
-same event by reason (WI 1575), so each loss can be joined with the node logs
+same event by reason, so each loss can be joined with the node logs
 and attributed (`results/analysis/servedempty.py` does the join for runs that
 kept `nodes.log`); and `sub_downgraded` (a SUBACK granting a lower QoS than was
 asked for; a grant, and a change to what the subscriber is promised).
@@ -453,8 +453,9 @@ change is still comparable.
 ### The publish probe
 
 The failover measurement used to publish nothing, so a cluster in which every
-client was back and every QoS 1 publish was refused read as recovered: WIs
-1624 and 1625 were both invisible to it. `HOARDMQ_SIM_PROBE=<n>` pairs
+client was back and every QoS 1 publish was refused read as recovered:
+publishes refused long after a lost node's sessions were adopted elsewhere
+were invisible to it. `HOARDMQ_SIM_PROBE=<n>` pairs
 (default 100, 0 disables) publish one QoS 1 message a second, each to its own
 partner's topic, from just before the mark to the end of the hold. `run.json`'s
 `probe` records the attempts, what the broker answered — acknowledged, No
@@ -471,7 +472,7 @@ separates the two: `refused_with_subscriber_back` counts the refusals after the
 instant whose own partner was recovered at that moment, and `subs_recovered`
 and `last_sub_recovered_sec` say where the cohort itself got to.
 
-Each lost message is attributed in the record itself (WI 2259): `probe.losses`
+Each lost message is attributed in the record itself: `probe.losses`
 names, for up to 50 of them, the node that answered Success and when, and the
 pair's connection events (refusals, drops and CONNACKs with Session Present,
 with their nodes) and the subscriber's deliveries within 30 s of it;
@@ -489,12 +490,12 @@ broker host rather than with the population.
 ### The probe's shared groups
 
 `HOARDMQ_SIM_PROBE_GROUPS=<n>` groups (default 6, 0 disables) run beside the
-pairs (WI 1962). Group `k` is `$share/pg<k>/probe/group/<k>`, at QoS 1 when `k`
+pairs. Group `k` is `$share/pg<k>/probe/group/<k>`, at QoS 1 when `k`
 is even and 2 when odd. It has a member on every node and a second on node
 `k mod 3`, which makes that node the group's dispatch owner, and one publisher
 on node `k+1 mod 3`. So a publish goes to the owner for its decision, and the
 owner's round robin gives about one message in three to the third node, which
-is WI 1896's relay. The default six cover each owner node at each QoS once. The
+is the third-node relay. The default six cover each owner node at each QoS once. The
 probe waits until every node's routing table shows each group's members where
 they connected, and fails to build otherwise, naming what each table showed.
 
@@ -510,26 +511,25 @@ A group message is delivered when one member has it, so `run.json`'s
 
 No Matching Subscribers is counted as acknowledged for a group, unlike for a
 pair: the broker answers it to a QoS 1 publish whose group was decided on
-another node while a member holds the message (WI 2247), so leaving those out
+another node while a member holds the message, so leaving those out
 would hide their losses. Refusals are split at the recovery instant as the
 pairs' are, with `refused_with_members_back` for those whose every member was
 recovered. `failoverbounds` prints a report-only **Shared groups** section
 with the survivors' group forwards and relays
-(`hoardmq_group_gives_relayed_total`). The run injects no disk fault, so WI
-1891's refusal of a group delivery whose record failed to append is not reached.
+(`hoardmq_group_gives_relayed_total`). The run injects no disk fault, so the
+refusal of a group delivery whose record failed to append is not reached.
 
 ### The pass bounds
 
-A run and a set of runs are judged against the bounds the owner ratified on
-2026-09-22 from WI 1618's batch, applied by WI 1734.
+A run and a set of runs are judged against these bounds.
 
 | Figure | Bound | Gating |
 |---|---|---|
-| Time to every client recovered | ≤ 55 s | only for 100,000 in-process clients on ai2 at product timings, H = 60 s, with the run's placement known; any other run reports the figure and says which of those it is not. A run labelled `product` that records no takeover timeout was recorded before WI 1805, when its takeover and ack timeouts were 1 s: it is judged as before, with a note saying so |
+| Time to every client recovered | ≤ 55 s | only for 100,000 in-process clients on ai2 at product timings, H = 60 s, with the run's placement known; any other run reports the figure and says which of those it is not. A run labelled `product` that records no takeover timeout was recorded before 2026-09-24, when its takeover and ack timeouts were 1 s: it is judged as before, with a note saying so |
 | Subscriptions granted below the QoS asked for (`sub_downgraded`) | 0 | yes |
 | Probe messages acknowledged and never delivered (`probe.acked_not_delivered`, plus `probe.groups.acked_not_delivered`) | 0 | yes; a run whose probe did not run or published nothing has no figure and fails the row |
 | Sessions rebuilt empty on a reconnect (`session_lost`) | 0 | yes |
-| QoS 1 refusals after the recovery instant (`probe.refused_after_recovery`, plus the groups', whose QoS 2 publishes count too) | 0 | yes, since WI 1706 closed (2026-09-24); a run whose probe did not run or published nothing has no figure and fails the row |
+| QoS 1 refusals after the recovery instant (`probe.refused_after_recovery`, plus the groups', whose QoS 2 publishes count too) | 0 | yes, since 2026-09-24; a run whose probe did not run or published nothing has no figure and fails the row |
 | Time to 99% and 99.9% recovered | — | recorded, never gating |
 
 The verdict is in `run.json` under `bounds` (a row per figure with its bound,
@@ -543,9 +543,9 @@ judged by
 go run ./sim/cmd/failoverbounds <run.json or folder> ...
 ```
 
-which prints the set's rows, each run's verdict and failures, when WI 1625's
-forget fell against the instant, and the two report-only sections below, as
-Markdown, and exits 0 when the set passes, 1 when it fails and 2
+which prints the set's rows, each run's verdict and failures, when the forget
+of the victim's routes fell against the instant, and the two report-only
+sections below, as Markdown, and exits 0 when the set passes, 1 when it fails and 2
 when it found nothing to read. A set passes the time row only when every run it
 judged passed and they include at least three of each placement (see
 `results/analysis/fetcharms.py`); a run over the bound fails the set whatever the
@@ -563,13 +563,13 @@ for the hold that confirmed the instant is `metrics_at_instant`, and
 long it took, how many snapshots the run began, and whether it had to be taken
 after watching ended. What rose after the instant is `metrics_after` minus it;
 the report lists the forward and barrier failures that did, per survivor. The
-snapshot includes `hoardmq_route_owners_forgotten_total`, which dates WI 1625's
-forget against the instant: *before* when the snapshot already holds the
-survivor's final count, *after* when it does not. The counter is read at the end
+snapshot includes `hoardmq_route_owners_forgotten_total`, which dates the
+forget of the victim's routes against the instant: *before* when the
+snapshot already holds the survivor's final count, *after* when it does not. The counter is read at the end
 of the snapshot, so *before* is exact to the snapshot's read time, which is
 printed beside it.
 
-**From the crash to the shard map dropping the crashed node** (WI 1791). Each
+**From the crash to the shard map dropping the crashed node**. Each
 run records `drop_timeline` in `run.json`, in seconds after the harness's own
 crash mark:
 - each survivor's transport seeing the victim down;
@@ -579,9 +579,9 @@ crash mark:
   leader's driver checked (`tick`, `retry` or `declaration`), when it decided,
   and each survivor's apply and reconcile;
 - each survivor's own adoptions up to the victim's emptied index seen finished
-  (`adopted_sec`), and its served fact committed (`proposed_sec`) (WI 1633);
+  (`adopted_sec`), and its served fact committed (`proposed_sec`);
 - the last commit of each survivor's cover before the forget (`cover_sec`), for a
-  survivor that took sessions in transit (WI 1890); one that took none has no
+  survivor that took sessions in transit; one that took none has no
   cover and is not missing;
 - each survivor's forget of the victim's routes, and the reason that held it
   last;
@@ -596,7 +596,7 @@ instant: `metrics_after` minus `metrics_at_instant` for the barrier's failures
 on the crashed node's stream and on a survivor's, each by reason, and for
 forward failures. Both sections are report-only.
 
-### What "back online" counted before WI 1618
+### What "back online" used to count
 
 The failover measurement has no corpus and never calls `Check`, so it carries
 the same two figures in `run.json` as `sub_refusals` and
@@ -617,7 +617,7 @@ recover.
 **That question is now settled**: such a client is not recovered, and the
 headline waits for it (above). The two fields stay because they are the only
 account of what happened during the storm rather than at the end of it, and
-because no batch published before WI 1509 recorded them at all — for those the
+because no batch published before these fields existed recorded them at all — for those the
 question cannot be answered either way.
 
 ## Does a stream that cannot make progress recover?
@@ -625,7 +625,7 @@ question cannot be answered either way.
 `replication-recovers` is the only property evaluated from a probe taken after the run rather than
 from the ledger. Once every fault is healed, every stopped node restarted and the cluster settled, each node is asked
 one question: can you still accept a QoS 1 publish? A node whose replication barrier cannot pass answers 0x83 and
-keeps doing so — the outcome of every defect in WIs 1491, 1494 and 1506 — and a refused publish never enters the
+keeps doing so — the outcome of three earlier replication defects — and a refused publish never enters the
 ledger's publications, so no other property can see it.
 
 Three things about it are worth knowing before reading a run:
@@ -693,16 +693,16 @@ tables after the settle period:
 | `replication-recovers` | every node still running at the end can accept a QoS 1 publish, asked once every fault is healed and the cluster settled (see *Does a stream that cannot make progress recover?*) | invariant 5 |
 | `publish-counted-once` | every publish the harness recorded is in the accepted ledger or the refused one, never both — a property over the harness's own accounting, because the harness is one of the suspects whenever it reports a defect | — |
 | `no-refusal-without-faults` | a run that injected **no** faults refused no QoS 1 or 2 publish, and accepted at least one. A faulted run's refusals are reported and judged by nothing: it partitions, crashes and skews nodes on purpose, so a refusal there is the design working | invariant 5 |
-| `no-session-served-empty` | no running node served a fresh session to a client whose lease showed it had one (`hoardmq_sessions_rebuilt_empty_total`, read at the end of the run: a crashed node contributes nothing, a restarted one only what it counted since; a count under `no-expiry`, a session that had no expiry and ended with its connection, is reported in the stats and is no violation). No corpus schedule is meant to remove every copy of a session, so any count is a finding. Its control, `TestSessionWithNoCopyLeftIsCountedServedEmptyOnce`, removes every copy (one replica, owner crashed) and must read exactly one. Every seed is judged; seed 1's exemption, for an adoption whose fetch ended while its only replica holder was down and its declared-dead previous owner unlinked, was removed when WI 1765 made both wait. An exemption names the work item that removes it (`TestCorpusExemptionsNameTheirWorkItem`), is logged `EXEMPTED` and counted in "exemptions fired over the corpus" | invariant 2 |
+| `no-session-served-empty` | no running node served a fresh session to a client whose lease showed it had one (`hoardmq_sessions_rebuilt_empty_total`, read at the end of the run: a crashed node contributes nothing, a restarted one only what it counted since; a count under `no-expiry`, a session that had no expiry and ended with its connection, is reported in the stats and is no violation). No corpus schedule is meant to remove every copy of a session, so any count is a finding. Its control, `TestSessionWithNoCopyLeftIsCountedServedEmptyOnce`, removes every copy (one replica, owner crashed) and must read exactly one. Every seed is judged; seed 1's exemption, for an adoption whose fetch ended while its only replica holder was down and its declared-dead previous owner unlinked, was removed when the fetch was made to wait for both. An exemption names the work item that removes it (`TestCorpusExemptionsNameTheirWorkItem`), is logged `EXEMPTED` and counted in "exemptions fired over the corpus" | invariant 2 |
 
 A renewal failure on the line names its cause, and two of those causes are
 easy to confuse: `noleader` means no leader was known, `unreachable` means
 one was and this node could not send to it. They used to be one number, and
-18 of the 20 failures behind WI 1292 round 10b's one fence sat in it while
+18 of the 20 failures behind a 100,000-client run's one fence sat in it while
 raft had a stable leader. `leaderlessmax` is how long the node went without
 a leader at all, which is what makes a `noleader` count interpretable — a
 handful across a one-second election and the same handful across a
-twenty-five-second window are different diagnoses (WI 1357).
+twenty-five-second window are different diagnoses.
 
 `no-acknowledged-loss` is a statement about *acknowledged* publishes only, so
 a build that refuses more of its traffic satisfies it more easily. Two things
@@ -721,13 +721,13 @@ records. The totals cover the nodes still
 running at the end, each counting from its last start, so a crashed node
 contributes nothing and a restarted one contributes only what it refused
 after it came back. A rise in `refused.routes-unknown`
-beside a fall in `publications`, for instance, is the WI 1351 rule doing its
-work; the same rise with no fall would be it over-refusing. There is no
-property over the refusal *rate* yet — that is WI 1308.
+beside a fall in `publications`, for instance, is the rule that refuses a publish
+whose routes are not yet known doing its work; the same rise with no fall
+would be it over-refusing. There is no property over the refusal *rate* yet.
 
 A run's statistics also carry `deliveries.duplicateSkipped`: the routed
 copies the running nodes skipped because the session had been installed from a
-hand-over already holding the message (WI 1521). Above zero, the run reached
+hand-over already holding the message. Above zero, the run reached
 the late-forward path that `no-double-delivery` would otherwise report; a
 `no-double-delivery` or `ordering` violation prints each delivery's packet
 identifier, QoS, DUP flag and node.
@@ -757,7 +757,7 @@ reachable from configuration.
 ## What the harness changed in the broker
 
 Building it, and running it to completion, surfaced the holes below, fixed
-in the same work item. The worst were found last, each only after the
+while building it. The worst were found last, each only after the
 previous one was fixed and the whole suite ran again:
 
 - the broker **panicked** (`send on closed channel`) when a client connected
@@ -847,10 +847,10 @@ does not have enough ports for a hundred thousand clients over two
 surviving nodes. On Linux each such socket sets `IP_BIND_ADDRESS_NO_PORT`,
 so the kernel chooses its port at `connect()`, unique for the four-tuple,
 rather than at `bind()`, unique for the address across every destination:
-WI 1476 found that search, repeated for every reconnect of the storm, taking
+that search, repeated for every reconnect of the storm, was measured taking
 most of the host's recorded CPU. A run records how its clients dialled, read
 back from a real socket before the fill, in `provenance.effective`
-(`client_sources`, `client_dial`) and in the report (WI 1477). `results/`
+(`client_sources`, `client_dial`) and in the report. `results/`
 holds the recorded runs with their methodology and caveats, and
 [results/README.md](results/README.md) says how each was produced.
 

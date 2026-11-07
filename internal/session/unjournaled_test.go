@@ -121,10 +121,11 @@ func TestWithdrawOnlyWhatARefusedPublishWrote(t *testing.T) {
 	}
 }
 
-// TestFailedQueuedAppendRefusesThePublishAndWithdrawsTheCopy is WI 1891's
-// defect on one node: the append of an offline subscriber's queued record
-// fails, the publish is refused, and the copy that is in memory only leaves
-// the queue, so the publisher's retry is the one the subscriber receives.
+// TestFailedQueuedAppendRefusesThePublishAndWithdrawsTheCopy is the failed
+// subscriber append on one node: the append of an offline subscriber's queued
+// record fails, the publish is refused, and the copy that is in memory only
+// leaves the queue, so the publisher's retry is the one the subscriber
+// receives.
 func TestFailedQueuedAppendRefusesThePublishAndWithdrawsTheCopy(t *testing.T) {
 	metrics := &seriesMetrics{}
 	m, d, pub := journaledManager(t, func(o *Options) { o.Metrics = metrics })

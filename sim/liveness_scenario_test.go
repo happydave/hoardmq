@@ -5,8 +5,8 @@ import (
 	"time"
 )
 
-// TestStreamRecoversAfterTwoQuickBreaks runs the shape WI 1491's defect
-// needed: one stream broken, its resync refused by the cooldown, then broken
+// TestStreamRecoversAfterTwoQuickBreaks runs the shape a resync-cooldown
+// defect needed: one stream broken, its resync refused by the cooldown, then broken
 // again — after which nothing asked for a resync and the stream stayed holed,
 // so every barrier for that peer failed and the node refused every QoS 1/2
 // publish for the rest of the run.
@@ -15,10 +15,9 @@ import (
 // produces two breaks on one pair inside a cooldown; that is why the corpus
 // never caught any of the four defects this property was written for.
 //
-// **This test is the vehicle for WI 1502's negative controls.** It passes on
-// the current build, which says only that the build is sound. What gives it
-// teeth is that it fails with each of the four fixes reverted, and that is
-// recorded in the work item's `test.md` rather than here.
+// **This test is the vehicle for the property's negative controls.** It passes
+// on the current build, which says only that the build is sound. What gives it
+// teeth is that it fails with each of the four fixes reverted.
 func TestStreamRecoversAfterTwoQuickBreaks(t *testing.T) {
 	if testing.Short() {
 		t.Skip("a fault run with a settle period")
@@ -36,8 +35,8 @@ func TestStreamRecoversAfterTwoQuickBreaks(t *testing.T) {
 	// A third partition, healing as the workload stops so the stream goes quiet
 	// immediately after a break, makes this run fail on the current build —
 	// reproducibly, 3 of 3, with a stream holed and awaiting a resync that
-	// never completes. That is a product defect and is filed as **WI 1506**,
-	// with this schedule as its reproduction. It is deliberately not part of
+	// never completes. That is a product defect, filed with this schedule as
+	// its reproduction. It is deliberately not part of
 	// the shipped test: a corpus test that fails on the current build is not a
 	// test, it is a red gate.
 	schedule := []Step{

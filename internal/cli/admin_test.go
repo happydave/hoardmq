@@ -140,6 +140,13 @@ func TestAdminVerbs(t *testing.T) {
 			}
 		}
 	}
+	// cluster remove sends the removal; this one-node cluster refuses it,
+	// the reason printed and the exit non-zero.
+	for target, reason := range map[string]string{"node": "last-voter", "ghost": "not-a-member"} {
+		if code, _, errOut := runVerb("cluster", "remove", target); code == ExitOK || !strings.Contains(errOut, reason) {
+			t.Errorf("cluster remove %s: exit %d %q", target, code, errOut)
+		}
+	}
 	// -json prints the API's document.
 	code, out, _ := runVerb("clients", "list", "-json")
 	var page struct {

@@ -129,11 +129,11 @@ func qos1(topic string) *message.Message {
 	return &message.Message{Namespace: "default", Topic: topic, QoS: 1, Payload: []byte("x"), Seq: 1, Arrived: time.Now()}
 }
 
-// TestPublishRefusedWhileAnOwnersRoutesAreUnknown is the defect of WI 1351:
-// a node that restarted beside a peer it cannot reach holds nothing for that
-// peer, so HiddenMatch has nothing to match and the publish was acknowledged.
-// It is the negative control for the rule — on the tree before the change it
-// fails, because Forward returns nil.
+// TestPublishRefusedWhileAnOwnersRoutesAreUnknown pins a defect: a node that
+// restarted beside a peer it cannot reach holds nothing for that peer, so
+// HiddenMatch has nothing to match and the publish was acknowledged. It is the
+// negative control for the rule — on the tree before the change it fails,
+// because Forward returns nil.
 func TestPublishRefusedWhileAnOwnersRoutesAreUnknown(t *testing.T) {
 	owned := func(node string) (int, bool) {
 		if node == "n1" {
@@ -247,7 +247,7 @@ func TestLeaseViewUnavailableCountsAsUnknown(t *testing.T) {
 }
 
 // TestForwardReportsItsForwards: Forward returns one per remote node it sent
-// the message to, and zero for a topic no remote node matches (WI 1487).
+// the message to, and zero for a topic no remote node matches.
 func TestForwardReportsItsForwards(t *testing.T) {
 	p, tr := stubPlane(t, "n2", []string{"n1", "n3"}, []string{"n1", "n2", "n3"}, func(string) (int, bool) { return 1, true })
 	for _, peer := range []string{"n1", "n3"} {
@@ -266,7 +266,7 @@ func TestForwardReportsItsForwards(t *testing.T) {
 	}
 }
 
-// TestOwnerKnowledgeEpisodes (WI 1571): the span of unknown owners is
+// TestOwnerKnowledgeEpisodes: the span of unknown owners is
 // recorded from the plane's start, ends when the last owner is known, and a
 // new one opens when an owner becomes unknown again.
 func TestOwnerKnowledgeEpisodes(t *testing.T) {

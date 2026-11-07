@@ -13,10 +13,11 @@ import (
 
 // JudgeRunFiles judges a set of failover runs from their run.json files
 // against the pass bounds and writes the per-run verdicts, the set's verdict
-// and the WI 1625 rider as Markdown to w. Each argument is a run.json or a
-// directory searched for them. It returns 0 when the set passes, 1 when it
-// fails and 2 when a file cannot be read or no run was found: an empty set is
-// never a pass. sim/cmd/failoverbounds is its command line.
+// and the rider on a lost owner's forgotten routes as Markdown to w. Each
+// argument is a run.json or a directory searched for them. It returns 0 when
+// the set passes, 1 when it fails and 2 when a file cannot be read or no run
+// was found: an empty set is never a pass. sim/cmd/failoverbounds is its
+// command line.
 func JudgeRunFiles(w io.Writer, args []string) int {
 	runs, err := readRunFiles(args)
 	if err != nil {
@@ -124,7 +125,7 @@ func runName(base, path string) string {
 func writeBatch(w io.Writer, b batchVerdict, runs []runFile) {
 	p := func(format string, a ...any) { _, _ = fmt.Fprintf(w, format, a...) }
 	p("# Pass bounds over %d runs\n\n", len(runs))
-	p("Bounds ratified by the owner on 2026-09-22, applied by WI 1734. The time bound judges only %s.\n\n", boundsConfiguration())
+	p("The time bound judges only %s.\n\n", boundsConfiguration())
 	p("## The set\n\n%s\n\n| Figure | Bound | The set | Verdict | Note |\n|---|---|---|---|---|\n", boundsVerdictLine(b.boundsVerdict))
 	for _, r := range b.Rows {
 		p("| %s | %s | %s | %s | %s |\n", r.Name, r.Bound, r.Figure, r.Status, r.Note)
@@ -151,7 +152,7 @@ func writeBatch(w io.Writer, b batchVerdict, runs []runFile) {
 			p("\n- %s fails %s", v.Name, f)
 		}
 	}
-	p("\n\n## WI 1625's forget against the recovery instant\n\n")
+	p("\n\n## The forget of a lost owner's routes against the recovery instant\n\n")
 	p("From `hoardmq_route_owners_forgotten_total` in the snapshot taken when the confirming hold began and at window end. " +
 		"The counter is read at the end of the snapshot, so *before* means no later than the instant plus the time the " +
 		"snapshot's read ended after it.\n\n| Run | Survivor | Forget | Read began after the instant | Read took |\n|---|---|---|---|---|\n")
@@ -177,8 +178,8 @@ func writeBatch(w io.Writer, b batchVerdict, runs []runFile) {
 	writeGroupsSection(w, runs)
 }
 
-// writeGroupsSection prints what the probe's shared groups saw in each run
-// (WI 1962), and what the survivors' routing planes did with group messages:
+// writeGroupsSection prints what the probe's shared groups saw in each run,
+// and what the survivors' routing planes did with group messages:
 // metrics_after less metrics_before, which is read before the probe starts,
 // summed over the survivors. Report-only: the groups' losses and refusals are
 // already in the gating rows.

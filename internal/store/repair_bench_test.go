@@ -7,7 +7,7 @@ import (
 
 // BenchmarkRepair times one repair of a journal holding n sessions, each with
 // its metadata, a subscription and a queued message, checkpointed, with 10,000
-// records after the checkpoint, as the store lock holds it (WI 1812).
+// records after the checkpoint, as the store lock holds it.
 func BenchmarkRepair(b *testing.B) {
 	for _, n := range []int{10000, 100000} {
 		b.Run("sessions="+strconv.Itoa(n), func(b *testing.B) {

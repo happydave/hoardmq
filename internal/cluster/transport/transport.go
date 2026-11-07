@@ -83,7 +83,7 @@ type PeerInfo struct {
 	State   State
 	Version uint8
 	Stress  uint8
-	// Reader-side liveness of the current link (WI 1342): how long since a
+	// Reader-side liveness of the current link: how long since a
 	// frame was read from the peer, and how long handlers have held the
 	// reader — average, worst, and the class of the worst.
 	ReadIdleMs   float64
@@ -91,18 +91,18 @@ type PeerInfo struct {
 	HandlerMaxMs float64
 	SlowestClass string
 	// DispatchWaitMaxMs is the longest a frame waited in its class queue
-	// before its handler ran (WI 1340).
+	// before its handler ran.
 	DispatchWaitMaxMs float64
 	// DownForMs is how long the peer has not been Up: zero while Up, the
 	// time since the last transition out of Up otherwise, or since the
-	// transport started for a peer never seen up (WI 1341: a link that
+	// transport started for a peer never seen up (a link that
 	// resets for seconds under a storm is not a partition).
 	DownForMs float64
 	// ControlUp is whether the control connection is in place. A peer is Up
 	// only once its data connection is too, so a restarted peer can be
 	// reachable on the control connection, and asked there, before it is Up.
 	ControlUp bool
-	// The data connection (WI 1340). On a peer negotiated below version 3
+	// The data connection. On a peer negotiated below version 3
 	// it is the same link as the control connection and these repeat it.
 	DataState             State
 	DataReadIdleMs        float64
@@ -110,7 +110,7 @@ type PeerInfo struct {
 	DataSlowestClass      string
 	DataDispatchWaitMaxMs float64
 	// Frames admitted to each connection and not yet taken by its writer:
-	// the ordered queue and the urgent lane (WI 1474). A frame that never
+	// the ordered queue and the urgent lane. A frame that never
 	// reached the peer is here or in the kernel's send queue; one the peer
 	// never read is in its receive queue.
 	OutQueued, UrgentQueued         int
@@ -516,8 +516,8 @@ func (t *Transport) knownPeer(name string) bool {
 }
 
 // Reset closes one of a peer's connections, for tests and the simulation
-// harness (a link that resets under load is the storm's shape, WI 1342
-// round 6); the dialer redials it.
+// harness (a link that resets under load is the storm's shape); the dialer
+// redials it.
 func (t *Transport) Reset(peerName string, role Role, reason string) {
 	t.mu.Lock()
 	p := t.peers[peerName]

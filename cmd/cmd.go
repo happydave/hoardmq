@@ -8,7 +8,9 @@ import (
 	"os"
 
 	"github.com/happydave/hoardmq/internal/cli"
-	_ "github.com/happydave/hoardmq/modules/sinkkafka" // sink.kafka, the Kafka forwarder
+	_ "github.com/happydave/hoardmq/modules/payloadschema" // schema.json, payload schema validation
+	_ "github.com/happydave/hoardmq/modules/sinkkafka"     // sink.kafka, the Kafka forwarder
+	_ "github.com/happydave/hoardmq/modules/webhook"       // auth.http and events.http
 )
 
 // Main runs the hoardmq command with the process's arguments, environment and

@@ -47,7 +47,8 @@ type failClosedView struct {
 // coverage records what the run actually exercised, so a vacuous run is
 // visible as vacuous: a property whose input evidence never arrived proved
 // nothing, whatever colour the run was. (The FoundationDB code-probe
-// pattern; the structural answer to the WI 1308 mis-scoring class.)
+// pattern; the structural answer to mis-scoring of the kind that counted a
+// refused publish as an acknowledged one.)
 type coverage struct {
 	Publications int             `json:"publications"`
 	Deliveries   int             `json:"deliveries"`
@@ -84,7 +85,7 @@ type runArtifact struct {
 	HealedAt *time.Time     `json:"healed_at,omitempty"`
 	Recovery []NodeRecovery `json:"recovery,omitempty"`
 	// RefusedKeys are the keys peers refused records for, watched from the
-	// heal (WI 1531).
+	// heal.
 	RefusedKeys []KeyBlock   `json:"refused_keys,omitempty"`
 	ResendLag   string       `json:"resend_lag"`
 	ResendWin   string       `json:"resend_window"`

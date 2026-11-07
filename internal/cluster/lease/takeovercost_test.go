@@ -8,7 +8,8 @@ import (
 	"github.com/happydave/hoardmq/internal/store"
 )
 
-// TestTakeoverCostSplitsByWhetherAClientWasHere is WI 1495's server half.
+// TestTakeoverCostSplitsByWhetherAClientWasHere is the server half of the
+// takeover-cost split.
 //
 // A lease move costs the client a reconnect only when the losing node still
 // had it connected; when the client had already gone elsewhere the move costs
@@ -43,10 +44,10 @@ func TestTakeoverCostSplitsByWhetherAClientWasHere(t *testing.T) {
 	take("already-gone-2", 0)
 	take("already-gone-3", 0)
 
-	// Wait on a signal that predates this work item — all five leases have
+	// Wait on a signal older than these counters — all five leases have
 	// left b — so the new counters are checked by assertions below rather
 	// than by the wait itself. A control that breaks one of them must trip
-	// the assertion that targets it, not time out here (Test.md step 3).
+	// the assertion that targets it, not time out here.
 	waitFor(t, "five leases moved off b", 3*time.Second, func() bool {
 		return b.svc.LivenessStats().LostLeases == 5
 	})
@@ -102,12 +103,12 @@ func TestAvgMsHasNoAverageOfNothing(t *testing.T) {
 	}
 }
 
-// TestAdoptedTakeoverIntervalAndCap is WI 1495's B3: the interval between
-// adopting a lease and losing it is the number that distinguishes an adoption
-// racing an arriving client from a re-home that has nothing to do with the
-// adoption. Nothing in the published artifacts can tell those apart.
+// TestAdoptedTakeoverIntervalAndCap: the interval between adopting a lease and
+// losing it is the number that distinguishes an adoption racing an arriving
+// client from a re-home that has nothing to do with the adoption. Nothing in
+// the published artifacts can tell those apart.
 func TestAdoptedTakeoverIntervalAndCap(t *testing.T) {
-	s := &Service{}
+	s := bareService(t)
 	k := key{"default", "c1"}
 
 	// Nothing recorded: no average of nothing, and no sample rather than an
@@ -142,8 +143,8 @@ func TestAdoptedTakeoverIntervalAndCap(t *testing.T) {
 		t.Errorf("the no-client event recorded wrong: %+v", sample[1])
 	}
 
-	// The cap holds and says how much it dropped. Silence here is what made
-	// WI 1511 invisible until an artifact refused to publish at 937 MB.
+	// The cap holds and says how much it dropped. Silence here is what hid an
+	// unbounded capture until an artifact refused to publish at 937 MB.
 	for i := 0; i < adoptTakeSampleMax+500; i++ {
 		s.recordAdoptTakeover(k, time.Millisecond, 0, false)
 	}
@@ -156,10 +157,10 @@ func TestAdoptedTakeoverIntervalAndCap(t *testing.T) {
 }
 
 // TestTakeoverPathRecordsTheAdoptionInterval drives the call site, not the
-// recorder. The first version of this work item's B3 tested
-// recordAdoptTakeover directly and passed with the call removed from
-// serveTakeover entirely — the same shape as WI 1511's control, which proved
-// a function worked rather than that anything used it.
+// recorder. The first test of this interval called recordAdoptTakeover
+// directly and passed with the call removed from serveTakeover entirely —
+// the same shape as an earlier control, which proved a function worked
+// rather than that anything used it.
 func TestTakeoverPathRecordsTheAdoptionInterval(t *testing.T) {
 	c := newCluster(t, []string{"n1", "n2", "n3"}, 5*time.Second, nil)
 	a, b := c.nodes["n1"], c.nodes["n2"]
@@ -214,14 +215,14 @@ func TestTakeoverPathRecordsTheAdoptionInterval(t *testing.T) {
 // the life of the process — which an earlier comment here wrongly claimed was
 // bounded by the lease table.
 func TestAdoptionRecordIsDroppedWhenTheLeaseVanishes(t *testing.T) {
-	s := &Service{}
+	s := bareService(t)
 	s.o.Node = "me"
 	k := key{"default", "gone"}
 	s.adoptedAt.Store(k, time.Now())
 
 	// The lease leaves this node by vanishing entirely: before is ours,
 	// after is nil.
-	s.changed(&Lease{Namespace: k.ns, ClientID: k.id, Owner: "me"}, nil)
+	s.changed(&Lease{Namespace: k.ns, ClientID: k.id, Owner: "me"}, nil, time.Time{})
 
 	if _, still := s.adoptedAt.Load(k); still {
 		t.Error("the adoption record survived the lease disappearing; nothing else will ever drop it")

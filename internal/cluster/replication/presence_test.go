@@ -28,7 +28,11 @@ func (c *counters) Add(name string, labels map[string]string, delta float64) {
 	c.n[key(name, labels)] += delta
 }
 
-func (c *counters) Set(string, map[string]string, float64) {}
+func (c *counters) Set(name string, labels map[string]string, v float64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.n[key(name, labels)] = v
+}
 
 func (c *counters) get(name string, labels map[string]string) float64 {
 	c.mu.Lock()
@@ -383,7 +387,7 @@ func TestEveryLivePeerHasAnOutboundStream(t *testing.T) {
 	}
 }
 
-// TestUnknownFrameKindIsAcknowledged covers the rolling upgrade the README
+// TestUnknownFrameKindIsAcknowledged covers the rolling upgrade docs/clustering.md
 // promises: a node running the previous build receives a frame kind it does
 // not know. The stream's acknowledgement is cumulative, so passing over the
 // frame leaves every barrier the sender holds over it waiting for the
@@ -416,7 +420,7 @@ func TestUnknownFrameKindIsAcknowledged(t *testing.T) {
 // the interleaving that would break a weaker postcondition needs a tap
 // racing the reconcile worker's recompute — which this harness cannot force.
 // It is kept as a multi-writer guard on the invariant itself, not as the
-// control for that change; see test.md.
+// control for that change.
 func TestConcurrentFirstWritesEachReachEveryPeer(t *testing.T) {
 	h, _ := withCounters(t, []string{"n1", "n2", "n3"}, 8, 2)
 	h.applyMap(shardmap.Compute(1, h.order, 2, 8))

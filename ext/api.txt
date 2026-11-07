@@ -1,8 +1,8 @@
-hoardmq extension API 0.3.0
+hoardmq extension API 0.9.0
 
 package github.com/happydave/hoardmq/ext
 
-const APIVersion = "0.3.0"
+const APIVersion = "0.9.0"
 var OK = Outcome{Action: Continue}
 func Register(id ID, f Factory)
 type Action byte
@@ -15,6 +15,9 @@ const (
 func (a Action) String() string
 type AppendStatsProvider interface {
 	AppendStats() store.AppendStats
+}
+type Auditor interface {
+	Audit(actor, action, target, outcome string, detail map[string]string) bool
 }
 type Capability uint32
 const (
@@ -39,8 +42,35 @@ const (
 	CapPublishAccepted
 
 	CapPublishAdmission
+
+	CapUnsubscribe
+
+	CapCluster
 )
 func (c Capability) Has(want Capability) bool
+type ClusterEvent struct {
+	Kind      ClusterEventKind
+	Time      time.Time
+	Member    string
+	Namespace string
+	ClientID  string
+	From      string
+	To        string
+}
+type ClusterEventKind byte
+const (
+	MemberJoined ClusterEventKind = iota
+
+	MemberLeft
+
+	LeaseMoved
+
+	DrainStarted
+)
+func (k ClusterEventKind) String() string
+type ClusterListener interface {
+	OnClusterEvent(ctx context.Context, ev ClusterEvent)
+}
 type Collector interface {
 	AddCollector(func(set func(name string, labels map[string]string, value float64)))
 }
@@ -68,6 +98,10 @@ type Context struct {
 	Observability Observability
 
 	Services Services
+
+	DecisionTTL time.Duration
+
+	Audit Auditor
 
 	Passwords PasswordVerifier
 }
@@ -240,6 +274,9 @@ type Toggleable interface {
 type TraceProvider interface {
 	Tracer() *trace.Tracer
 }
+type UnsubscribeInterceptor interface {
+	InterceptUnsubscribe(ctx context.Context, info ConnectionInfo, filter string) Outcome
+}
 type Validator interface {
 	Validate() error
 }
@@ -282,6 +319,8 @@ type Identity struct {
 	Username   string
 	CertCN     string
 	Attributes map[string]string
+
+	AdmittedBy string
 }
 type Mechanism interface {
 	Methods() []string
@@ -663,6 +702,7 @@ func IsRetainedDelete(typ byte) bool
 func IsSessionDelete(typ byte) bool
 func IsSessionUpsert(typ byte) bool
 func Known(typ byte) bool
+func MergeRetained(held Version, heldExists bool, in Version, handOver bool) bool
 func RecordName(typ byte) string
 type AppendStats struct {
 	Appends   int64   `json:"appends"`
@@ -692,8 +732,12 @@ type Journal interface {
 	InflightState(k Key, packetID uint16, state byte) error
 	Complete(k Key, packetID uint16) error
 	Dropped(k Key, entrySeq uint64) error
-	Retain(m *mqtt.Message) error
-	RetainDelete(ns, topic string) error
+
+	Retain(m *mqtt.Message, v Version) error
+
+	RetainClear(ns, topic string, v Version) error
+
+	RetainDrop(ns, topic string) error
 	Sync() error
 }
 type JournalStats struct {
@@ -735,8 +779,9 @@ func EncodeEnqueue(k Key, e Entry) (Record, error)
 func EncodeInboundAccepted(k Key, packetID uint16) (Record, error)
 func EncodeInboundQoS2(k Key, packetID uint16, add bool) (Record, error)
 func EncodeInflightState(k Key, packetID uint16, state byte) (Record, error)
-func EncodeRetain(m *mqtt.Message) (Record, error)
-func EncodeRetainDelete(ns, topic string) (Record, error)
+func EncodeRetain(m *mqtt.Message, v Version) (Record, error)
+func EncodeRetainClear(ns, topic string, v Version) (Record, error)
+func EncodeRetainDrop(ns, topic string) (Record, error)
 func EncodeSent(k Key, entrySeq uint64, packetID uint16) (Record, error)
 func EncodeSessionDelete(k Key) (Record, error)
 func EncodeSessionUpsert(meta SessionMeta) (Record, error)
@@ -744,6 +789,12 @@ func EncodeSubscribe(k Key, sub SubscriptionRecord) (Record, error)
 func EncodeUnsubscribe(k Key, filter string) (Record, error)
 func RecordsFor(ss *SessionState) []Record
 func RetainRecord(m *mqtt.Message) Record
+func RetainRecordVersioned(m *mqtt.Message, v Version) Record
+type RetainedVersion struct {
+	Namespace string  `json:"ns"`
+	Topic     string  `json:"topic"`
+	RV        Version `json:"rv"`
+}
 type Scope struct {
 	Namespace string
 	ClientID  string
@@ -782,6 +833,10 @@ type State struct {
 	Sessions []*SessionState `json:"sessions"`
 	Retained []*mqtt.Message `json:"retained"`
 
+	RetainedVersions []RetainedVersion `json:"retainedVersions,omitempty"`
+
+	RetainedTombstones []Tombstone `json:"retainedTombstones,omitempty"`
+
 	Through []SessionIndex `json:"through,omitempty"`
 
 	At uint64 `json:"-"`
@@ -790,9 +845,14 @@ type State struct {
 func NewState() *State
 func (st *State) Apply(typ byte, payload []byte) error
 func (st *State) ApplyReport(typ byte, payload []byte) (Unapplied, error)
+func (st *State) DropRetained(ns, topic string)
+func (st *State) DropTombstoneIf(ns, topic string, v Version) bool
 func (st *State) Find(ns, id string) *SessionState
+func (st *State) MergeRetainedClear(ns, topic string, v Version) bool
+func (st *State) MergeRetainedMessage(m *mqtt.Message, v Version) bool
 func (st *State) Normalize()
 func (st *State) Remove(ns, id string)
+func (st *State) RetainedHeld(ns, topic string) (v Version, held, tombstone bool)
 func (st *State) SetRetained(m *mqtt.Message)
 type SubscriptionRecord struct {
 	Filter            string `json:"filter"`
@@ -816,11 +876,25 @@ type SyncStats struct {
 	CheckpointSec     float64 `json:"checkpoint_sec_total"`
 	CheckpointHoldSec float64 `json:"checkpoint_hold_sec_total"`
 }
+type Tombstone struct {
+	Namespace string  `json:"ns"`
+	Topic     string  `json:"topic"`
+	RV        Version `json:"rv"`
+}
 type Unapplied string
 const (
 	UnappliedNoSession Unapplied = "no-session"
 	UnappliedNoEntry   Unapplied = "no-entry"
 )
+type Version struct {
+	E, N uint64
+}
+func RecordVersion(r Record) (v Version, clear bool)
+func (v Version) Less(w Version) bool
+func (v Version) MarshalJSON() ([]byte, error)
+func (v Version) String() string
+func (v *Version) UnmarshalJSON(b []byte) error
+func (v Version) Zero() bool
 type WillRecord struct {
 	Message *mqtt.Message `json:"message"`
 	Delay   uint32        `json:"delay"`

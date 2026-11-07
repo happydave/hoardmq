@@ -11,11 +11,12 @@ import (
 	"github.com/happydave/hoardmq/internal/packet"
 )
 
-// The probe's shared groups (WI 1962). Each group has a member on every node
+// The probe's shared groups. Each group has a member on every node
 // and a second on one of them, which makes that node the group's dispatch
 // owner, and one publisher on another node, so the owner's round robin gives
-// to the third node about one message in three: WI 1896's relay. After a
-// node is lost the group's members and ownership move with the survivors.
+// to the third node about one message in three, which exercises that relay.
+// After a node is lost the group's members and ownership move with the
+// survivors.
 //
 // A group message is delivered when one member has it. The pairs' figures are
 // kept apart from the groups' and the gating rows add the two.

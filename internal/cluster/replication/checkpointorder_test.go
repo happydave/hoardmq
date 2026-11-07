@@ -66,7 +66,7 @@ func wantEntries(t *testing.T, got []string) {
 // TestReplicaRecordAfterTheSnapshotSurvivesTheCheckpoint: a record applied
 // after the follower's state was read for a checkpoint of the replica store,
 // and before the checkpoint is written, is recovered after a restart; one
-// applied after the index was read and before the state was, once (WI 1818).
+// applied after the index was read and before the state was, once.
 func TestReplicaRecordAfterTheSnapshotSurvivesTheCheckpoint(t *testing.T) {
 	for _, after := range []bool{true, false} {
 		name := map[bool]string{true: "applied after the snapshot", false: "applied before the snapshot"}[after]

@@ -38,8 +38,8 @@ func benchManager(b *testing.B) (*Manager, *store.Store) {
 
 // BenchmarkReconnectDrainsQueuedQoS0 times a durable session's reconnect
 // (Connect and Resume, which drains the queue and syncs) with k QoS 0
-// messages queued while it was offline, over a real store with its fsync
-// (WI 1831). It reports the store's appends and fsyncs in the timed part.
+// messages queued while it was offline, over a real store with its fsync.
+// It reports the store's appends and fsyncs in the timed part.
 func BenchmarkReconnectDrainsQueuedQoS0(b *testing.B) {
 	for _, k := range []int{1, 10, 100} {
 		b.Run("queued="+strconv.Itoa(k), func(b *testing.B) {
@@ -78,7 +78,7 @@ func BenchmarkReconnectDrainsQueuedQoS0(b *testing.B) {
 // BenchmarkReconnectStormQueuedQoS0 reconnects 10,000 durable sessions, each
 // with one QoS 0 message queued, from 1,000 goroutines at once: the drain's
 // records under a reconnect storm's concurrency, where the group commit
-// shares fsyncs (WI 1831). One op is the whole storm.
+// shares fsyncs. One op is the whole storm.
 func BenchmarkReconnectStormQueuedQoS0(b *testing.B) {
 	const sessions, workers = 10000, 1000
 	m, st := benchManager(b)

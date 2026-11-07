@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/happydave/hoardmq/internal/config"
 	"github.com/happydave/hoardmq/internal/packet"
 )
 
@@ -65,7 +66,7 @@ func TestUnsupportedProtocolLevel311(t *testing.T) {
 }
 
 func TestRetainedMessage311(t *testing.T) {
-	Statement(t, Spec311, "MQTT-3.3.1-5", "MQTT-3.3.1-6", "MQTT-3.3.1-7", "MQTT-3.3.1-8", "MQTT-3.3.1-9", "MQTT-3.3.1-10", "MQTT-3.3.1-11", "MQTT-3.3.1-12")
+	Statement(t, Spec311, "MQTT-3.3.1-5", "MQTT-3.3.1-6", "MQTT-3.3.1-7", "MQTT-3.3.1-8", "MQTT-3.3.1-9", "MQTT-3.3.1-10", "MQTT-3.3.1-11", "MQTT-3.3.1-12", "MQTT-3.1.2-7")
 	n := StartNode(t, nil)
 	a := n.Must4(Connect4{ClientID: "myclientid", Clean: true})
 	a.Pub(topics[1], 0, true, "qos 0")
@@ -165,6 +166,35 @@ func TestOfflineQueueingAndSessionPresent311(t *testing.T) {
 	if a.SessionPresent() {
 		t.Fatal("session survived clean session")
 	}
+	a.Disconnect()
+}
+
+// TestOfflineQoS0Dropped311: with limits.offlineQoS0 "drop", the resumed
+// session is sent the QoS 1 and 2 messages published while it was offline
+// and not the QoS 0 one, which MQTT 3.1.1 lets a server store or not.
+func TestOfflineQoS0Dropped311(t *testing.T) {
+	Statement(t, Spec311, "MQTT-3.1.2-5")
+	n := StartNode(t, func(d *config.Document) { d.Limits.OfflineQoS0 = "drop" })
+	a := n.Must4(Connect4{ClientID: "myclientid", Clean: false})
+	a.Sub(wildtopics[5], 2)
+	a.Disconnect()
+	n.WaitOffline("myclientid")
+	b := n.Must4(Connect4{ClientID: "myclientid2", Clean: true})
+	b.Pub(topics[1], 0, false, "qos 0")
+	b.Pub(topics[2], 1, false, "qos 1")
+	b.Pub(topics[3], 2, false, "qos 2")
+	b.Disconnect()
+	a = n.Must4(Connect4{ClientID: "myclientid", Clean: false})
+	if !a.SessionPresent() {
+		t.Fatal("session not present")
+	}
+	ms := a.Expect(2, 3*time.Second)
+	for _, m := range ms {
+		if m.Qos() == 0 {
+			t.Fatalf("a QoS 0 message was kept for the offline session: %q", m.Payload())
+		}
+	}
+	a.ExpectNone(500 * time.Millisecond)
 	a.Disconnect()
 }
 

@@ -866,10 +866,10 @@ func (c *tcluster) follower(lead *tnode) *tnode {
 
 // wedgeOrderedLane fills a node's ordered queue to the leader with frames
 // the writer takes 5 ms each to put on the wire, and keeps it full: what a
-// storm's traffic does to the link (WI 1337). Anything on the ordered lane
-// waits about five seconds; the urgent lane waits one frame. Since WI 1340
-// the batched lease proposals ride the control connection, so the flood is
-// a control-lane class the leader has no handler for (redirect hints).
+// storm's traffic does to the link. Anything on the ordered lane waits
+// about five seconds; the urgent lane waits one frame. The batched lease
+// proposals ride the control connection, so the flood is a control-lane
+// class the leader has no handler for (redirect hints).
 func wedgeOrderedLane(t *testing.T, from *tnode, to string) {
 	t.Helper()
 	from.tr.SetFault(to, &transport.Fault{Delay: 5 * time.Millisecond, Classes: []transport.Class{transport.RedirectHint}})
@@ -955,34 +955,72 @@ func TestRenewalFallsBackOnVersion1Link(t *testing.T) {
 	}
 }
 
-// TestRenewalInflightBound: a slow consensus (every proposal takes 900 ms,
-// launches come every 375 ms) fills the two in-flight slots, further
-// launches are skipped and counted, no more than two proposals ever run at
-// once, and the node keeps renewing and never fences.
-func TestRenewalInflightBound(t *testing.T) {
-	ttl := 1500 * time.Millisecond
-	core := &fakeCore{role: "leader", delay: 900 * time.Millisecond}
+// slowRenewals starts a leader whose every proposal takes latency, at a
+// 1.5 s ttl: a launch every 375 ms, so three ticks are 1,125 ms.
+func slowRenewals(t *testing.T, latency time.Duration) (*Service, *fakeCore, *fakeSessions) {
+	t.Helper()
+	core := &fakeCore{role: "leader", delay: latency}
 	sessions := newFakeSessions()
-	s, err := New(Options{Node: "me", Core: core, Machine: consensus.NewMachine(), Sessions: sessions, TTL: ttl, TakeoverTimeout: time.Second, Logger: quiet})
+	s, err := New(Options{Node: "me", Core: core, Machine: consensus.NewMachine(), Sessions: sessions, TTL: 1500 * time.Millisecond, TakeoverTimeout: time.Second, Logger: quiet})
 	if err != nil {
 		t.Fatal(err)
 	}
 	s.Start()
 	t.Cleanup(s.Stop)
-	time.Sleep(2 * ttl)
+	return s, core, sessions
+}
+
+// TestRenewalInflightBound: renewals slower than three ticks (1,200 ms
+// against launches every 375 ms) fill the in-flight slots, further launches
+// are skipped and counted, and no more than renewInflightMax proposals ever
+// run at once.
+func TestRenewalInflightBound(t *testing.T) {
+	s, core, _ := slowRenewals(t, 1200*time.Millisecond)
+	time.Sleep(3 * time.Second)
 	st := s.LivenessStats()
 	if st.RenewSkipped < 1 {
-		t.Fatalf("no launch skipped with a 900 ms consensus: %+v", st)
-	}
-	if st.RenewOK < 4 {
-		t.Fatalf("renewals over two ttls: %d: %+v", st.RenewOK, st)
-	}
-	if sessions.fenceCount() != 0 || st.Fenced {
-		t.Fatalf("fenced: %+v", st)
+		t.Fatalf("no launch skipped with a 1,200 ms consensus: %+v", st)
 	}
 	if m := core.maxConcurrent.Load(); m > renewInflightMax {
 		t.Fatalf("%d proposals ran at once, bound is %d", m, renewInflightMax)
 	}
+	if st.RenewPeak != 3 {
+		t.Fatalf("in-flight peak %d, want 3", st.RenewPeak)
+	}
+}
+
+// TestSlowRenewalsInsideThreeTicksNeverFence: renewals that take 1,000 ms,
+// under three ticks, are never skipped and the node never fences.
+func TestSlowRenewalsInsideThreeTicksNeverFence(t *testing.T) {
+	s, _, sessions := slowRenewals(t, 1000*time.Millisecond)
+	time.Sleep(3 * time.Second)
+	st := s.LivenessStats()
+	if sessions.fenceCount() != 0 || st.Fenced {
+		t.Fatalf("fenced with renewals inside three ticks: %+v", st)
+	}
+	if st.RenewSkipped != 0 {
+		t.Fatalf("%d launches skipped with renewals inside three ticks", st.RenewSkipped)
+	}
+	if st.RenewOK < 4 {
+		t.Fatalf("renewals over two ttls: %d", st.RenewOK)
+	}
+}
+
+// TestRenewalLatencyToleranceIsThreeTicks pins the boundary from both sides:
+// 1,050 ms renewals keep the node unfenced over two ttls, 1,250 ms ones fence
+// it within three.
+func TestRenewalLatencyToleranceIsThreeTicks(t *testing.T) {
+	t.Run("1050ms", func(t *testing.T) {
+		s, _, sessions := slowRenewals(t, 1050*time.Millisecond)
+		time.Sleep(3 * time.Second)
+		if sessions.fenceCount() != 0 {
+			t.Fatalf("fenced with 1,050 ms renewals: %+v", s.LivenessStats())
+		}
+	})
+	t.Run("1250ms", func(t *testing.T) {
+		_, _, sessions := slowRenewals(t, 1250*time.Millisecond)
+		waitFor(t, "a fence with 1,250 ms renewals", 4500*time.Millisecond, func() bool { return sessions.fenceCount() > 0 })
+	})
 }
 
 // TestRenewalWarnsBeforeFencing: a cut-off node counts a failure streak
@@ -1159,8 +1197,8 @@ func (f *fakeTransport) Peers() []transport.PeerInfo {
 	return out
 }
 
-// TestFenceDeferredOnlyWhileLeaderlessWithQuorum: the fence rule's matrix
-// (WI 1341). A lapsed record fences unless the group has no leader and this
+// TestFenceDeferredOnlyWhileLeaderlessWithQuorum: the fence rule's matrix.
+// A lapsed record fences unless the group has no leader and this
 // node plus the peers it can reach are a strict majority.
 func TestFenceDeferredOnlyWhileLeaderlessWithQuorum(t *testing.T) {
 	cases := []struct {
@@ -1355,9 +1393,11 @@ func TestFreshLeaderWaitsATtlBeforeAdopting(t *testing.T) {
 	if n := pending(); n != 1 {
 		t.Fatalf("adopted %d leases of an unreachable owner inside the grace (want 1)", n)
 	}
+	// The proposal above is dropped, unapplied; the leader may propose again.
 	s.mu.Lock()
 	s.pending = nil
 	s.mu.Unlock()
+	s.declaring.Delete("dead")
 	tr.up, tr.down = []string{"dead"}, nil
 	s.leaderSince.Store(now.Add(-ttl).UnixNano()) // led for exactly a ttl: the control
 	s.adopt()

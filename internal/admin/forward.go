@@ -115,6 +115,9 @@ func (s *Server) forward(w *statusWriter, r *http.Request, owner string, body []
 	}
 	n.detail["forward"] = fe.Outcome
 	held := HeldElsewhere(r.PathValue("clientId"), owner)
+	if r.PathValue("clientId") == "" {
+		held = &Error{Status: http.StatusConflict, Owner: owner, Detail: "node " + owner + " leads; act on that node"}
+	}
 	switch fe.Outcome {
 	case ForwardTooLarge:
 		writeProblem(w, &Error{Status: http.StatusBadGateway, Owner: owner,
@@ -129,10 +132,10 @@ func (s *Server) forward(w *statusWriter, r *http.Request, owner string, body []
 }
 
 // ServeForwarded serves a request another node forwarded to this one, the
-// owner of the client it acts on: through the same scope check, handler and
-// audit as a request over HTTP, as the principal that authenticated there.
-// Only the client routes are served; any other is refused, since the
-// principal is not authenticated here.
+// owner of the client it acts on or the leader: through the same scope
+// check, handler and audit as a request over HTTP, as the principal that
+// authenticated there. Only the forwardable routes are served; any other is
+// refused, since the principal is not authenticated here.
 func (s *Server) ServeForwarded(ctx context.Context, from string, req ForwardRequest) ForwardAnswer {
 	scopes := map[Scope]bool{}
 	for _, sc := range req.Principal.Scopes {
@@ -174,7 +177,7 @@ func (s *Server) refuseForwarded(from string, req ForwardRequest, p Principal) F
 	}
 	s.backend.Audit(AuditEvent{Actor: actor, Action: "admin.forward.refused", Target: req.Method + " " + req.Path, Outcome: "denied",
 		Detail: map[string]string{"request": req.Request, "remote": from, "forwardedFrom": from, "credential": p.Method}}, false)
-	e := &Error{Status: http.StatusForbidden, Detail: "a forwarded request may act only on a client: " + req.Method + " " + req.Path + " is not served for another node"}
+	e := &Error{Status: http.StatusForbidden, Detail: "a forwarded request may act only on a client or remove a member: " + req.Method + " " + req.Path + " is not served for another node"}
 	body, _ := json.Marshal(Problem{Type: "about:blank", Title: http.StatusText(e.Status), Status: e.Status, Detail: e.Detail})
 	return ForwardAnswer{Status: e.Status, ContentType: "application/problem+json", Body: body}
 }

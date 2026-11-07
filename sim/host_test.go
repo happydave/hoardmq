@@ -7,11 +7,11 @@ import (
 	"time"
 )
 
-// TestHostIntervalAnswersWhyTheProcessStopped is the question the work item
-// asks: given an interval in which the process was not running, say how much
-// of it was the machine waiting on io, how much on cpu, and how much on
-// neither. Until this existed, three published rounds reasoned "not GC,
-// therefore starvation" with disk never ruled in or out.
+// TestHostIntervalAnswersWhyTheProcessStopped is the question the host
+// figures exist to answer: given an interval in which the process was not
+// running, say how much of it was the machine waiting on io, how much on cpu,
+// and how much on neither. Until this existed, three published rounds
+// reasoned "not GC, therefore starvation" with disk never ruled in or out.
 func TestHostIntervalAnswersWhyTheProcessStopped(t *testing.T) {
 	base := time.Now()
 	prev := hostSnapshot{At: base, PSIOK: true}

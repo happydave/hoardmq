@@ -2,6 +2,7 @@ package replication
 
 import (
 	"fmt"
+	"maps"
 	"math/rand"
 	"os"
 	"slices"
@@ -32,6 +33,8 @@ func searchDefect(t *testing.T) func(*Options) {
 			o.HandOverNoteOverwritten = true
 		case "answer-anywhere":
 			o.AnswerHandOverAnywhere = true
+		case "fill-only":
+			o.FillOnlyMerge = true
 		default:
 			t.Fatalf("HOARDMQ_RETAINED_SEARCH_DEFECT: unknown %q", d)
 		}
@@ -171,6 +174,9 @@ func retainedSequence(t *testing.T, seed int64) {
 		traceMu.Unlock()
 	}
 	if os.Getenv("HOARDMQ_RETAINED_TRACE") != "" {
+		// The tracer reads its own copy: the sequence removes cleared topics
+		// from acked while it runs.
+		traced := maps.Clone(acked)
 		stop := make(chan struct{})
 		done := make(chan struct{})
 		go func() {
@@ -178,7 +184,7 @@ func retainedSequence(t *testing.T, seed int64) {
 			last := map[string]string{}
 			for {
 				for _, n := range names {
-					for tp, payload := range acked {
+					for tp, payload := range traced {
 						st := ""
 						if ownHolds(h, n, tp) == payload {
 							st += "L"
@@ -201,6 +207,33 @@ func retainedSequence(t *testing.T, seed int64) {
 		}()
 		t.Cleanup(func() { close(stop); <-done })
 	}
+	// cleared is each topic a client cleared, acknowledged, with the message
+	// it held before: no live leader may serve that message again.
+	cleared := map[string]string{}
+	// refused is each topic whose clear the leader refused. A barrier refuses
+	// after the leader applied the write, so the clear may have taken effect:
+	// the old message may be held or gone, and the check accepts either.
+	// Each is printed with its error and how it ended.
+	type refusal struct{ old, leader, err string }
+	refused := map[string]refusal{}
+	defer func() {
+		for _, tp := range slices.Sorted(maps.Keys(refused)) {
+			r := refused[tp]
+			var at []string
+			for _, n := range live {
+				if ownHolds(h, n, tp) == r.old {
+					at = append(at, n+" own")
+				}
+				if replicaHolds(h, n, tp) == r.old {
+					at = append(at, n+" replica")
+				}
+			}
+			t.Logf("seed %d: the clear of %s at %s was refused (%s); the old message is held at %v", seed, tp, r.leader, r.err, at)
+		}
+		if len(refused) > 0 {
+			t.Logf("seed %d: %d refused clears, each accepted held or gone", seed, len(refused))
+		}
+	}()
 	check := func(when string) {
 		var missing []string
 		deadline := time.Now().Add(2 * time.Second)
@@ -216,6 +249,12 @@ func retainedSequence(t *testing.T, seed int64) {
 				}
 				if !held {
 					missing = append(missing, tp)
+				}
+			}
+			for tp, old := range cleared {
+				leader := cur.Shards[shardmap.ShardOf("default", tp, shards)].Leader
+				if slices.Contains(live, leader) && ownHolds(h, leader, tp) == old {
+					missing = append(missing, tp+" (cleared, served again)")
 				}
 			}
 			if len(missing) == 0 || time.Now().After(deadline) {
@@ -288,7 +327,28 @@ func retainedSequence(t *testing.T, seed int64) {
 			mark(fmt.Sprintf("lift %s->%s", f[0], f[1]))
 		}
 		settle()
-		check(fmt.Sprintf("after v%d", version))
 		cur = m
+		if step == 0 {
+			// A client clears one topic of each shard at its leader under the
+			// first map change, with that change's faults just lifted: a copy
+			// a fault left behind is older than the clear.
+			for s := 0; s < shards; s++ {
+				tp := topicIn2(shards, s, 1)
+				old, ok := acked[tp]
+				if !ok || !slices.Contains(live, cur.Shards[s].Leader) {
+					continue
+				}
+				err := writeRetained(h, cur.Shards[s].Leader, tp, "")
+				delete(acked, tp)
+				if err == nil {
+					cleared[tp] = old
+					mark(fmt.Sprintf("cleared %s at %s", tp, cur.Shards[s].Leader))
+				} else {
+					refused[tp] = refusal{old, cur.Shards[s].Leader, err.Error()}
+					mark(fmt.Sprintf("clear of %s at %s refused: %v", tp, cur.Shards[s].Leader, err))
+				}
+			}
+		}
+		check(fmt.Sprintf("after v%d", version))
 	}
 }

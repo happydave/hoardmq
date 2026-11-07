@@ -154,13 +154,12 @@ func warm(t *testing.T, p *Plane, wire *reorderLink, sink *fakeSink) {
 	waitDelivered(t, sink, 1)
 }
 
-// TestOutOfOrderForwardRefusesADeliveredPublish is WI 1708's deciding test:
-// two forwards are sent in order, arrive out of order, and both are delivered
-// — nothing is lost — yet the first publish's barrier refuses, because the
-// receiver read the second frame's sequence as a hole. The ordering is made
-// at the wire, below the sender, so the sender's fix does not remove it: this
-// is the receiver's rule, which is correct for a hole it cannot tell from a
-// loss.
+// TestOutOfOrderForwardRefusesADeliveredPublish: two forwards are sent in
+// order, arrive out of order, and both are delivered — nothing is lost — yet
+// the first publish's barrier refuses, because the receiver read the second
+// frame's sequence as a hole. The ordering is made at the wire, below the
+// sender, so the sender's fix does not remove it: this is the receiver's rule,
+// which is correct for a hole it cannot tell from a loss.
 func TestOutOfOrderForwardRefusesADeliveredPublish(t *testing.T) {
 	send, _, wire, sink, m := reorderPair(t)
 	warm(t, send, wire, sink)

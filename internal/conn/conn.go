@@ -56,6 +56,10 @@ type Core interface {
 	// rebuilt from a replica would deliver it a second time.
 	Pubrec(c *Conn, id uint16, reason packet.ReasonCode) (packet.ReasonCode, bool)
 	Pubcomp(c *Conn, id uint16, reason packet.ReasonCode)
+	// InboundOpen reports whether the client's session holds the inbound
+	// QoS 2 identifier open: a PUBLISH under it is a retransmission the core
+	// answers itself.
+	InboundOpen(c *Conn, id uint16) bool
 	// Subscribe receives only the filters that passed validation,
 	// authorization and capability checks, and returns one reason per filter
 	// in the same order.
@@ -69,6 +73,10 @@ type Core interface {
 	// server's code. willWanted reports whether the Will should be published
 	// (false after a normal client DISCONNECT).
 	Disconnect(c *Conn, graceful bool, reason packet.ReasonCode, willWanted bool)
+	// Reidentify gives the session attached to c the identity its Will and
+	// queue bound use from now on, when a re-decision is about to close c.
+	// A session no longer attached to c is left as it is.
+	Reidentify(c *Conn, id auth.Identity)
 }
 
 // ConnectResult is the core's answer to a CONNECT.
@@ -83,6 +91,9 @@ type Options struct {
 	Capabilities   packet.Capabilities
 	MaxPacketSize  uint32 // inbound limit handed to the decoder and advertised
 	ReceiveMaximum uint16 // inbound unacknowledged QoS 1 and 2 publishes
+	// MaxInflight bounds the QoS 1 and 2 publishes in flight to the client,
+	// below what its Receive Maximum allows; 0 leaves the Receive Maximum.
+	MaxInflight uint16
 	// MaxTopicAliasBytes bounds the topic bytes a connection's inbound
 	// aliases hold; 0 is unlimited.
 	MaxTopicAliasBytes int
@@ -197,6 +208,8 @@ type Conn struct {
 	assignedID            bool
 	identity              auth.Identity
 	keepAlive             uint16
+	requestedKeepAlive    uint16
+	cleanStart            bool
 	connectPkt            *packet.Connect
 	established           bool
 	sessionExpiryOverride *uint32
@@ -205,6 +218,7 @@ type Conn struct {
 	clientMaxPacket uint32
 	clientAliasMax  uint16
 	clientRecvMax   uint16
+	sendMax         int // the most QoS 1 and 2 publishes in flight to the client
 
 	mu          sync.Mutex
 	quota       int
@@ -223,6 +237,7 @@ type Conn struct {
 	authReq    *auth.Request
 	authMethod string
 	reauth     auth.Exchange
+	reauthBy   string
 	// chainAdmitted says the chain's allow admitted the connection, so a
 	// re-decision re-runs the chain as well as the certificate
 	// authenticators; recheck is the re-decision's timer, under mu.
@@ -242,7 +257,7 @@ type Conn struct {
 
 	// acceptedAt is when the connection was handed to this layer;
 	// prebuffered records that its CONNECT was already in the socket when
-	// the first read ran — it waited in the listen backlog (WI 1338).
+	// the first read ran — it waited in the listen backlog.
 	acceptedAt  time.Time
 	prebuffered bool
 
@@ -309,6 +324,16 @@ func (c *Conn) RemoteAddr() net.Addr { return c.net.RemoteAddr() }
 
 // Listener is the name of the listener that accepted the connection.
 func (c *Conn) Listener() string { return c.listener }
+
+// KeepAlive is the keep alive in force, in seconds: the client's, or the
+// server's maximum when it replaced the client's (Server Keep Alive).
+func (c *Conn) KeepAlive() uint16 { return c.keepAlive }
+
+// RequestedKeepAlive is the keep alive the client's CONNECT asked for.
+func (c *Conn) RequestedKeepAlive() uint16 { return c.requestedKeepAlive }
+
+// CleanStart is the CONNECT's Clean Start (Clean Session before MQTT 5.0).
+func (c *Conn) CleanStart() bool { return c.cleanStart }
 
 // SessionExpiryOverride is the Session Expiry Interval a level-5 client sent
 // on DISCONNECT, or nil.
@@ -406,7 +431,8 @@ func (c *Conn) handshake() bool {
 	if p.ReceiveMaximum != nil {
 		c.clientRecvMax = *p.ReceiveMaximum
 	}
-	c.quota = int(c.clientRecvMax)
+	c.sendMax = sendQuota(c.clientRecvMax, c.opts.MaxInflight)
+	c.quota = c.sendMax
 
 	var mech auth.Mechanism
 	if p.AuthenticationMethod != nil {
@@ -452,8 +478,9 @@ func (c *Conn) handshake() bool {
 		req.CertChain, req.CertCN = chain, chain[0].Subject.CommonName
 	}
 	c.authReq = req
-	certs := c.opts.CertificateAuthenticators.Authenticate(context.Background(), req)
+	certs, certsBy := c.opts.CertificateAuthenticators.Admit(context.Background(), req)
 	var result auth.Result
+	var admittedBy string
 	var final []byte
 	// held is the allow the session holds, re-decided once the connection is
 	// established.
@@ -476,6 +503,7 @@ func (c *Conn) handshake() bool {
 			return false
 		}
 		result, final = auth.Result{Decision: auth.Allow, Username: step.Username, Attributes: step.Attributes}, step.Data
+		admittedBy = auth.AdmitterOf(mech)
 		if certs.Decision == auth.Allow {
 			held = &certs
 		}
@@ -484,24 +512,19 @@ func (c *Conn) handshake() bool {
 			c.refuseAuth(packet.NotAuthorized, certs.Reason, nil)
 			return false
 		}
-		chain := c.opts.Authenticators.Authenticate(context.Background(), req)
+		chain, chainBy := c.opts.Authenticators.Admit(context.Background(), req)
 		var ok bool
 		if result, ok = admission(certs, chain, req, c.opts.Anonymous); !ok {
 			c.refuseAuth(refusalCode(req), result.Reason, nil)
 			return false
 		}
+		admittedBy = admitter(certs, chain, certsBy, chainBy)
 		c.chainAdmitted = chain.Decision == auth.Allow
 		if result.Decision == auth.Allow {
 			held = &result
 		}
 	}
-	c.identity = auth.Identity{Namespace: c.opts.Namespace, ClientID: c.clientID, Username: connect.Username, CertCN: req.CertCN, Attributes: result.Attributes}
-	switch {
-	case result.Username != "":
-		c.identity.Username = result.Username
-	case !connect.HasUsername && req.CertCN != "":
-		c.identity.Username = req.CertCN
-	}
+	c.identity = identityOf(c.opts.Namespace, c.clientID, req, result, admittedBy)
 	if c.opts.BannedPrincipal != nil {
 		if kind, banned := c.opts.BannedPrincipal(c.clientID, c.identity.Username); banned {
 			c.refuseBanned(c.clientID, kind)
@@ -510,7 +533,7 @@ func (c *Conn) handshake() bool {
 	}
 
 	// Keep alive.
-	c.keepAlive = connect.KeepAlive
+	c.keepAlive, c.requestedKeepAlive, c.cleanStart = connect.KeepAlive, connect.KeepAlive, connect.CleanStart
 	serverKeepAlive := false
 	if max := c.opts.MaxKeepAlive; max != 0 && (c.keepAlive == 0 || c.keepAlive > max) {
 		c.keepAlive, serverKeepAlive = max, true
@@ -518,7 +541,7 @@ func (c *Conn) handshake() bool {
 
 	// A client that has already closed the connection cannot receive the
 	// CONNACK, and acquiring its lease here would take the lease from the
-	// session it may have opened on another node since (WI 1485).
+	// session it may have opened on another node since.
 	if g, ok := c.net.(interface{ PeerGone() bool }); ok && g.PeerGone() {
 		if c.opts.Metrics != nil {
 			c.opts.Metrics.Add("hoardmq_connects_abandoned_total", map[string]string{"listener": c.listener}, 1)
@@ -618,6 +641,16 @@ func assignClientID() string {
 	return "hoardmq-" + base64.RawURLEncoding.EncodeToString(b[:])
 }
 
+// afterRefusalConnack, when set by a test, runs right after a refused
+// CONNECT's CONNACK is written, to hold the connection there.
+var afterRefusalConnack func()
+
+func refusalWritten() {
+	if afterRefusalConnack != nil {
+		afterRefusalConnack()
+	}
+}
+
 // refuse answers a CONNACK with the reason (mapped for 3.x) and marks the
 // connection refused.
 func (c *Conn) refuse(reason packet.ReasonCode) { c.refuseTo(reason, nil) }
@@ -629,9 +662,10 @@ func (c *Conn) refuseTo(reason packet.ReasonCode, reference *string) {
 	if c.version == packet.V5 {
 		ack.Properties.ServerReference = reference
 	}
-	c.writeDirect(ack)
-	c.log.Debug("connect refused", "reason", reason.String(), "client", c.clientID)
 	c.countRefusal(reason)
+	c.writeDirect(ack)
+	refusalWritten()
+	c.log.Debug("connect refused", "reason", reason.String(), "client", c.clientID)
 	c.auditFailure(reason, "")
 }
 
@@ -640,21 +674,25 @@ func (c *Conn) refuseTo(reason packet.ReasonCode, reference *string) {
 // closed without a CONNACK (MQTT 3.1.1 § 3.2.2.3).
 func (c *Conn) refuseRate(clientID, limit string) {
 	reason := packet.ConnectionRateExceeded
-	switch {
-	case limit == LimitOverload:
-		// The node is shedding load: Server busy at level 5, Server
-		// unavailable at levels 3 and 4.
+	if limit == LimitOverload {
 		reason = packet.ServerBusy
-		c.writeDirect(&packet.Connack{ReasonCode: reason})
-	case c.version == packet.V5:
-		c.writeDirect(&packet.Connack{ReasonCode: reason})
 	}
-	c.clientID = clientID
-	c.log.Debug("connect refused", "reason", reason.String(), "limit", limit, "client", clientID)
 	if c.opts.Metrics != nil {
 		c.opts.Metrics.Add("hoardmq_connect_rate_refused_total", map[string]string{"listener": c.listener, "limit": limit}, 1)
 	}
 	c.countRefusal(reason)
+	switch {
+	case limit == LimitOverload:
+		// The node is shedding load: Server busy at level 5, Server
+		// unavailable at levels 3 and 4.
+		c.writeDirect(&packet.Connack{ReasonCode: reason})
+		refusalWritten()
+	case c.version == packet.V5:
+		c.writeDirect(&packet.Connack{ReasonCode: reason})
+		refusalWritten()
+	}
+	c.clientID = clientID
+	c.log.Debug("connect refused", "reason", reason.String(), "limit", limit, "client", clientID)
 	c.auditFailure(reason, "rate: "+limit)
 }
 
@@ -663,12 +701,13 @@ func (c *Conn) refuseRate(clientID, limit string) {
 // for it, the connection is closed without a CONNACK.
 func (c *Conn) refuseWillTopic(clientID, why string) {
 	reason := packet.TopicNameInvalid
+	c.countRefusal(reason)
 	if c.version == packet.V5 {
 		c.writeDirect(&packet.Connack{ReasonCode: reason})
+		refusalWritten()
 	}
 	c.clientID = clientID
 	c.log.Debug("connect refused", "reason", reason.String(), "will", why, "client", clientID)
-	c.countRefusal(reason)
 	c.auditFailure(reason, "will: "+why)
 }
 
@@ -682,13 +721,14 @@ func (c *Conn) refuseBanned(clientID, kind string) {
 	if c.version != packet.V5 {
 		reason = packet.NotAuthorized
 	}
-	c.writeDirect(&packet.Connack{ReasonCode: reason})
-	c.clientID = clientID
-	c.log.Debug("connect refused", "reason", "banned", "kind", kind, "client", clientID)
 	if c.opts.Metrics != nil {
 		c.opts.Metrics.Add("hoardmq_connects_banned_total", map[string]string{"listener": c.listener, "kind": kind}, 1)
 	}
 	c.countRefusal(packet.Banned)
+	c.writeDirect(&packet.Connack{ReasonCode: reason})
+	refusalWritten()
+	c.clientID = clientID
+	c.log.Debug("connect refused", "reason", "banned", "kind", kind, "client", clientID)
 	c.auditFailure(packet.Banned, "ban: "+kind)
 }
 
@@ -801,9 +841,10 @@ func (c *Conn) refuseAuth(code packet.ReasonCode, reason string, method *string)
 		m := *method
 		ack.Properties.AuthenticationMethod = &m
 	}
-	c.writeDirect(ack)
-	c.log.Debug("connect refused", "reason", code.String(), "client", c.clientID)
 	c.countRefusal(code)
+	c.writeDirect(ack)
+	refusalWritten()
+	c.log.Debug("connect refused", "reason", code.String(), "client", c.clientID)
 	c.auditFailure(code, reason)
 }
 
@@ -826,6 +867,18 @@ func admission(certs, chain auth.Result, req *auth.Request, anonymous bool) (aut
 	}
 	verifiedCert := req.CertCN != "" && !req.HasUsername && !req.HasPassword
 	return chain, verifiedCert || anonymous && !req.HasCredentials()
+}
+
+// admitter names the module whose allow admission keeps: the authentication
+// chain's when it allowed, else the certificate chain's, else none.
+func admitter(certs, chain auth.Result, certsBy, chainBy string) string {
+	switch {
+	case chain.Decision == auth.Allow:
+		return chainBy
+	case certs.Decision == auth.Allow:
+		return certsBy
+	}
+	return ""
 }
 
 // mechanism finds an offered method.
@@ -913,7 +966,7 @@ func (c *Conn) handleAuth(a *packet.Auth) (packet.ReasonCode, bool, bool) {
 			c.Close(packet.NotAuthorized)
 			return packet.NotAuthorized, true, false
 		}
-		c.reauth = mech.Begin(context.Background(), c.authMethod, c.authReq)
+		c.reauth, c.reauthBy = mech.Begin(context.Background(), c.authMethod, c.authReq), auth.AdmitterOf(mech)
 		step = c.reauth.Step(a.Properties.AuthenticationData)
 	case a.ReasonCode == packet.ContinueAuthentication && c.reauth != nil:
 		step = c.reauth.Step(a.Properties.AuthenticationData)
@@ -936,6 +989,14 @@ func (c *Conn) handleAuth(a *packet.Auth) (packet.ReasonCode, bool, bool) {
 			return packet.NotAuthorized, true, false
 		}
 		c.countExchange(method, true)
+		next := identityOf(c.identity.Namespace, c.clientID, c.authReq,
+			auth.Result{Decision: auth.Allow, Username: step.Username, Attributes: step.Attributes}, c.reauthBy)
+		if identityChanged(c.identity, next) {
+			c.auditFailure(packet.AdministrativeAction, "re-authenticated with another identity")
+			c.core.Reidentify(c, next)
+			c.Close(packet.AdministrativeAction)
+			return packet.AdministrativeAction, true, false
+		}
 		_ = c.Send(&packet.Auth{ReasonCode: packet.Success, Properties: packet.Properties{AuthenticationMethod: &method, AuthenticationData: step.Data}})
 		return 0, false, false
 	}
@@ -975,31 +1036,96 @@ func (c *Conn) scheduleRecheck(expires time.Time) {
 
 // redecide makes the held decision again from what the client presented:
 // the certificate authenticators, and the chain when its allow admitted the
-// connection. A decision that still admits is held again; anything else ends
-// the session with 0x87.
+// connection. A decision that still admits with the identity the connection
+// has is held again. One that admits with another identity ends the session
+// with 0x98, so the client reconnects as it now is, rather than keep rights
+// the decision no longer gives; anything else ends it with 0x87. Either way
+// the session's Will is authorized as the decision left it, never with the
+// replaced identity's attributes.
 func (c *Conn) redecide() {
 	ctx, cancel := context.WithTimeout(context.Background(), c.opts.ConnectTimeout)
 	defer cancel()
-	certs := c.opts.CertificateAuthenticators.Authenticate(ctx, c.authReq)
+	certs, certsBy := c.opts.CertificateAuthenticators.Admit(ctx, c.authReq)
 	result, ok := certs, certs.Decision != auth.Deny
+	var chain auth.Result
+	var chainBy string
 	if ok && c.chainAdmitted {
-		result, ok = admission(certs, c.opts.Authenticators.Authenticate(ctx, c.authReq), c.authReq, false)
+		chain, chainBy = c.opts.Authenticators.Admit(ctx, c.authReq)
+		result, ok = admission(certs, chain, c.authReq, false)
+	}
+	outcome := "refused"
+	var next auth.Identity
+	if ok {
+		outcome = "allowed"
+		// A mechanism's identity came from its exchange, which only the
+		// client's re-authentication runs again; this decision built none.
+		if c.authMethod == "" {
+			next = identityOf(c.identity.Namespace, c.clientID, c.authReq, result, admitter(certs, chain, certsBy, chainBy))
+			if identityChanged(c.identity, next) {
+				outcome = "changed"
+			}
+		}
 	}
 	if c.opts.Metrics != nil {
-		outcome := "refused"
-		if ok {
-			outcome = "allowed"
-		}
 		c.opts.Metrics.Add("hoardmq_auth_rechecks_total", map[string]string{"outcome": outcome}, 1)
 	}
-	if !ok {
+	switch outcome {
+	case "refused":
 		c.auditFailure(packet.NotAuthorized, "re-decided: "+result.Reason)
+		c.core.Reidentify(c, principalOnly(c.identity))
 		c.Close(packet.NotAuthorized)
+		return
+	case "changed":
+		c.auditFailure(packet.AdministrativeAction, "re-decided with another identity")
+		if next.Username == c.identity.Username {
+			c.core.Reidentify(c, next)
+		} else {
+			c.core.Reidentify(c, principalOnly(c.identity))
+		}
+		c.Close(packet.AdministrativeAction)
 		return
 	}
 	if result.Decision == auth.Allow {
 		c.scheduleRecheck(result.Expires)
 	}
+}
+
+// identityOf is the identity an admission gives: the result's username, else
+// the certificate's common name when the client sent no username, else the
+// CONNECT's; the kept result's attributes; and the module that admitted.
+func identityOf(ns, clientID string, req *auth.Request, result auth.Result, admittedBy string) auth.Identity {
+	id := auth.Identity{Namespace: ns, ClientID: clientID, Username: req.Username, CertCN: req.CertCN,
+		Attributes: result.Attributes, AdmittedBy: admittedBy}
+	switch {
+	case result.Username != "":
+		id.Username = result.Username
+	case !req.HasUsername && req.CertCN != "":
+		id.Username = req.CertCN
+	}
+	return id
+}
+
+// identityChanged decides whether a re-decision's identity differs from the
+// connection's in anything an authorizer reads: the principal, the admitting
+// module or an attribute. An empty and an absent attribute map are equal.
+func identityChanged(cur, next auth.Identity) bool {
+	if cur.Username != next.Username || cur.CertCN != next.CertCN || cur.AdmittedBy != next.AdmittedBy ||
+		len(cur.Attributes) != len(next.Attributes) {
+		return true
+	}
+	for k, v := range cur.Attributes {
+		if w, ok := next.Attributes[k]; !ok || w != v {
+			return true
+		}
+	}
+	return false
+}
+
+// principalOnly is id without its attributes or admitting module: what a
+// session's Will is authorized as once a re-decision refused the connection
+// or found another principal.
+func principalOnly(id auth.Identity) auth.Identity {
+	return auth.Identity{Namespace: id.Namespace, ClientID: id.ClientID, Username: id.Username, CertCN: id.CertCN}
 }
 
 // stopRecheck disarms the re-decision when the connection ends.
@@ -1049,8 +1175,20 @@ func (c *Conn) readLoop(ctx context.Context) (packet.ReasonCode, bool) {
 		}
 		c.armKeepAlive()
 		c.traceRecord(trace.In, p)
+		pub, isPub := p.(*packet.Publish)
+		wireTopic := 0
+		if isPub {
+			wireTopic = len(pub.Topic)
+			if r, ok := c.checkPublish(pub); !ok {
+				return r, false
+			}
+		}
 		if c.opts.Hooks != nil {
-			out := c.opts.Hooks.Inbound(context.Background(), c.info(), p)
+			out, by := c.opts.Hooks.Inbound(context.Background(), c.info(), p)
+			if refusalIgnored(p, out, func(id uint16) bool { return c.core.InboundOpen(c, id) }) {
+				c.ignoredRefusal(pub, out, by)
+				out = hook.OK
+			}
 			switch out.Action {
 			case hook.Drop:
 				if _, ok := p.(*packet.Publish); ok && c.opts.Metrics != nil {
@@ -1065,14 +1203,16 @@ func (c *Conn) readLoop(ctx context.Context) (packet.ReasonCode, bool) {
 				return out.Reason, false
 			}
 		}
-		pub, isPub := p.(*packet.Publish)
 		if isPub {
-			c.pubBytes.Add(int64(len(pub.Topic) + len(pub.Payload)))
+			c.pubBytes.Add(int64(wireTopic + len(pub.Payload)))
 		}
 		reason, done, graceful := c.dispatch(p)
 		if done {
 			return reason, graceful
 		}
+		// A sync or a barrier wait inside dispatch is the broker's time, not
+		// the client's silence.
+		c.armKeepAlive()
 		if isPub {
 			c.throttle(pub)
 		}
@@ -1134,6 +1274,29 @@ func (c *Conn) Shed(d time.Duration) { c.shed.Store(int64(d)) }
 
 // ShedPause is the pause the read loop takes now.
 func (c *Conn) ShedPause() time.Duration { return time.Duration(c.shed.Load()) }
+
+// refusalIgnored reports whether an inbound Drop or Disconnect is set aside:
+// it is for a QoS 2 PUBLISH whose identifier the session holds open. The core
+// answers that retransmission with the first attempt's verdict. An error
+// PUBREC would tell the client a delivered message was refused and leave the
+// identifier held, so its next message under it would be absorbed and never
+// delivered.
+func refusalIgnored(p packet.Packet, out hook.Outcome, open func(id uint16) bool) bool {
+	if out.Action != hook.Drop && out.Action != hook.Disconnect {
+		return false
+	}
+	pub, ok := p.(*packet.Publish)
+	return ok && pub.QoS == 2 && open(pub.PacketID)
+}
+
+// ignoredRefusal counts and logs an inbound refusal refusalIgnored set aside.
+func (c *Conn) ignoredRefusal(p *packet.Publish, out hook.Outcome, by string) {
+	if c.opts.Metrics != nil {
+		c.opts.Metrics.Add("hoardmq_inbound_refusals_ignored_total", map[string]string{"namespace": c.identity.Namespace}, 1)
+	}
+	c.log.Debug("inbound refusal of an open QoS 2 resend ignored", "module", by, "client", c.clientID,
+		"packetId", p.PacketID, "action", out.Action.String())
+}
 
 // dropInbound discards an intercepted packet. A QoS 1 or 2 PUBLISH is still
 // acknowledged, with 0x80, so the client does not resend it for ever.
@@ -1240,7 +1403,10 @@ func (c *Conn) dispatch(p packet.Packet) (reason packet.ReasonCode, done, gracef
 	return 0, false, false
 }
 
-func (c *Conn) handlePublish(p *packet.Publish) (packet.ReasonCode, bool) {
+// checkPublish validates a PUBLISH and resolves its topic alias, before the
+// inbound interceptors see it, so they see the topic it is routed on and an
+// alias it sets is kept even when they drop it.
+func (c *Conn) checkPublish(p *packet.Publish) (packet.ReasonCode, bool) {
 	caps := c.opts.Capabilities
 	if p.Retain && !caps.RetainAvailable {
 		return c.fail(packet.RetainNotSupported)
@@ -1287,6 +1453,10 @@ func (c *Conn) handlePublish(p *packet.Publish) (packet.ReasonCode, bool) {
 			p.Properties.TopicAlias = nil
 		}
 	}
+	return 0, true
+}
+
+func (c *Conn) handlePublish(p *packet.Publish) (packet.ReasonCode, bool) {
 	if p.QoS > 0 {
 		c.mu.Lock()
 		_, dup := c.inflightIn[p.PacketID]
@@ -1425,8 +1595,28 @@ func (c *Conn) handleUnsubscribe(u *packet.Unsubscribe) (packet.ReasonCode, bool
 	forward := &packet.Unsubscribe{PacketID: u.PacketID, Properties: u.Properties}
 	var indexes []int
 	for i, f := range u.Filters {
+		valid := topic.ValidateFilter(f) == ""
+		if valid && c.opts.Hooks != nil {
+			out := c.opts.Hooks.Unsubscribe(context.Background(), c.info(), f)
+			switch out.Action {
+			case hook.Drop:
+				reason := out.Reason
+				if !reason.IsError() {
+					reason = packet.UnspecifiedError
+				}
+				if c.version != packet.V5 {
+					// No reason code on UNSUBACK below 5: an
+					// acknowledgement would read as success.
+					return c.refuseClose(reason)
+				}
+				codes[i] = reason
+				continue
+			case hook.Disconnect:
+				return c.refuseClose(out.Reason)
+			}
+		}
 		switch {
-		case topic.ValidateFilter(f) != "":
+		case !valid:
 			codes[i] = packet.TopicFilterInvalid
 		case c.opts.Authorizers.Authorize(context.Background(), auth.Unsubscribe, innerFilter(f), &c.identity) != auth.Allow:
 			codes[i] = packet.NotAuthorized
@@ -1477,9 +1667,18 @@ func (c *Conn) refuseClose(reason packet.ReasonCode) (packet.ReasonCode, bool) {
 	return reason, false
 }
 
+// sendQuota is the most QoS 1 and 2 publishes in flight to a client: its
+// Receive Maximum, lowered to the broker's cap when one is set (0 is none).
+func sendQuota(recvMax, limit uint16) int {
+	if limit > 0 && limit < recvMax {
+		return int(limit)
+	}
+	return int(recvMax)
+}
+
 func (c *Conn) releaseQuota() {
 	c.mu.Lock()
-	if c.quota < int(c.clientRecvMax) {
+	if c.quota < c.sendMax {
 		c.quota++
 	}
 	c.mu.Unlock()
@@ -1502,6 +1701,32 @@ func (c *Conn) Send(p packet.Packet) error {
 	case <-c.writeDone:
 		return ErrClosed
 	}
+}
+
+// Offer queues a control packet only if the outbound queue has room, and
+// never waits: a full queue answers ErrBusy, and OnWritable follows once it
+// has drained to half, as for Deliver. For callers that hold a lock others
+// need while the client's socket may be stalled.
+func (c *Conn) Offer(p packet.Packet) error {
+	c.mu.Lock()
+	closed := c.closed
+	c.mu.Unlock()
+	if closed {
+		return ErrClosed
+	}
+	select {
+	case c.out <- p:
+		return nil
+	case <-c.writeClosing:
+		return ErrClosed
+	case <-c.writeDone:
+		return ErrClosed
+	default:
+	}
+	c.busy.Store(true)
+	// The write loop may have drained the queue before the mark was set.
+	c.writable()
+	return ErrBusy
 }
 
 // Deliver sends a PUBLISH to the client, applying the send quota for QoS 1
