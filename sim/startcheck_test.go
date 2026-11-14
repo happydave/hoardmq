@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
@@ -12,11 +13,11 @@ import (
 )
 
 func TestClientStartProblems(t *testing.T) {
-	want := clientStartWant{Clients: 100000, Sources: []string{"10.231.14.11", "10.231.14.12", "10.231.14.13", "10.231.14.14",
-		"10.231.14.15", "10.231.14.16", "10.231.14.17", "10.231.14.18"}}
+	want := clientStartWant{Clients: 100000, Sources: []string{"198.51.100.11", "198.51.100.12", "198.51.100.13", "198.51.100.14",
+		"198.51.100.15", "198.51.100.16", "198.51.100.17", "198.51.100.18"}}
 	base := func() clientStartFacts {
 		f := settledFacts()
-		f.SelfExe = "/home/notdave/hoardmq-clients/simclients"
+		f.SelfExe = filepath.Join(t.TempDir(), "simclients")
 		f.Procs = map[int]string{f.SelfPID: f.SelfExe, 1: "/usr/lib/systemd/systemd"}
 		f.Addrs = []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("192.0.2.137")}
 		for _, s := range want.Sources {
@@ -43,7 +44,7 @@ func TestClientStartProblems(t *testing.T) {
 			f.MemAvailableBytes = uint64(w.Clients)*w.BytesPerClient*3 - 1
 		}, "MemAvailable"},
 		{"loaded", func(f *clientStartFacts, _ *clientStartWant) { f.Load1 = clientMaxLoad1 + 0.01 }, "1-minute load"},
-		{"source missing", func(f *clientStartFacts, _ *clientStartWant) { f.Addrs = f.Addrs[:len(f.Addrs)-1] }, "10.231.14.18 is not on this host"},
+		{"source missing", func(f *clientStartFacts, _ *clientStartWant) { f.Addrs = f.Addrs[:len(f.Addrs)-1] }, "198.51.100.18 is not on this host"},
 		{"port budget one over", func(f *clientStartFacts, w *clientStartWant) {
 			// 8 sources: 112,936 clients is 14,117 per source against 28,232 / 2.
 			w.Clients = 8 * 14117
@@ -70,8 +71,8 @@ func TestClientStartProblems(t *testing.T) {
 }
 
 func TestSourcePresent(t *testing.T) {
-	addrs := []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("10.231.14.11")}
-	for s, want := range map[string]bool{"127.0.0.18": true, "10.231.14.11": true, "10.231.14.12": false, "gtr": false} {
+	addrs := []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("198.51.100.11")}
+	for s, want := range map[string]bool{"127.0.0.18": true, "198.51.100.11": true, "198.51.100.12": false, "host-a": false} {
 		if got := sourcePresent(s, addrs); got != want {
 			t.Errorf("%s: %v, want %v", s, got, want)
 		}

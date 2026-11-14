@@ -42,7 +42,7 @@ Out of scope:
 | Version | Supported |
 |---|---|
 | `main` | yes |
-| `v0.1.x`, the latest minor release line | yes |
+| `v0.2.x`, the latest minor release line | yes |
 
 Fixes go to `main` and to the latest minor release line. Older lines are not
 patched; upgrade to the latest release.

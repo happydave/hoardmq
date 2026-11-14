@@ -321,7 +321,10 @@ func TestANoteIsReadBeforeTheFirstMark(t *testing.T) {
 	}
 	k := key{"default", "x"}
 	n.svc.abandoned.note(k, "n8", n.svc.steady(), n.svc.o.TTL)
-	st, _, err := n.svc.fetchAbandoned(context.Background(), k, res.Epoch, false, nil, EmptyEvidence{}, "n9")
+	st, _, finish, err := n.svc.fetchAbandoned(context.Background(), k, res.Epoch, false, nil, EmptyEvidence{}, nil, "n9")
+	if finish != nil {
+		finish()
+	}
 	if err != nil || st == nil {
 		t.Fatalf("fetch: state %v, err %v; want the replica's copy", st != nil, err)
 	}

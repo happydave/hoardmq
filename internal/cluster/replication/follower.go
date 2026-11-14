@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -25,8 +26,13 @@ type follower struct {
 	state *store.State
 
 	// afterAppend, set only by tests, runs in apply between the record's append
-	// and its apply.
-	afterAppend func()
+	// and its apply; afterCopyCheck, between a lone session record's check for a
+	// held copy and its append.
+	afterAppend    func()
+	afterCopyCheck func()
+	// betweenSnapshotRecords, set only by tests, runs between two records of
+	// one snapshot's apply.
+	betweenSnapshotRecords func()
 
 	// lockHolds times what holds mu.
 	lockHolds lockHoldCounters
@@ -53,10 +59,7 @@ func newFollower(r *Replicator) (*follower, error) {
 func (f *follower) snapshot(kind int) *store.State {
 	f.mu.Lock()
 	defer f.unlock(kind, time.Now())
-	data, _ := json.Marshal(f.state)
-	out := store.NewState()
-	_ = json.Unmarshal(data, out)
-	return out
+	return copyState(f.state)
 }
 
 // checkpointState is the snapshot a checkpoint of the replica store writes. A
@@ -66,10 +69,79 @@ func (f *follower) snapshot(kind int) *store.State {
 func (f *follower) checkpointState(appended func() uint64) *store.State {
 	f.mu.Lock()
 	defer f.unlock(holdCheckpoint, time.Now())
-	data, _ := json.Marshal(f.state)
-	out := store.NewState()
-	_ = json.Unmarshal(data, out)
+	out := copyState(f.state)
 	out.At = appended()
+	return out
+}
+
+// copyState copies st sharing no slice or pointer with it, so the copy can be
+// encoded after mu is released while applies change st in place. A nil slice
+// stays nil and an empty one empty, so the copy encodes exactly as st does.
+func copyState(st *store.State) *store.State {
+	out := store.NewState()
+	out.Sessions = copyEach(st.Sessions, copySession)
+	out.Retained = copyEach(st.Retained, copyMessage)
+	out.RetainedVersions = slices.Clone(st.RetainedVersions)
+	out.RetainedTombstones = slices.Clone(st.RetainedTombstones)
+	out.Through = slices.Clone(st.Through)
+	out.At = st.At
+	return out
+}
+
+func copySession(ss *store.SessionState) *store.SessionState {
+	if ss == nil {
+		return nil
+	}
+	c := *ss
+	if ss.Will != nil {
+		w := *ss.Will
+		w.Message = copyMessage(w.Message)
+		c.Will = &w
+	}
+	c.Subscriptions = slices.Clone(ss.Subscriptions)
+	c.InboundQoS2 = slices.Clone(ss.InboundQoS2)
+	c.InboundAccepted = slices.Clone(ss.InboundAccepted)
+	c.Entries = copyEach(ss.Entries, func(e store.Entry) store.Entry {
+		e.Message = copyMessage(e.Message)
+		e.Identifiers = slices.Clone(e.Identifiers)
+		return e
+	})
+	c.Delivered = slices.Clone(ss.Delivered)
+	return &c
+}
+
+func copyMessage(m *message.Message) *message.Message {
+	if m == nil {
+		return nil
+	}
+	c := *m
+	c.Payload = slices.Clone(m.Payload)
+	c.PayloadFormat = copyPointer(m.PayloadFormat)
+	c.ContentType = copyPointer(m.ContentType)
+	c.ResponseTopic = copyPointer(m.ResponseTopic)
+	c.CorrelationData = slices.Clone(m.CorrelationData)
+	c.UserProperties = slices.Clone(m.UserProperties)
+	c.Forwards = slices.Clone(m.Forwards)
+	return &c
+}
+
+func copyPointer[T any](p *T) *T {
+	if p == nil {
+		return nil
+	}
+	v := *p
+	return &v
+}
+
+// copyEach copies s element by element with c; nil stays nil.
+func copyEach[T any](s []T, c func(T) T) []T {
+	if s == nil {
+		return nil
+	}
+	out := make([]T, len(s))
+	for i, v := range s {
+		out[i] = c(v)
+	}
 	return out
 }
 
@@ -80,7 +152,7 @@ func (f *follower) find(ns, id string) (*store.SessionState, bool) {
 	f.mu.Lock()
 	held := time.Now()
 	defer func() {
-		f.unlock(holdFind, held)
+		f.unlockWaited(holdFind, asked, held)
 		c.finds.Add(1)
 		c.findLockNs.Add(int64(held.Sub(asked)))
 		c.findHoldNs.Add(since(held))
@@ -109,15 +181,29 @@ func (f *follower) apply(rec store.Record) (store.Unapplied, error) {
 // install into an empty topic at or below the shard's dropped-through version
 // is counted below-dropped (belowDropped).
 func (f *follower) applyTimed(rec store.Record, t *batchTiming, kind int, path, from string) (store.Unapplied, error) {
-	var asked, appended time.Time
-	if t != nil {
-		asked = time.Now()
-	}
+	return f.applyChecked(rec, t, kind, path, from, false)
+}
+
+// applyChecked is applyTimed. With needCopy, a record that finds no copy of
+// its session is neither appended nor applied, and is reported no-session:
+// decided in the hold that would append it, so no drop of the copy lands
+// between the check and the apply, and a restart never replays it.
+func (f *follower) applyChecked(rec store.Record, t *batchTiming, kind int, path, from string, needCopy bool) (store.Unapplied, error) {
+	var appended time.Time
+	asked := time.Now()
 	f.mu.Lock()
 	held := time.Now()
-	defer f.unlock(kind, held)
+	defer f.unlockWaited(kind, asked, held)
 	if t != nil {
 		t.s.LockWaitNs += held.Sub(asked).Nanoseconds()
+	}
+	if needCopy {
+		if f.state.Find(rec.Key.Namespace, rec.Key.ClientID) == nil {
+			return store.UnappliedNoSession, nil
+		}
+		if f.afterCopyCheck != nil {
+			f.afterCopyCheck()
+		}
 	}
 	if err := f.r.o.Replica.AppendRaw(rec.Type, rec.Payload); err != nil {
 		return "", err
@@ -217,6 +303,14 @@ func (f *follower) dropCopy(ns, id string, reason string) bool {
 func (f *follower) unlock(kind int, held time.Time) {
 	f.mu.Unlock()
 	f.lockHolds.held(kind, held)
+}
+
+// unlockWaited is unlock for a holder that asked for mu at asked: the wait is
+// recorded after the release, so its recording adds nothing to the hold.
+func (f *follower) unlockWaited(kind int, asked, held time.Time) {
+	f.mu.Unlock()
+	f.lockHolds.held(kind, held)
+	f.lockHolds.waited(kind, held.Sub(asked))
 }
 
 // sync makes the applied records durable.
@@ -806,7 +900,8 @@ func (w *worker) applyAppend(fr frame) (rejected bool, reason string) {
 	}
 	// A new follower's push and a resync send retained records as these same
 	// append frames, so their merges are counted on the append path too.
-	un, err := f.applyTimed(store.Record{Type: fr.Type, Key: store.Key{Namespace: fr.Namespace, ClientID: fr.ClientID, Topic: fr.Topic}, Payload: fr.Payload}, w.timing, holdApply, "append", w.peer)
+	needCopy := store.IsSessionUpsert(fr.Type) && refusesLoneMeta(fr.Level, f.r.o.LoneMetaMakesCopy || f.r.o.PreWholeCopies, f.r.o.RefuseLoneMetaUnstamped)
+	un, err := f.applyChecked(store.Record{Type: fr.Type, Key: store.Key{Namespace: fr.Namespace, ClientID: fr.ClientID, Topic: fr.Topic}, Payload: fr.Payload}, w.timing, holdApply, "append", w.peer, needCopy)
 	if err != nil {
 		f.r.log.Error("replica apply failed", "peer", w.peer, "err", err)
 		return true, err.Error()
@@ -845,13 +940,69 @@ func (w *worker) applySnapshot(fr frame) (rejected bool, reason string) {
 	if w.timing != nil {
 		w.timing.s.SnapshotRecords += len(recs)
 	}
-	for _, rec := range recs {
-		if _, err := f.applyTimed(rec, w.timing, holdApply, "", ""); err != nil {
-			f.r.log.Error("replica snapshot apply failed", "peer", w.peer, "err", err)
-			return true, err.Error()
+	if f.r.o.PerRecordSnapshotHold || f.r.o.PreWholeCopies {
+		for i, rec := range recs {
+			if _, err := f.applyTimed(rec, w.timing, holdApply, "", ""); err != nil {
+				f.r.log.Error("replica snapshot apply failed", "peer", w.peer, "err", err)
+				return true, err.Error()
+			}
+			if f.betweenSnapshotRecords != nil && i < len(recs)-1 {
+				f.betweenSnapshotRecords()
+			}
 		}
+		return false, ""
+	}
+	if err := f.applyWhole(recs, w.timing); err != nil {
+		f.r.log.Error("replica snapshot apply failed", "peer", w.peer, "err", err)
+		return true, err.Error()
 	}
 	return false, ""
+}
+
+// refusesLoneMeta decides whether a follower refuses a lone session record
+// that finds no copy: from a frame stamped at the level whole copies came in
+// or above, unless the node stands in for a build before them (old), or a
+// test asks for the refusal of unstamped frames too.
+func refusesLoneMeta(level uint64, old, unstamped bool) bool {
+	if old {
+		return false
+	}
+	return unstamped || level >= wholeCopyLevel
+}
+
+// applyWhole appends and applies a snapshot's records under one hold of f.mu,
+// so a fetch reads the copy as it was before the snapshot or after it, never
+// deleted or holding the meta without the rest. The records arrive encoded.
+func (f *follower) applyWhole(recs []store.Record, t *batchTiming) error {
+	asked := time.Now()
+	f.mu.Lock()
+	held := time.Now()
+	defer f.unlockWaited(holdApply, asked, held)
+	if t != nil {
+		t.s.LockWaitNs += held.Sub(asked).Nanoseconds()
+	}
+	for i, rec := range recs {
+		if f.betweenSnapshotRecords != nil && i > 0 {
+			f.betweenSnapshotRecords()
+		}
+		began := time.Now()
+		if err := f.r.o.Replica.AppendRaw(rec.Type, rec.Payload); err != nil {
+			return err
+		}
+		appended := time.Now()
+		if f.afterAppend != nil {
+			f.afterAppend()
+		}
+		if _, err := f.state.ApplyReport(rec.Type, rec.Payload); err != nil {
+			return err
+		}
+		if t != nil {
+			t.s.AppendNs += appended.Sub(began).Nanoseconds()
+			t.s.ApplyNs += time.Since(appended).Nanoseconds()
+		}
+	}
+	f.r.gauge("hoardmq_replicas_held", float64(len(f.state.Sessions)))
+	return nil
 }
 
 // staleTimed is the lease check of a record, or of a snapshot with the

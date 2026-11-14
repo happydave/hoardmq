@@ -321,7 +321,7 @@ func TestSecretModeConnectsAndCarriesFrames(t *testing.T) {
 			}
 			waitFor(t, "reverse frame", func() bool { return back.n() == 1 })
 			for _, n := range c.nodes {
-				if ps := n.t.Peers(); len(ps) != 1 || ps[0].State != Up || ps[0].Version != Version5 {
+				if ps := n.t.Peers(); len(ps) != 1 || ps[0].State != Up || ps[0].Version != Version6 {
 					t.Fatalf("%s peers %+v", n.t.o.Node, ps)
 				}
 				if !n.ev.has("cluster.peer.up", "ok") {
@@ -546,7 +546,7 @@ func TestVersionNegotiation(t *testing.T) {
 	e.nodes["p1"].waitUp(t, "p2")
 	e.nodes["p2"].waitUp(t, "p1")
 	for _, n := range e.nodes {
-		if v := n.t.Peers()[0].Version; v != Version5 {
+		if v := n.t.Peers()[0].Version; v != Version6 {
 			t.Fatalf("%s negotiated %d", n.t.o.Node, v)
 		}
 	}
@@ -740,7 +740,7 @@ func TestTwoConnectionsAreIndependent(t *testing.T) {
 	c.nodes["n1"].waitUp(t, "n2")
 	c.nodes["n2"].waitUp(t, "n1")
 	ps := c.nodes["n1"].t.Peers()
-	if ps[0].Version != Version5 || ps[0].State != Up || ps[0].DataState != Up {
+	if ps[0].Version != Version6 || ps[0].State != Up || ps[0].DataState != Up {
 		t.Fatalf("peer after start: %+v", ps[0])
 	}
 	c.nodes["n1"].t.pauseRole[RoleData].Store(true)

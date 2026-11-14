@@ -128,19 +128,35 @@ same counters: connections (total by listener, active, and closed by cause —
 `detach` when the connection was closed with the state left behind, which is
 what a takeover does, `evict` when the state was discarded here because the
 lease moved, and `evict-import` for the part of `evict` an adopted session's
-import caused), cluster peers
+import caused), CONNECTs that met a sealed copy (`hoardmq_sealed_connects_total`,
+`resumed` or `refused`), cluster peers
 connected with cluster frames, bytes, reconnects, heartbeat misses and
 refusals, the consensus core (term, commit and applied index, snapshot
 index, leader flag, members by role, proposals by outcome, snapshots,
 snapshot builds and transfers by outcome, dropped frames, and `hoardmq_raft_proposal_seconds_total{outcome}`, the time from a
 proposal to its outcome), leases (active, operations by outcome, takeovers by kind,
 adoptions, fences, connect refusals), routes (active by scope, updates and
-syncs by direction, forwards by kind, forward failures), replication
+syncs by direction, forwards by kind, forward failures, and the route
+reconciler's `hoardmq_route_reconcile_*` series, described in
+docs/clustering.md, "The route reconciler": any non-zero
+`hoardmq_route_reconcile_corrections_total` means the node held a route or
+subscriber difference for up to two intervals and a pass, now ended, and its
+Warn names each filter; an alert, and a defect in a live path to report),
+replication
 (records and acknowledgements, barrier time and failures, degraded
 barriers, replicas held, shard map version, retained forwards and
 queries, and `hoardmq_replication_backlog_frames{peer}`, the frames pushed to a
 peer and not yet acknowledged: replication runs one stream a peer, so this is
-the followers' lag), the drain (clients redirected, leases handed off, sessions confirmed
+the followers' lag; replica fetches by outcome,
+`hoardmq_replication_fetches_total{outcome}`, where `none-budget-spent` is a
+fetch whose budget ended before it asked the other members for a kept copy, so its
+CONNECT was refused rather than served a fresh session; and histograms of the follower's lock held and waited for
+by holder and of replica fetch requests,
+`hoardmq_replication_lock_hold_seconds{kind}`,
+`hoardmq_replication_lock_wait_seconds{kind}` and
+`hoardmq_replication_fetch_request_seconds`, each a cumulative
+`_bucket{le}` series per bound with `_sum` and `_count`, described in
+docs/clustering.md, "Data-plane replication"), the drain (clients redirected, leases handed off, sessions confirmed
 and unconfirmed, seconds) and
 readiness (`hoardmq_topology_changes_total`), sessions and
 subscriptions by namespace, publishes by namespace and QoS, deliveries by
@@ -159,7 +175,10 @@ directory connections by outcome, the cluster stress level by scope
 (`hoardmq_overload_indicator{name}`), connections paused for stress,
 CONNECTs refused for overload and for a ban, bans held and invalid, lapsed
 bans deleted by outcome, connections ended by how, flapping trips and bans,
-clients throttled and for how long, deliveries deferred, Wills, retained messages
+clients throttled and for how long, deliveries deferred, CONNECTs accepted by
+what was done to their TCP keep-alive
+(`hoardmq_connects_tcp_keepalive_total{listener,outcome}`: `off`, `kept`,
+`not-tcp`, `failed`; see docs/clients-and-sessions.md, "Connection behaviour"), Wills, retained messages
 by namespace, the log index, hook failures by module, whether the node holds its
 data directory's lock (`hoardmq_data_dir_locked`, 1 or 0; see "Persistence"), and
 the journals (below).
@@ -327,7 +346,7 @@ dispatches, and describes every schema):
 | Method and path | Scope | What it does |
 |---|---|---|
 | `GET /clients?search=&node=&after=&limit=` | clients:read | every client the cluster holds, by client identifier, paged, each naming the node that holds it; `node` keeps one node's |
-| `GET /clients/{id}` | clients:read | the session, its connection (listener, address, user, protocol, age, `keepAlive` in force: the client's, or `limits.maxKeepAlive` where it replaced the client's; `requestedKeepAlive` from the CONNECT; `cleanStart`) and its lease |
+| `GET /clients/{id}` | clients:read | the session, its connection (listener, address, user, protocol, age, `keepAlive` in force: the client's, or `limits.maxKeepAlive` where it replaced the client's; `requestedKeepAlive` from the CONNECT; `tcpKeepAlive`, whether TCP keep-alive was left on, as it is only when the CONNECT asked for 0; `cleanStart`) and its lease |
 | `GET /clients/{id}/subscriptions` | clients:read | the client's subscriptions |
 | `POST /clients/{id}/disconnect?will=` | clients:write | close the connection with 0x98; the session stays; `will=false` publishes no Will |
 | `DELETE /clients/{id}/session?will=` | clients:write | end the session (below); `will=false` publishes no Will |
@@ -567,6 +586,15 @@ when not degraded) carry the same state, and `GET /api/v1/cluster` carries
 `serving` and `servingReason`. The chart's readiness probe stays on
 `/readyz`.
 
+A node learns a peer's routes from the peer's full sets. Alert on
+`hoardmq_route_sync_age_seconds{peer}` above three `cluster.routing.syncMs`
+for an up peer, on the Warn "a peer's routes are not proved here" that names
+it, and on the sending node's Warn "route update not sent"
+(`hoardmq_route_send_failures_total`): together they come before the
+refusals that a node without a peer's routes makes. `hoardmq_route_tombstones{scope="own"}`
+grows while a member holds up the pruning of a node's tombstones;
+`hoardmq_route_set_held_age_seconds{peer}` names which.
+
 ## Kubernetes deployment
 
 HoardMQ releases are source releases: the project publishes no image, no
@@ -638,7 +666,10 @@ so it takes the log's position first and, for each session, the position it
 read that session at; recovery replays the records after the first and skips
 a session's records up to its own, so each is applied once. The replica log's
 checkpoint is read under the lock its records are applied under, and is
-exact at one position.
+exact at one position. The replica state is copied under that lock without
+encoding it and encoded after the lock is released: about 25 ms of the lock at
+500,000 replica copies on one node measured on 3 cores, where a fetch or a
+peer's replication waits.
 
 A checkpoint is the whole state as one JSON document. Measured on one node (16
 cores, 32 threads) with every session offline and persistent, each holding one

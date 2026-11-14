@@ -41,13 +41,29 @@ The policy is [stability.md](stability.md). It applies from the first release ta
 The figures behind the measured claims are summarised in [evidence/](evidence/README.md), one page per claim, each
 naming its host, its runs and their spread, and what the runs do not show.
 
-- The largest client load measured so far is 100,000 clients on one host, against an in-process cluster of three
-  nodes, and 250,000 clients in the memory sweep, with the three nodes on one host and the clients on another.
+- The largest client load measured so far is 1,000,000 persistent sessions, with three nodes on one host and every
+  client on another, on the broker code released as `v0.2.0`: in five runs a node was killed and its 333,333 clients
+  reconnected to the survivors, 99.9% of them within 152–229 s of losing their connection, and no session of 5,000,000
+  checked was lost ([evidence/million-sessions.md](evidence/million-sessions.md)).
+- Before it: 100,000 clients on one host, against an in-process cluster of three nodes, and 250,000 clients in the
+  memory sweep, with the three nodes on one host and the clients on another.
 - The checkpoint and credential-store measurements reach 1,000,000 sessions or credentials, in one process with no
   clients connected.
-- Measurements of 1,000,000 or more sessions across several hosts are not yet published.
+- No measurement at 1,000,000 sessions has the nodes on separate hosts, loses a whole host, or uses passwords.
 
 The hosts are in [evidence/README.md](evidence/README.md#the-hosts).
+
+## Known limits
+
+- **`v0.1.0` sends a node's route set to a peer as one cluster frame**, refused above `cluster.maxFrameBytes`. At the
+  default 16 MiB and short filters (about 90 bytes an entry) that is about 186,000 route entries a node, roughly
+  560,000 clients with one subscription each on three nodes; a filter unsubscribed since the node started still
+  counts, so churn brings the limit closer. Past it, routes stop resynchronising after a gap in a peer's updates or a
+  node's restart: a node refuses the QoS 1 and 2 publishes that could match routes it cannot prove (Implementation
+  Specific Error), and a restarted node is ready but does not serve (`/servingz` 503 `routes-unknown`). `v0.2.0` sends
+  a full set in parts under the frame limit; in a roll from `v0.1.0` with every node past the limit, each upgraded node
+  serves again once the last one is upgraded ([CHANGELOG.md](../CHANGELOG.md#v020--2026-11-14),
+  [upgrade.md](upgrade.md#by-build-the-framing-version)).
 
 ## Not yet supported
 
@@ -72,4 +88,5 @@ The hosts are in [evidence/README.md](evidence/README.md#the-hosts).
 - **Out of scope for a security report:** a deployment that chooses a setting the documentation describes as unsafe,
   such as `secret` cluster authentication on a network it does not trust, or anonymous access in production
   ([SECURITY.md](../SECURITY.md#scope)).
-- **Published measurements of 1,000,000 or more sessions across several hosts** ([evidence/](evidence/README.md)).
+- **Published measurements at 1,000,000 sessions with the nodes on separate hosts**, after a whole host's loss, or
+  with password clients ([evidence/million-sessions.md](evidence/million-sessions.md#what-this-does-not-show)).

@@ -20,6 +20,7 @@ import (
 	"github.com/happydave/hoardmq/internal/hook"
 	"github.com/happydave/hoardmq/internal/message"
 	"github.com/happydave/hoardmq/internal/otel"
+	"github.com/happydave/hoardmq/internal/session"
 	"github.com/happydave/hoardmq/internal/store"
 	"github.com/happydave/hoardmq/internal/topic"
 )
@@ -140,6 +141,14 @@ type Options struct {
 	// publish before relaying it refused: the publisher's barrier timeout,
 	// past which no barrier is waiting. Default 2 s.
 	GiveTimeout time.Duration
+	// MaxFrame is this node's cluster frame limit: an own route entry that no
+	// frame of it could carry is left out of route sync (EntryFits). Zero is
+	// no limit.
+	MaxFrame int
+	// Legacy, set only by tests, pins the plane to the route sync of builds
+	// before parts: every full set in one frame, deltas uncapped, no held,
+	// and any kind but a full set read as a delta.
+	Legacy bool
 }
 
 // Envelope kinds within the forwarded-publish class and the route-update
@@ -154,6 +163,8 @@ const (
 	routeDelta byte = 1
 	routeFull  byte = 2
 )
+
+func (p *Plane) legacy() bool { return p.o.Legacy }
 
 type forwardEnvelope struct {
 	Seq    uint64 `json:"seq,omitempty"`
@@ -412,17 +423,59 @@ type Plane struct {
 	gives    giveWatcher
 	// pending is the route changes waiting to go out, coalesced by entry so
 	// a filter that changed ten times while a send was in flight costs one
-	// entry. fullTo names peers owed a complete set. Both are the flusher's,
-	// and emit hands to them rather than sending: emit runs under a session
-	// mutex (session.Manager.Subscribe holds it across router.Add) and the
+	// entry, and cut into batches as they come (pending.go). fullTo names
+	// peers owed a complete set, fullNow those whose set in progress a link
+	// coming up has superseded. All are the flusher's, and emit hands to
+	// them rather than sending: emit runs under a session mutex
+	// (session.Manager.Subscribe holds it across router.Add) and the
 	// route-update class is not urgent, so its enqueue blocks — which is how
 	// 64.7% of a storm's mutex delay ended up in link.admit.
-	pending  map[entryKey]Entry
+	pending  map[entryKey]*pendingEntry
+	groups   []*batchGroup
+	assigned uint64 // the last batch number a mark or flush has given out
 	fullTo   map[string]bool
+	fullNow  map[string]bool
 	flushing bool
-	moving   map[routeID]time.Time   // filters whose session is moving, until when
-	held     map[routeID]*time.Timer // removals waiting out a move
-	ending   map[routeID]*time.Timer // moves of filters other sessions still hold, waiting out their grace
+	// outSets are the full sets in progress to each peer, the flusher's
+	// alone. heldOwed is, per peer, the snapshot of the last set received
+	// from it in parts, to acknowledge; acks and ackAt the highest snapshot
+	// each peer acknowledged and when; pruneDue that one arrived since the
+	// last prune. applied is, per peer, the snapshot of the last complete set
+	// applied from it, checked under fullMu.
+	outSets  map[string]*outSet
+	heldOwed map[string]uint64
+	acks     map[string]uint64
+	ackAt    map[string]time.Time
+	pruneDue bool
+	applied  map[string]uint64
+	// inSets are the sets in progress from each peer, each under its own
+	// lock; inMu guards the map. inBytes is what they hold.
+	inMu    sync.Mutex
+	inSets  map[string]*inSet
+	inBytes int
+	// unsendable are this node's filters no frame can carry, and unsendWarn
+	// when they were last logged.
+	unsendable map[entryKey]struct{}
+	unsendWarn time.Time
+	// brokeAt is when each peer's proof last broke, provedWarn when its
+	// routes were last reported not proved, started when this plane began.
+	brokeAt    map[string]time.Time
+	provedWarn map[string]time.Time
+	started    time.Time
+	warnMu     sync.Mutex
+	warns      map[string]*warnState
+	// partSize, roundParts, warnEvery and pacePoll are constants a test may
+	// shorten.
+	partSize   int
+	roundParts int
+	warnEvery  time.Duration
+	pacePoll   time.Duration
+	// beforeOwnMerge, set only by tests, runs in an emit before its version
+	// is assigned and merged.
+	beforeOwnMerge func()
+	moving         map[routeID]time.Time       // filters whose session is moving, until when
+	held           map[routeID]*heldWithdrawal // removals waiting out a move
+	ending         map[routeID]*time.Timer     // moves of filters other sessions still hold, waiting out their grace
 	// moves are the clients moving each filter, and byClient the filters each
 	// client is moving; see moveproof.go.
 	moves    map[routeID]map[string]*clientMove
@@ -446,6 +499,11 @@ type Plane struct {
 	// afterSend, set only by tests, runs in Forward between the sends and the
 	// checks that follow them.
 	afterSend func()
+	// beforeCorrect and afterCorrect, set only by tests, run in a
+	// reconciler's correction between the plane's check and the table's, and
+	// after the table's with whether it merged.
+	beforeCorrect func(session.OwnRouteCorrection)
+	afterCorrect  func(session.OwnRouteCorrection, bool)
 }
 
 // routeID names one of this node's route entries.
@@ -474,11 +532,15 @@ func New(o Options) *Plane {
 	}
 	p := &Plane{o: o, log: o.Logger.With("component", "routing"), table: NewTable(o.Node), rr: map[string]int{}, sticky: map[string]string{},
 		rng: rand.New(rand.NewSource(time.Now().UnixNano())), stop: make(chan struct{}), done: make(chan struct{}), //nolint:gosec // distribution, not security
-		out: map[string]*outbound{}, in: map[string]*inbound{}, lastSync: map[string]time.Time{}, syncs: map[string]uint64{}, moving: map[routeID]time.Time{}, held: map[routeID]*time.Timer{}, ending: map[routeID]*time.Timer{},
+		out: map[string]*outbound{}, in: map[string]*inbound{}, lastSync: map[string]time.Time{}, syncs: map[string]uint64{}, moving: map[routeID]time.Time{}, held: map[routeID]*heldWithdrawal{}, ending: map[routeID]*time.Timer{},
 		moves: map[routeID]map[string]*clientMove{}, byClient: map[clientKey]map[routeID]bool{},
-		pending: map[entryKey]Entry{}, fullTo: map[string]bool{}, wake: make(chan struct{}, 1),
+		pending: map[entryKey]*pendingEntry{}, fullTo: map[string]bool{}, fullNow: map[string]bool{}, wake: make(chan struct{}, 1),
+		outSets: map[string]*outSet{}, heldOwed: map[string]uint64{}, acks: map[string]uint64{}, ackAt: map[string]time.Time{}, applied: map[string]uint64{},
+		inSets: map[string]*inSet{}, unsendable: map[entryKey]struct{}{}, brokeAt: map[string]time.Time{}, provedWarn: map[string]time.Time{},
+		started: time.Now(), warns: map[string]*warnState{}, partSize: DefaultPartSize, roundParts: roundParts, warnEvery: time.Minute, pacePoll: 10 * time.Millisecond,
 		zeroAt: map[string]uint64{}, settled: map[string]uint64{}, unknownWhy: map[string]string{}, awaitRoutes: map[string]uint64{}, servedWake: make(chan struct{}, 1),
 		batches: uint64(time.Now().UnixNano()), proofs: map[string]*routeProof{}}
+	p.assigned = p.batches
 	p.gives.wake = make(chan struct{}, 1)
 	p.ctx, p.cancel = context.WithCancel(context.Background())
 	// Until the first evaluation this node has proved nothing about its
@@ -570,8 +632,8 @@ func (p *Plane) Stop() {
 	}
 	p.mu.Lock()
 	p.stopped = true
-	for id, t := range p.held {
-		t.Stop()
+	for id, h := range p.held {
+		h.timer.Stop()
 		delete(p.held, id)
 	}
 	for id, t := range p.ending {
@@ -600,16 +662,24 @@ func (p *Plane) Stop() {
 // back for the move grace (see Moving).
 func (p *Plane) Observe(ns, filter string, count int) {
 	id := routeID{ns, filter}
+	// The version a withdrawal is held against, read outside the plane's lock so
+	// a hold does not wait on the table's writers with it held.
+	var heldAt uint64
+	if count == 0 {
+		heldAt = p.table.OwnVersion(ns, filter)
+	}
 	p.mu.Lock()
-	if t := p.held[id]; t != nil {
-		t.Stop()
+	if h := p.held[id]; h != nil {
+		h.timer.Stop()
 		delete(p.held, id)
 	}
 	until, moving := p.moving[id]
 	inGrace := moving && until.After(time.Now())
 	if count == 0 && inGrace {
 		p.stopEndingLocked(id)
-		p.held[id] = time.AfterFunc(time.Until(until), func() { p.emit(ns, filter, 0) })
+		h := &heldWithdrawal{heldAt: heldAt}
+		h.timer = time.AfterFunc(time.Until(until), func() { p.emitHeld(ns, filter, h) })
+		p.held[id] = h
 		p.mu.Unlock()
 		return
 	}
@@ -707,8 +777,58 @@ func (p *Plane) emit(ns, filter string, count int) { p.emitCount(ns, filter, cou
 
 // emitCount is emit, optionally leaving a move of the filter in progress.
 func (p *Plane) emitCount(ns, filter string, count int, stillMoving bool) {
+	p.emitIf(ns, filter, count, stillMoving, nil, nil)
+}
+
+// heldWithdrawal is a removal held for a move's grace: its timer, and the own
+// entry's version when it was held.
+type heldWithdrawal struct {
+	timer  *time.Timer
+	heldAt uint64
+}
+
+// heldIsCurrent decides whether a held withdrawal's timer may act: only while
+// it is the one registered for its filter. A timer that fired as Observe
+// stopped it runs anyway, after a return or a newer hold took the filter. It is
+// pure.
+func heldIsCurrent(registered, mine *heldWithdrawal) bool {
+	return mine != nil && registered == mine
+}
+
+// emitHeld writes a withdrawal held for a move's grace, which ends the move.
+// It does nothing when the hold is no longer the filter's (heldIsCurrent), and
+// writes the withdrawal only if no own merge for the filter came after it was
+// held, so it never lands over a return's route.
+func (p *Plane) emitHeld(ns, filter string, h *heldWithdrawal) {
+	stands := func(cur Entry, ok bool) bool { return heldWithdrawalStands(h.heldAt, cur, ok) }
+	if !p.emitIf(ns, filter, 0, false, h, stands) {
+		p.count("hoardmq_route_withdrawals_superseded_total", nil, 1)
+		p.log.Debug("a held route withdrawal not written: the filter was announced or held again since", "filter", filter, "heldAt", h.heldAt)
+	}
+}
+
+// heldWithdrawalStands decides a held withdrawal: it stands only if the own
+// entry for its filter is still the one it was held against (version 0 for
+// none), so nothing was announced for the filter since. It is pure.
+func heldWithdrawalStands(heldAt uint64, cur Entry, ok bool) bool {
+	var v uint64
+	if ok {
+		v = cur.Version
+	}
+	return v == heldAt
+}
+
+// emitIf is emitCount whose merge, when stands is set, is decided by it under
+// the table's lock; it reports whether the entry was merged. A held
+// withdrawal's emit passes its hold, and changes nothing unless the hold is
+// still the filter's.
+func (p *Plane) emitIf(ns, filter string, count int, stillMoving bool, hold *heldWithdrawal, stands func(Entry, bool) bool) bool {
 	id := routeID{ns, filter}
 	p.mu.Lock()
+	if hold != nil && !heldIsCurrent(p.held[id], hold) {
+		p.mu.Unlock()
+		return false
+	}
 	delete(p.held, id)
 	if !stillMoving {
 		delete(p.moving, id)
@@ -716,12 +836,20 @@ func (p *Plane) emitCount(ns, filter string, count int, stillMoving bool) {
 		p.stopEndingLocked(id)
 	}
 	p.mu.Unlock()
-	e := Entry{Namespace: ns, Filter: filter, Owner: p.o.Node, Version: p.version.Add(1), Count: count, Tombstone: count == 0}
+	e := Entry{Namespace: ns, Filter: filter, Owner: p.o.Node, Count: count, Tombstone: count == 0}
+	if p.beforeOwnMerge != nil {
+		p.beforeOwnMerge()
+	}
 	// The local merge stays synchronous. Match, HiddenMatch and MovingMatch
 	// are all consulted on this node's publish path, and deferring this
 	// would reopen the acknowledged-loss window of a session in transit,
 	// when no node has a route to it.
-	p.table.Merge([]Entry{e})
+	merged := true
+	if stands == nil {
+		e = p.table.MergeOwn(e, &p.version)
+	} else {
+		e, merged = p.table.MergeOwnIf(e, &p.version, stands)
+	}
 	// Cleared after the merge, not before: between the two there must be no
 	// instant where neither the moving index nor a live route answers for
 	// this topic. Clearing first would leave exactly that gap, which is the
@@ -729,9 +857,42 @@ func (p *Plane) emitCount(ns, filter string, count int, stillMoving bool) {
 	if !stillMoving {
 		p.table.SetMoving(ns, filter, false)
 	}
+	if !merged {
+		return false
+	}
+	p.ownMerged(e)
+	return true
+}
+
+// ownMerged sends an own entry just merged: the gauge, the unsendable check,
+// the count and the queue.
+func (p *Plane) ownMerged(e Entry) {
+	p.gauge()
+	if !EntryFits(e.Namespace, e.Filter, p.o.Node, p.o.MaxFrame) {
+		p.unsendableEmit(e)
+		return
+	}
 	p.count("hoardmq_route_updates_total", map[string]string{"direction": "out"}, 1)
 	p.queue(e)
-	p.gauge()
+}
+
+// unsendableEmit keeps an own entry no frame can carry out of the pending
+// changes, so no mark promises it a batch, counted and logged.
+func (p *Plane) unsendableEmit(e Entry) {
+	k := entryKey{e.Owner, e.Namespace, e.Filter}
+	p.mu.Lock()
+	_, had := p.unsendable[k]
+	if e.Tombstone {
+		delete(p.unsendable, k)
+	} else {
+		p.unsendable[k] = struct{}{}
+	}
+	p.mu.Unlock()
+	if e.Tombstone || had {
+		return
+	}
+	p.count("hoardmq_route_entries_unsendable_total", nil, 1)
+	p.warnUnsendable(&e)
 }
 
 // queue hands a change to the flusher, coalescing by entry so a filter that
@@ -739,11 +900,8 @@ func (p *Plane) emitCount(ns, filter string, count int, stillMoving bool) {
 // the highest version so a peer is never sent an older view after a newer
 // one. It never blocks: that is the whole point.
 func (p *Plane) queue(e Entry) {
-	k := entryKey{e.Owner, e.Namespace, e.Filter}
 	p.mu.Lock()
-	if prev, ok := p.pending[k]; !ok || e.Version >= prev.Version {
-		p.pending[k] = e
-	}
+	p.queueLocked(e)
 	p.mu.Unlock()
 	p.wakeFlusher()
 }
@@ -754,6 +912,15 @@ func (p *Plane) queue(e Entry) {
 func (p *Plane) queueFull(peer string) {
 	p.mu.Lock()
 	p.fullTo[peer] = true
+	p.mu.Unlock()
+	p.wakeFlusher()
+}
+
+// queueFullNow marks a peer owed a complete set at once: its connection came
+// up, so any set in progress to it lost its parts and is superseded.
+func (p *Plane) queueFullNow(peer string) {
+	p.mu.Lock()
+	p.fullNow[peer] = true
 	p.mu.Unlock()
 	p.wakeFlusher()
 }
@@ -773,59 +940,128 @@ func (p *Plane) wakeFlusher() {
 func (p *Plane) flushLoop() {
 	defer close(p.flushDone)
 	for {
+		// While a set is in progress the flusher looks again shortly: the
+		// next round waits on the link's writer, which sends no event.
+		var poll <-chan time.Time
+		if len(p.outSets) > 0 {
+			poll = time.After(p.pacePoll)
+		}
 		select {
 		case <-p.stop:
 			p.drainPending()
 			return
 		case <-p.wake:
+		case <-poll:
 		}
 		for p.flushOnce() {
 		}
 	}
 }
 
-// flushOnce sends one batch and reports whether more was waiting. The
-// plane's mutex is never held across a send.
+// flushOnce sends what is waiting: the sets owed, composed once for every
+// peer whose set starts now, each set's first round; the delta batches; the
+// held acknowledgements; then the next round of every set whose previous
+// round the link has taken. It reports whether more was waiting. The plane's
+// mutex is never held across a send.
 func (p *Plane) flushOnce() bool {
-	if p.unloaded.Load() {
+	if p.unloaded.Load() || p.o.Transport == nil {
 		return false
 	}
 	p.mu.Lock()
-	if len(p.pending) == 0 && len(p.fullTo) == 0 {
+	if len(p.pending) == 0 && len(p.fullTo) == 0 && len(p.fullNow) == 0 && len(p.heldOwed) == 0 && len(p.outSets) == 0 {
 		p.flushing = false
 		p.mu.Unlock()
 		return false
 	}
-	batch := make([]Entry, 0, len(p.pending))
-	for _, e := range p.pending {
-		batch = append(batch, e)
+	var batches [][]Entry
+	if p.legacy() {
+		batches = p.takeLegacyLocked()
+	} else {
+		batches = p.takeBatchesLocked()
 	}
-	clear(p.pending)
-	var number uint64
-	if len(batch) > 0 {
-		p.batches++
-		number = p.batches
-	}
+	// The cover is fixed before the set is read: every batch at or below it
+	// holds entries merged before the read.
 	cover := p.batches
-	fulls := make([]string, 0, len(p.fullTo))
-	for peer := range p.fullTo {
-		fulls = append(fulls, peer)
-	}
-	clear(p.fullTo)
+	owed := p.fullTo
+	now := p.fullNow
+	p.fullTo, p.fullNow = map[string]bool{}, map[string]bool{}
 	p.flushing = true
 	p.mu.Unlock()
 
-	// A full set supersedes the deltas it contains, so it goes first and the
-	// deltas that follow carry higher versions or are ignored by Merge.
-	for _, peer := range fulls {
-		p.sendFull(peer, cover)
+	start := map[string]bool{}
+	for peer := range now {
+		if p.outSets[peer] != nil {
+			p.abandonOut(peer, "superseded")
+		}
+		start[peer] = true
 	}
-	if len(batch) > 0 {
-		sort.Slice(batch, func(i, j int) bool { return batch[i].Version < batch[j].Version })
-		batch[0].Batch = number
-		p.broadcast(routeDelta, batch, "")
+	for peer := range owed {
+		names := []string{peer}
+		if peer == "" {
+			names = names[:0]
+			for _, info := range p.o.Transport.Peers() {
+				if info.State == transport.Up {
+					names = append(names, info.Name)
+				}
+			}
+		}
+		for _, name := range names {
+			if s := p.outSets[name]; s != nil {
+				s.owed = true
+				continue
+			}
+			start[name] = true
+		}
 	}
-	return true
+	if len(start) > 0 {
+		c := p.compose(cover)
+		for peer := range start {
+			p.startSet(peer, c)
+		}
+	}
+	for _, batch := range batches {
+		body, _ := json.Marshal(batch)
+		payload := append([]byte{routeDelta}, body...)
+		for _, info := range p.o.Transport.Peers() {
+			if info.State == transport.Up {
+				_ = p.sendRoute(info.Name, "delta", payload)
+			}
+		}
+	}
+	p.sendHelds()
+	again, owedNext := p.advanceSets()
+	more := len(batches) > 0 || len(start) > 0
+	if len(again) > 0 || len(owedNext) > 0 {
+		p.mu.Lock()
+		for _, peer := range again {
+			p.fullNow[peer] = true
+		}
+		for _, peer := range owedNext {
+			p.fullTo[peer] = true
+		}
+		p.mu.Unlock()
+		more = true
+	}
+	return more
+}
+
+// takeLegacyLocked is the flush of builds before parts: every waiting entry
+// in one batch. Callers hold p.mu.
+func (p *Plane) takeLegacyLocked() [][]Entry {
+	if len(p.pending) == 0 {
+		return nil
+	}
+	batch := make([]Entry, 0, len(p.pending))
+	for _, pe := range p.pending {
+		batch = append(batch, pe.e)
+	}
+	clear(p.pending)
+	p.groups = p.groups[:0]
+	p.batches++
+	p.assigned = p.batches
+	sort.Slice(batch, func(i, j int) bool { return batch[i].Version < batch[j].Version })
+	batch[0].Batch = p.batches
+	return [][]Entry{batch}
 }
 
 // drainPending makes one best-effort flush at Stop. What it cannot send is
@@ -855,87 +1091,57 @@ type fullSync struct {
 	Batch uint64 `json:"batch,omitempty"`
 }
 
-// broadcastFull sends this node's complete own-entry set to every peer that
-// is up, or to one peer. Unlike a delta it is sent even when the set is
-// empty: "I hold nothing" is the message that retires the entries a previous
-// incarnation of this node published, and it is the only way to send it.
+// broadcastFull marks every peer that is up, or one peer, as owed this
+// node's complete own-entry set. Unlike a delta it is sent even when the set
+// is empty: "I hold nothing" is the message that retires the entries a
+// previous incarnation of this node published, and it is the only way to
+// send it.
 func (p *Plane) broadcastFull(only string) { p.queueFull(only) }
 
-// sendFull composes and sends the set. It runs on the flusher, never on the
-// transport's observer goroutine: notifyAll walks the observers in turn, so
-// a send that blocks there delays every other component's notice of the same
-// peer event, and at a hundred thousand routes this payload is not small.
-func (p *Plane) sendFull(only string, cover uint64) {
-	body, _ := json.Marshal(fullSync{Snapshot: p.version.Add(1), Entries: p.table.Own(), Batch: cover})
-	p.sendPayload(append([]byte{routeFull}, body...), only)
-}
-
-// broadcast sends entries to every peer that is up, or to one peer.
-func (p *Plane) broadcast(kind byte, entries []Entry, only string) {
-	if len(entries) == 0 {
-		return
-	}
-	body, _ := json.Marshal(entries)
-	p.sendPayload(append([]byte{kind}, body...), only)
-}
-
-func (p *Plane) sendPayload(payload []byte, only string) {
-	if p.o.Transport == nil {
-		return
-	}
-	for _, peer := range p.o.Transport.Peers() {
-		if peer.State != transport.Up || (only != "" && peer.Name != only) {
-			continue
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		if err := p.o.Transport.Send(ctx, peer.Name, transport.RouteUpdate, payload); err != nil {
-			p.log.Debug("route update not sent", "peer", peer.Name, "err", err)
-		}
-		cancel()
-	}
-}
-
-// receiveRoutes merges a peer's entries.
+// receiveRoutes takes a peer's route update: a delta is merged at once; a
+// set, whole or in parts, is applied once complete; a held is recorded.
 func (p *Plane) receiveRoutes(peer string, payload []byte) {
 	if len(payload) < 1 {
 		return
 	}
-	var entries []Entry
-	var snapshot, number uint64
-	if payload[0] == routeFull {
+	kind := payload[0]
+	if p.legacy() && kind != routeFull {
+		kind = routeDelta
+	}
+	switch kind {
+	case routeFull:
 		var fs fullSync
 		if err := json.Unmarshal(payload[1:], &fs); err != nil {
 			p.log.Warn("bad route sync", "peer", peer, "err", err)
 			return
 		}
-		entries, snapshot, number = fs.Entries, fs.Snapshot, fs.Batch
-	} else if err := json.Unmarshal(payload[1:], &entries); err != nil {
-		p.log.Warn("bad route update", "peer", peer, "err", err)
-		return
-	}
-	if payload[0] != routeFull && len(entries) > 0 {
-		number, entries[0].Batch = entries[0].Batch, 0
-	}
-	for i := range entries {
-		if entries[i].Owner == "" {
-			entries[i].Owner = peer
+		p.supersedeIn(peer, fs.Snapshot)
+		p.applyFull(peer, fs.Entries, fs.Snapshot, fs.Batch, fs.Batch, fs.Batch != 0, false)
+	case routePart:
+		p.receivePart(peer, payload[1:])
+	case routeHeld:
+		p.receiveHeld(peer, payload[1:])
+	case routeDelta:
+		var entries []Entry
+		if err := json.Unmarshal(payload[1:], &entries); err != nil {
+			p.log.Warn("bad route update", "peer", peer, "err", err)
+			return
 		}
-	}
-	if payload[0] == routeFull {
-		p.fullMu.Lock()
-		defer p.fullMu.Unlock()
-		_, withdrawn := p.table.MergeFull(peer, entries, snapshot)
-		p.count("hoardmq_route_syncs_total", map[string]string{"direction": "in"}, 1)
-		if n := len(withdrawn); n > 0 {
-			p.count("hoardmq_routes_withdrawn_total", map[string]string{"reason": "absent-from-sync"}, float64(n))
-			p.log.Info("routes withdrawn by a peer's sync", "peer", peer, "count", n)
+		var number uint64
+		if len(entries) > 0 {
+			number, entries[0].Batch = entries[0].Batch, 0
 		}
-		// Recorded after the merge: the proof vouches for the entries.
-		p.noteRoutes(peer, true, number)
-		p.markSync(peer)
-	} else {
+		for i := range entries {
+			if entries[i].Owner == "" {
+				entries[i].Owner = peer
+			}
+		}
 		p.table.Merge(entries)
 		p.noteRoutes(peer, false, number)
+		p.chainDelta(peer, number)
+	default:
+		p.count("hoardmq_route_updates_dropped_total", map[string]string{"reason": "unknown-kind"}, 1)
+		return
 	}
 	p.count("hoardmq_route_updates_total", map[string]string{"direction": "in"}, 1)
 	p.gauge()
@@ -1111,11 +1317,11 @@ func (p *Plane) peerChanged(peer string, s transport.State) {
 	switch s {
 	case transport.Up:
 		p.table.Hide(peer, false)
-		p.broadcastFull(peer)
-		p.count("hoardmq_route_syncs_total", map[string]string{"direction": "out"}, 1)
+		p.queueFullNow(peer)
 	case transport.Down:
 		p.table.Hide(peer, true)
 		p.failInFlight(peer)
+		p.discardIn(peer, "superseded")
 	}
 }
 
@@ -1126,8 +1332,7 @@ func (p *Plane) peerChanged(peer string, s transport.State) {
 func (p *Plane) dataChanged(peer string, s transport.State) {
 	switch s {
 	case transport.Up:
-		p.broadcastFull(peer)
-		p.count("hoardmq_route_syncs_total", map[string]string{"direction": "out"}, 1)
+		p.queueFullNow(peer)
 	case transport.Down:
 		p.failInFlight(peer)
 	}
@@ -1174,7 +1379,7 @@ func (p *Plane) syncLoop() {
 		case <-ticker.C:
 		}
 		p.broadcastFull("")
-		p.count("hoardmq_route_syncs_total", map[string]string{"direction": "out"}, 1)
+		p.warnUnsendable(nil)
 		if p.o.Members != nil {
 			p.forgetRemoved(p.o.Members())
 		}
@@ -1223,12 +1428,18 @@ func (p *Plane) forgetRemoved(members []string) {
 	}
 	for _, peer := range p.o.Transport.Peers() {
 		if !keep[peer.Name] && peer.State != transport.Up {
+			// Under fullMu, as a forget of a lost owner is: a set merged
+			// around the forget would leave the removed member's entries
+			// visible until the next tick.
+			p.fullMu.Lock()
 			p.table.Forget(peer.Name)
 			// Forget the sync record too, so "synced" keeps meaning
 			// "synced since this node started" if the owner returns.
 			p.mu.Lock()
 			delete(p.lastSync, peer.Name)
 			p.mu.Unlock()
+			p.fullMu.Unlock()
+			p.discardIn(peer.Name, "superseded")
 		}
 	}
 }

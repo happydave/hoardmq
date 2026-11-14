@@ -105,7 +105,7 @@ func TestMergeFullWithdrawsAbsentEntries(t *testing.T) {
 	})
 	// b restarts and now holds only "kept". Its snapshot version is above
 	// everything its previous incarnation published.
-	_, withdrawn := tb.MergeFull("b", []Entry{{Namespace: "d", Filter: "kept", Owner: "b", Version: 20, Count: 1}}, 10)
+	_, withdrawn, _ := tb.MergeFull("b", []Entry{{Namespace: "d", Filter: "kept", Owner: "b", Version: 20, Count: 1}}, 10, 0)
 	if len(withdrawn) != 1 || withdrawn[0].Filter != "gone" {
 		t.Fatalf("expected only \"gone\" withdrawn, got %v", withdrawn)
 	}
@@ -125,14 +125,14 @@ func TestMergeFullWithdrawsAbsentEntries(t *testing.T) {
 func TestMergeFullKeepsEntriesAboveTheSnapshot(t *testing.T) {
 	tb := NewTable("a")
 	tb.Merge([]Entry{{Namespace: "d", Filter: "new", Owner: "b", Version: 30, Count: 1}})
-	if _, withdrawn := tb.MergeFull("b", nil, 10); len(withdrawn) != 0 {
+	if _, withdrawn, _ := tb.MergeFull("b", nil, 10, 0); len(withdrawn) != 0 {
 		t.Fatalf("an entry newer than the snapshot was withdrawn: %v", withdrawn)
 	}
 	if nodes, _ := tb.Match("d", "new"); len(nodes) != 1 {
 		t.Fatal("the newer entry no longer matches")
 	}
 	// An empty sync whose snapshot is above it does withdraw it.
-	if _, withdrawn := tb.MergeFull("b", nil, 40); len(withdrawn) != 1 {
+	if _, withdrawn, _ := tb.MergeFull("b", nil, 40, 0); len(withdrawn) != 1 {
 		t.Fatal("an empty authoritative sync did not withdraw the entry")
 	}
 }

@@ -6,8 +6,8 @@ import (
 )
 
 // TestConnectionSchemaHasKeepAliveAndCleanStart: the OpenAPI document's
-// Connection schema lists the keep alive in force, the one asked for, and
-// Clean Start.
+// Connection schema lists the keep alive in force, the one asked for,
+// whether TCP keepalive was left on, and Clean Start.
 func TestConnectionSchemaHasKeepAliveAndCleanStart(t *testing.T) {
 	f := newFixture(t, 0)
 	rec := f.do("GET", "/api/v1/openapi.json", opsToken, "")
@@ -24,7 +24,7 @@ func TestConnectionSchemaHasKeepAliveAndCleanStart(t *testing.T) {
 		t.Fatal(err)
 	}
 	props := doc.Components.Schemas["Connection"].Properties
-	for name, typ := range map[string]string{"keepAlive": "integer", "requestedKeepAlive": "integer", "cleanStart": "boolean"} {
+	for name, typ := range map[string]string{"keepAlive": "integer", "requestedKeepAlive": "integer", "tcpKeepAlive": "boolean", "cleanStart": "boolean"} {
 		if got := props[name].Type; got != typ {
 			t.Errorf("Connection.%s is %q in the document, want %q", name, got, typ)
 		}

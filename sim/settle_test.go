@@ -33,8 +33,8 @@ func TestSettleWaits(t *testing.T) {
 	// driver stops waiting at must be one the measurement then accepts, and one
 	// entry more must be refused. Asserting the refusal at both values is what
 	// makes this a check on the two agreeing rather than on one constant.
-	addrs := []net.IP{net.ParseIP("10.231.14.1"), net.ParseIP("10.231.14.2"), net.ParseIP("10.231.14.3")}
-	nodes := []string{"10.231.14.1:8001", "10.231.14.2:8001", "10.231.14.3:8001"}
+	addrs := []net.IP{net.ParseIP("198.51.100.1"), net.ParseIP("198.51.100.2"), net.ParseIP("198.51.100.3")}
+	nodes := []string{"198.51.100.1:8001", "198.51.100.2:8001", "198.51.100.3:8001"}
 	if p := serverStartProblems(100000, conntrack.limit, 1048576, true, nodes, addrs); len(p) != 0 {
 		t.Errorf("the driver would stop waiting at %d entries, which the run refuses: %v", conntrack.limit, p)
 	}

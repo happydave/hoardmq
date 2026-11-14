@@ -7,13 +7,16 @@ import (
 	"github.com/happydave/hoardmq/internal/packet"
 )
 
-// A CONNECT that found its client's lease and proposed an acquire is in flight
-// on this node until its answer shows it took nothing from another node, or,
-// when it took the lease over, until its caller has installed the session it
-// pulled (AcquireResult.Settle). Another CONNECT of the client here that finds
-// the lease already this node's waits for every such CONNECT first: answered
-// sooner, it would be served a fresh session that the takeover's import then
-// replaces, evicting it.
+// A CONNECT that proposes an acquire is in flight on this node until its
+// answer shows it took nothing from another node, or, when it took the lease
+// over, until its caller has installed the session it pulled
+// (AcquireResult.Settle). A CONNECT that fetches its lease's adoption is in
+// flight from before it claims the adoption until its caller has installed
+// the state it fetched, or, with nothing fetched, until it returns. Another
+// CONNECT of the client here that finds the lease already this node's waits
+// for every such CONNECT first: answered sooner, it would find neither the
+// session nor an adoption and be served a fresh session, which the import then
+// replaces, evicting it, or which, the import refused, is all that is left.
 
 // Two CONNECTs of a client can wait on the same takeover, and both wake when
 // it ends. The newer one, by its arrival at AcquireFrom, is served; an older

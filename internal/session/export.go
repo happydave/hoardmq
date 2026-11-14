@@ -86,6 +86,10 @@ func (m *Manager) ImportIf(ss *store.SessionState, admit func() bool) bool {
 
 func (m *Manager) importState(ss *store.SessionState) {
 	began := time.Now()
+	if m.traceSession != nil {
+		m.traceSession("import-begin", ss.ClientID, nil, nil)
+		defer m.traceSession("import-end", ss.ClientID, nil, nil)
+	}
 	defer func() {
 		m.imports.Add(1)
 		m.importNs.Add(int64(time.Since(began)))
@@ -100,6 +104,9 @@ func (m *Manager) importState(ss *store.SessionState) {
 	delete(sh0.sealed, key{ss.Namespace, ss.ClientID})
 	sh0.mu.Unlock()
 	m.Evict(ss.Namespace, ss.ClientID, packet.SessionTakenOver)
+	if m.traceSession != nil {
+		m.traceSession("import-evicted", ss.ClientID, nil, nil)
+	}
 	m.load(&store.State{Sessions: []*store.SessionState{ss}}, true)
 	// Recovery does not journal; an imported session is new to this node's
 	// log, so write it whole.
@@ -110,7 +117,7 @@ func (m *Manager) importState(ss *store.SessionState) {
 	sh.mu.Unlock()
 	if s != nil {
 		s.mu.Lock()
-		m.writer().full(s)
+		m.writer().full(s, wholeImport)
 		s.mu.Unlock()
 		m.syncIfDirty()
 	}
@@ -287,11 +294,15 @@ func (m *Manager) ImportCost() (n int64, total time.Duration) {
 	return m.imports.Load(), time.Duration(m.importNs.Load())
 }
 
-// ImportWaits reports how many Seals, and how many imports, waited for an
+// ImportWaits reports how many Seals, imports and CONNECTs waited for an
 // import of the same client to finish (ImportIf).
-func (m *Manager) ImportWaits() (seals, imports int64) {
-	return m.sealWaits.Load(), m.importWaits.Load()
+func (m *Manager) ImportWaits() (seals, imports, connects int64) {
+	return m.sealWaits.Load(), m.importWaits.Load(), m.connectWaits.Load()
 }
+
+// InstallsReplaced reports how many installs found another session object
+// for the client in the map and removed it first.
+func (m *Manager) InstallsReplaced() int64 { return m.installsReplaced.Load() }
 
 // EvictsFromImport is the subset of the evictions that came from adopting a
 // lease and pulling its state, rather than from the lease service's deferred

@@ -248,3 +248,124 @@ func TestAbandonedSweep(t *testing.T) {
 		t.Error("a young note was dropped")
 	}
 }
+
+func TestAbandonedSource(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		prev    string
+		granted uint64
+		from    string
+		current uint64
+		want    string
+	}{
+		{"the grant at the current token, the lookup saw this node", "n1", 7, "n2", 7, "n2"},
+		{"the grant at the current token, the lookup saw a third node", "n3", 7, "n2", 7, "n2"},
+		{"a grant below the current token", "n3", 5, "n2", 7, "n3"},
+		{"no grant recorded", "n3", 0, "", 7, "n3"},
+		{"no grant recorded, the lookup saw this node", "n1", 0, "", 7, "n1"},
+	} {
+		if got := abandonedSource(c.prev, c.granted, c.from, c.current); got != c.want {
+			t.Errorf("%s: abandonedSource = %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+// TestGrantRecordedForAnAbandonedAcquire: the grant that moves a lease here is
+// recorded on the key whether the CONNECT that asked for it gives up before
+// the grant applies or after, and on no key nothing here is waiting for.
+func TestGrantRecordedForAnAbandonedAcquire(t *testing.T) {
+	c := newCluster(t, []string{"n1"}, 2*time.Second, nil)
+	s := c.nodes["n1"].svc
+	lease := func(id, owner string, epoch uint64, online bool) *Lease {
+		return &Lease{Namespace: "default", ClientID: id, Owner: owner, Epoch: epoch, Online: online}
+	}
+	entry := func(id string) (abandonedAcquire, bool) {
+		s.abandoned.mu.Lock()
+		defer s.abandoned.mu.Unlock()
+		e, ok := s.abandoned.m[key{"default", id}]
+		return e, ok
+	}
+	now := time.Now()
+
+	// Gave up first: the note names this node, as a stale lookup does.
+	s.noteAbandoned(key{"default", "before"}, "n1")
+	s.changed(lease("before", "n2", 5, true), lease("before", "n1", 7, true), now)
+	if e, _ := entry("before"); !e.noted || e.prev != "n1" || e.granted != 7 || e.from != "n2" {
+		t.Errorf("note then grant: %+v; want the note kept and the grant 7 from n2", e)
+	}
+
+	// Granted while the CONNECT was still in flight, then given up.
+	k := key{"default", "after"}
+	s.connecting.begin(k)
+	s.changed(lease("after", "n2", 5, true), lease("after", "n1", 7, true), now)
+	if e, ok := entry("after"); !ok || e.noted || e.granted != 7 || e.from != "n2" {
+		t.Errorf("grant in flight: %+v, %v; want the grant 7 from n2 and no note", e, ok)
+	}
+	if _, taken := s.abandoned.takeNoted(k); taken {
+		t.Error("a grant with no note was taken as a note")
+	}
+	s.noteAbandoned(k, "n1")
+	s.connecting.end(k)
+	e, _ := entry("after")
+	if !e.noted || e.granted != 7 || e.from != "n2" || abandonedSource(e.prev, e.granted, e.from, 7) != "n2" {
+		t.Errorf("grant then note: %+v; want the note joined to the grant 7 from n2", e)
+	}
+
+	// Nothing here waits on this client.
+	s.changed(lease("idle", "n2", 5, true), lease("idle", "n1", 7, true), now)
+	if e, ok := entry("idle"); ok {
+		t.Errorf("a grant with no note and no CONNECT in flight was recorded: %+v", e)
+	}
+}
+
+// TestAbandonedSweepDropsGrantsWithoutANote: a grant recorded with no note
+// goes a ttl after it was written, whether or not the lease is here; a note
+// is kept as before.
+func TestAbandonedSweepDropsGrantsWithoutANote(t *testing.T) {
+	a := newAbandonedAcquires()
+	now := time.Unix(1000, 0)
+	ttl := time.Minute
+	kGrant, kNote := key{"d", "grant"}, key{"d", "note"}
+	a.grant(kGrant, 7, "n2", true, now, ttl)
+	a.note(kNote, "n2", now, ttl)
+	a.sweep(now.Add(ttl+time.Second), ttl, func(key) bool { return true })
+	if _, ok := a.take(kGrant); ok {
+		t.Error("an old grant with no note was kept")
+	}
+	if _, ok := a.take(kNote); !ok {
+		t.Error("an old note whose lease is here was dropped")
+	}
+	if a.grant(key{"d", "nobody"}, 7, "n2", false, now, ttl); a.len() != 0 {
+		t.Error("a grant nothing waits on was recorded")
+	}
+}
+
+// TestAdoptionNamingThisNodeIsRefused: an abandoned note that names this node,
+// with no grant recorded, leaves the adoption no previous owner to account
+// for. The client is refused Server Busy and the adoption kept, however often
+// it retries, rather than served a fresh session from the replicas' "not
+// found".
+func TestAdoptionNamingThisNodeIsRefused(t *testing.T) {
+	holdWorkerBack(t)
+	fixtureFallback = func(context.Context, string, string, string) (*store.SessionState, bool) { return nil, true }
+	t.Cleanup(func() { fixtureFallback = nil })
+	c := newCluster(t, []string{"n1", "n2", "n3"}, 2*time.Second, nil)
+	a := c.nodes["n1"]
+	if _, err := acquire(t, a, "x", nil, 300, false); err != nil {
+		t.Fatal(err)
+	}
+	ownedBy(t, a, "x", "n1")
+	a.svc.noteAbandoned(key{"default", "x"}, "n1")
+	for i := 0; i < 2; i++ {
+		res, err := acquire(t, a, "x", nil, 300, false)
+		if !refusedBusy(err) {
+			t.Fatalf("CONNECT %d: state %v, evidence %+v, err %v; want Server Busy", i+1, res.State != nil, res.Empty, err)
+		}
+		if !a.svc.adopting.unfinishedFor(key{"default", "x"}) {
+			t.Fatalf("CONNECT %d: the adoption was not kept", i+1)
+		}
+	}
+	if n := a.svc.LivenessStats().AdoptOwnerUnknown; n < 2 {
+		t.Fatalf("adopt_owner_unknown %d, want at least 2", n)
+	}
+}

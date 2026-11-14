@@ -53,7 +53,7 @@ func TestCountAgreesWithTheWalk(t *testing.T) {
 					in[j] = entry()
 					in[j].Owner = owner
 				}
-				tb.MergeFull(owner, in, uint64(rng.Intn(14)))
+				tb.MergeFull(owner, in, uint64(rng.Intn(14)), 0)
 			default:
 				op = "forget"
 				tb.Forget(owners[rng.Intn(len(owners))])
@@ -89,7 +89,7 @@ func TestCountSeesBothScopes(t *testing.T) {
 	if l, r := tb.Count(); l != 1 || r != 1 {
 		t.Fatalf("after a local tombstone: %d local, %d remote; want 1, 1", l, r)
 	}
-	tb.MergeFull("b", nil, 5)
+	tb.MergeFull("b", nil, 5, 0)
 	if l, r := tb.Count(); l != 1 || r != 0 {
 		t.Fatalf("after b's empty full sync: %d local, %d remote; want 1, 0", l, r)
 	}

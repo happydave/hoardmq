@@ -161,6 +161,8 @@ func (p *Plane) servedLoop() {
 			}
 		}
 		p.checkServed()
+		p.maybePrune()
+		p.reportPeers()
 		last = time.Now()
 	}
 }
@@ -640,6 +642,7 @@ func (p *Plane) forgetOwner(owner string, read uint64) bool {
 	delete(p.lastSync, owner)
 	delete(p.zeroAt, owner)
 	p.mu.Unlock()
+	p.discardIn(owner, "superseded")
 	return true
 }
 

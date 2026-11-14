@@ -58,7 +58,7 @@ ungated and everything after it must be gated.
 
 ## Before every tag after the first
 
-- [ ] `CHANGELOG.md` has the tag's section, written from `Unreleased`, with its
+- [x] `CHANGELOG.md` has the tag's section, written from `Unreleased`, with its
   upgrade notes (level, framing version, on-disk changes and what of them
   cannot be rolled back), and any deprecation the release makes.
 - [x] **Before the first gated change ships:** the design says what a node
@@ -67,23 +67,27 @@ ungated and everything after it must be gated.
   holds the log from the entry after the raise, builds no snapshot, and
   replays what it held when restarted on a build that understands the level
   (`TestBelowLevelNodeHoldsAndCatchesUpAfterUpgrade`).
-- [ ] A mixed-version test of each gated change keeps the old node on a
+- [x] A mixed-version test of each gated change keeps the old node on a
   build that applies the old semantics whatever the table's level, as the
   test above does with its test-only semantic.
-- [ ] A change to a replicated operation, a replication or route-sync frame, or a
+- [x] A change to a replicated operation, a replication or route-sync frame, or a
   state-machine snapshot field added its row to the upgrade-gate inventory in
   the same commit — not at release time.
-- [ ] Every change since the previous tag to what a replicated operation
+- [x] Every change since the previous tag to what a replicated operation
   does — a lease-table or shard-map operation, or how a follower applies a
   replication frame — raised `lease.BuildLevel`, keeps the old behaviour
   below its level, and is listed in the upgrade-gate inventory.
-- [ ] A mixed-version run between the previous tag and this one: the roll
-  completes, the level rises once after the last node, and no property of
-  the simulation corpus fails during it.
-- [ ] The extension API's changes since the previous tag, if any, raised
+- [x] A mixed-version run between the previous tag and this one: the roll
+  completes, the level rises once after the last node when the release
+  raises it (a release that changes only the framing version raises none),
+  and no property of
+  the simulation corpus fails during it. (`v0.2.0`: `TestRollFromPreviousRelease`
+  from the `v0.1.0` binary, its publishes acknowledged and delivered across
+  nodes; the corpus, `TestCorpus`, on the release commit.)
+- [x] The extension API's changes since the previous tag, if any, raised
   `ext.APIVersion` under the compatibility rules in `ext/CHANGELOG.md` and have
   their section there; `ext/api.txt` matches the code (`TestAPIGolden`).
-- [ ] `docs/upgrade.md` is true of this release: its framing version, its
+- [x] `docs/upgrade.md` is true of this release: its framing version, its
   feature level and its on-disk changes, and what of them cannot be rolled
   back, each held by the test it cites.
-- [ ] Every gate in `docs/dependency-policy.md` passes on the tagged commit.
+- [x] Every gate in `docs/dependency-policy.md` passes on the tagged commit.

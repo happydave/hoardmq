@@ -321,7 +321,7 @@ func (r *Replicator) rebalance(old, cur shardmap.Map) {
 					gained = append(gained, t)
 				}
 			}
-			r.wholeWrite(k, gained, bulk)
+			r.wholeWrite(k, gained, bulk, causeRebalance)
 			var lost []string
 			for _, t := range before {
 				if !contains(now, t) {
@@ -333,6 +333,7 @@ func (r *Replicator) rebalance(old, cur shardmap.Map) {
 			}
 		}
 		bulk.done()
+		r.endHeldOffTargets(cur)
 	}
 	r.fanned.Store(cur.Version)
 	if r.o.ConfirmMoved != nil {

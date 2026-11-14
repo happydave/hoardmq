@@ -29,6 +29,9 @@ type journalWriter struct {
 	// the session's journalErr, and the publish is refused for it.
 	refusing bool
 	failed   bool
+	// anyFailed is set by any failed append through the writer, refusing or
+	// not: what a whole write written through it reads at its close.
+	anyFailed bool
 }
 
 // The journal operations a failure is counted under.
@@ -60,6 +63,7 @@ func (w *journalWriter) record(s *Session, f func() error) bool {
 		return true
 	}
 	if err := f(); err != nil {
+		w.anyFailed = true
 		if w.refusing {
 			w.failed = true
 		} else {
@@ -115,6 +119,7 @@ func (w *journalWriter) deleteCopies(s *Session) {
 		return
 	}
 	if err := w.j.SessionDelete(s.storeKey()); err != nil {
+		w.anyFailed = true
 		s.log.Error("journal append failed", "err", err)
 		if s.mgr != nil {
 			s.mgr.count("hoardmq_journal_failures_total", opAppend, 1)
@@ -179,10 +184,16 @@ func (w *journalWriter) dropped(s *Session, seq uint64) {
 }
 
 // full records a session whole: its metadata, subscriptions, inbound
-// identifiers and entries, as after an import.
-func (w *journalWriter) full(s *Session) {
-	w.record(s, func() error {
-		st := s.snapshot()
+// identifiers and entries, as after an import. The replicas are sent the
+// session whole once the last record is appended (wholeWriter).
+func (w *journalWriter) full(s *Session, cause string) {
+	if !w.writes(s) {
+		return
+	}
+	closeWhole := w.mgr.openWhole(s.key, cause)
+	var st *store.SessionState
+	ok := w.record(s, func() error {
+		st = s.snapshot()
 		k := store.Key{Namespace: st.Namespace, ClientID: st.ClientID, Epoch: st.Epoch}
 		// Whole means whole: the delete first, so the log — and every
 		// replica applying it — replaces whatever it held for the session
@@ -215,6 +226,9 @@ func (w *journalWriter) full(s *Session) {
 		}
 		return nil
 	})
+	if closeWhole != nil {
+		closeWhole(st, ok)
+	}
 }
 
 // armRewrite arranges for s to be written whole after an own record failed to
@@ -269,6 +283,7 @@ func (m *Manager) rewrite(s *Session) rewriteResult {
 	sh.mu.Lock()
 	if sh.sessions[s.key] != s {
 		sh.mu.Unlock()
+		m.sessionLeft(s.key)
 		return rewriteGone
 	}
 	s.mu.Lock()
@@ -278,7 +293,7 @@ func (m *Manager) rewrite(s *Session) rewriteResult {
 		return rewritten
 	}
 	w := m.ackWriter()
-	w.full(s)
+	w.full(s, wholeRewrite)
 	failed := w.unjournaled()
 	if !failed {
 		s.unwritten = false
@@ -560,6 +575,9 @@ func (m *Manager) load(st *store.State, handedOver bool) {
 	for _, ss := range st.Sessions {
 		k := key{ss.Namespace, ss.ClientID}
 		s, expired := m.rebuild(ss, now)
+		if m.traceSession != nil {
+			m.traceSession("load-rebuilt", k.id, s, nil)
+		}
 		if handedOver {
 			s.installed = installedIdentities(ss)
 		}
@@ -584,11 +602,39 @@ func (m *Manager) load(st *store.State, handedOver bool) {
 		}
 		sh := m.shardFor(k)
 		sh.mu.Lock()
+		if m.traceSession != nil {
+			m.traceSession("load-install", k.id, s, sh.sessions[k])
+		}
+		var replaced *Session
+		var replacedConn Connection
+		var redistribute []redistributable
+		if prev := sh.sessions[k]; replacesAnother(prev, s) {
+			// Removed as an eviction removes a session, so nothing keeps a
+			// connection or a route to an object the map no longer holds.
+			prev.mu.Lock()
+			if prev.conn != nil {
+				replacedConn = prev.conn
+				delete(sh.byConn, replacedConn)
+				prev.detach()
+			}
+			prev.will, prev.willArmed = nil, false
+			redistribute = m.removeLocked(sh, prev)
+			prev.mu.Unlock()
+			replaced = prev
+			m.installsReplaced.Add(1)
+		}
 		sh.sessions[k] = s
 		s.mu.Lock()
 		s.countQueue()
 		s.mu.Unlock()
 		sh.mu.Unlock()
+		if replaced != nil {
+			if replacedConn != nil {
+				replacedConn.Close(packet.SessionTakenOver)
+			}
+			m.redistribute(replaced, redistribute)
+			m.log.Error("a session install found another session object for the client and removed it", "client", k.id, "connected", replacedConn != nil)
+		}
 		if s.willArmed && s.will != nil {
 			w := s.will
 			if w.Delay == 0 {

@@ -128,9 +128,12 @@ type Connection struct {
 	// KeepAlive is the keep alive in force, in seconds (0: none): the
 	// client's, or the server's limits.maxKeepAlive when it replaced the
 	// client's. RequestedKeepAlive is what the client's CONNECT asked for.
-	KeepAlive          int  `json:"keepAlive"`
-	RequestedKeepAlive int  `json:"requestedKeepAlive"`
-	CleanStart         bool `json:"cleanStart"`
+	KeepAlive          int `json:"keepAlive"`
+	RequestedKeepAlive int `json:"requestedKeepAlive"`
+	// TCPKeepAlive is whether the connection's TCP keepalive was left on
+	// when its CONNECT was accepted, as it is when the CONNECT asked for 0.
+	TCPKeepAlive bool `json:"tcpKeepAlive"`
+	CleanStart   bool `json:"cleanStart"`
 }
 
 // Lease is a client identifier's ownership record in the lease table.

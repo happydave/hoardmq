@@ -193,7 +193,7 @@ func TestProvenanceSectionTracesOnItsOwn(t *testing.T) {
 		Effective: &Effective{Clients: 100000, LeaseTTLMs: 30000, HeartbeatMs: 100, HeartbeatMisses: 3, RaftTickMs: 10, Replicas: 2, TempRoot: "/dev/shm", TimingSet: "harness (stress), overridden: ttl 30000 ms", ClientSources: 8, ClientDial: dialAtConnect},
 		Tree:      Tree{Commit: "abc123", Dirty: &dirty, DiffSHA256: "d1ff", Changed: []string{" M sim/x.go"}, ChangedTotal: 1},
 		TreeAtEnd: &TreeCheck{Changed: &changed},
-		Host:      "ai2", GoVersion: "go1.27.1",
+		Host:      "host-a", GoVersion: "go1.27.1",
 	}
 	s := provenanceSection(p)
 	for _, want := range []string{
@@ -205,7 +205,7 @@ func TestProvenanceSectionTracesOnItsOwn(t *testing.T) {
 		"Effective (timings: harness (stress), overridden: ttl 30000 ms):",
 		"Clients dial from 8 source addresses: source address, port chosen at connect.",
 		"`sim.test -test.run=^TestFailover$ -test.timeout=1h0m0s`",
-		"Host `ai2`, go1.27.1",
+		"Host `host-a`, go1.27.1",
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("section lacks %q:\n%s", want, s)

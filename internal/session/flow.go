@@ -582,15 +582,33 @@ func (m *Manager) Subscribe(c Connection, p *packet.Subscribe) []packet.ReasonCo
 	if len(p.Properties.SubscriptionIdentifiers) > 0 {
 		id = p.Properties.SubscriptionIdentifiers[0]
 	}
+	if m.subscribePause != nil {
+		m.subscribePause()
+	}
 	w := m.ackWriter()
 	var changes []filterChange
 	limit := m.CurrentLimits().MaxSubscriptions
 	s.mu.Lock()
+	if !mayRoute(s.removed, s.conn, c) {
+		// Removed, or its connection replaced, since the lookup: whoever moved
+		// it owns it now.
+		s.mu.Unlock()
+		for i := range codes {
+			codes[i] = packet.UnspecifiedError
+		}
+		return codes
+	}
 	for i, ps := range p.Subscriptions {
 		if _, holds := s.subs[ps.Filter]; !subscriptionFits(len(s.subs), limit, holds) {
 			codes[i] = packet.QuotaExceeded
 			m.count("hoardmq_subscription_limit_refusals_total", map[string]string{"namespace": s.key.ns}, 1)
 			s.log.Debug("subscription refused: the session holds its limit of filters", "filter", ps.Filter, "limit", limit)
+			continue
+		}
+		if m.opts.FilterRoutable != nil && !m.opts.FilterRoutable(s.key.ns, ps.Filter) {
+			codes[i] = packet.QuotaExceeded
+			m.count("hoardmq_subscription_refusals_total", map[string]string{"reason": "route-entry-too-large"}, 1)
+			s.log.Info("subscription refused: its route entry would not fit a cluster frame", "filterBytes", len(ps.Filter))
 			continue
 		}
 		sub := Subscription{Filter: ps.Filter, QoS: ps.QoS, NoLocal: ps.NoLocal, RetainAsPublished: ps.RetainAsPublished, RetainHandling: ps.RetainHandling, Identifier: id}
@@ -678,7 +696,7 @@ func (m *Manager) refuseUnsynced(changes []filterChange, codes []packet.ReasonCo
 func (m *Manager) putBack(s *Session, c Connection, changes []filterChange, subscribed bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.conn != c {
+	if !mayRoute(s.removed, s.conn, c) {
 		return
 	}
 	w := m.writer()
@@ -790,6 +808,26 @@ func (m *Manager) Disconnect(c Connection, graceful bool, _ packet.ReasonCode, w
 	delete(sh.byConn, c)
 	s.mu.Lock()
 	s.detach()
+	if !heldAs(sh.sessions[s.key], s) {
+		// The map holds another object for the client: this one can never be
+		// resumed, and its key's records are that object's, so it is removed
+		// without a journal write.
+		var will *Will
+		if willWanted {
+			will = s.will
+		}
+		s.will, s.willArmed = nil, false
+		redistribute := m.removeLocked(sh, s)
+		s.mu.Unlock()
+		sh.mu.Unlock()
+		release()
+		m.log.Error("a connection ended whose session object the map no longer holds; removed without a journal write", "client", s.key.id)
+		if will != nil {
+			m.publishWill(will, s)
+		}
+		m.redistribute(s, redistribute)
+		return
+	}
 	if o := c.SessionExpiryOverride(); o != nil {
 		if s.expiryInterval == 0 {
 			s.log.Debug("Session Expiry Interval on DISCONNECT ignored: CONNECT set 0")

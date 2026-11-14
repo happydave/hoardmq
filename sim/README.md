@@ -261,8 +261,8 @@ storm target (`storm_target` in `run.json`); when it wins the election (`leader_
 of their leases, and when the other survivor wins they land beside it and take every lease over from it. The
 election decides which, not the harness, and the two kinds of run differ by seconds of recovery and by thousands
 of takeovers, so arms that drew different mixes are said to have. `placementmix.py --need K` tells a batch driver
-whether every arm has K runs of each kind; the balancing driver is beside the ai2 batch runbook in the tickets
-repo.
+whether every arm has K runs of each kind; the balancing driver is kept with the batch's runbook, outside this
+repository.
 
 There is no CI system in this repository yet; the gate is `go test ./sim`
 in the build sequence documented in
@@ -913,3 +913,168 @@ sweep never changes dial mode.
   runs, on the same limit, so back-to-back 100k runs start on their own.
 - **Stdin closing:** the driver listens on no port, and ends every client and exits when its stdin closes.
 - **The build:** a recorded run refuses a driver built from another commit or a modified tree.
+
+### Across hosts
+
+`TestScale` measures a cluster of broker processes, `hoardmq serve`, on the hosts a layout names, with every client in
+the driver program on the test's host. It runs when `HOARDMQ_SIM_SCALE_LAYOUT` names a layout file and
+`HOARDMQ_SIM_SCALE_CLIENTS` the client count, and writes its record to `HOARDMQ_SIM_ARTIFACT`:
+
+```
+HOARDMQ_SIM_SCALE_LAYOUT=<abs path> HOARDMQ_SIM_SCALE_CLIENTS=<n> HOARDMQ_SIM_ARTIFACT=<abs dir> taskset -c <driver cores> go test -count=1 -timeout 3h -run '^TestScale$' ./sim/
+```
+
+**The layout** (JSON) lists each node — name, `host` (`local`, or an ssh destination), `cores` (a CPU list it is
+pinned to), `address`, `client_port`, `cluster_port`, `observability_port` (and `observability_address` when it is
+not the node's address), the broker binary's absolute path and a `run_root` at least three directories deep — and the
+driver's binary, cores and source addresses. Every listener names its address; a wildcard is refused.
+
+**Settings:** `HOARDMQ_SIM_SCALE_QUEUE` (`<sessions>x<depth>`, default a tenth of the clients by 10 messages, or `off`),
+`HOARDMQ_SIM_SCALE_VICTIM` (default `n2`), `HOARDMQ_SIM_HOLD_SEC` (H, default 60 s), `HOARDMQ_SIM_SCALE_SCRAPE_SEC`
+(the settle and checkpoint phases' `/metrics` interval, default 10 s, the rejoin's half of it; a scrape walks every
+session record, so at a million sessions a longer interval loads the nodes less), `HOARDMQ_SIM_SCALE_IDLE_HOLD_SEC`
+(unset by default: the least time, 1 to 3600 s, the idle phase lasts from the fill's end, settled or not, so the
+connections stay idle past the transport's keepalive), `HOARDMQ_SIM_SCALE_DRIVER_TCP_KEEPALIVE` (`default`, Go's: a
+probe every 15 s on an idle connection; or `off`, for the clients' connections only — one client host stands in for
+many, so every probe and its answer cross one network card; the driver reports the keepalive it applies and the run
+refuses another), `HOARDMQ_SIM_SCALE_CLIENT_KEEP_ALIVE` (0 by default, no keep alive and nothing sent while idle; or
+1 to 65535 s, the MQTT keep alive every client's CONNECT asks for, each then sending a PINGREQ that often; the
+driver reports it and the run refuses another), `HOARDMQ_SIM_SCALE_DELIVERY_CHECK` (`off` by default; `all`, or a
+number of clients to sample: the delivery check below), `HOARDMQ_SIM_SCALE_NODE_BYTES`
+and `HOARDMQ_SIM_SCALE_DRIVER_BYTES` (the memory a client is assumed to cost the cluster and the driver, for the start
+check: 48 KiB and 32 KiB).
+
+**Each node** runs the broker's defaults except: its name and data directory; one TCP listener; the cluster listen
+and advertise addresses and its peers; `mtls` between nodes, with a certificate authority the run makes for itself;
+the observability listener and the `metrics.prometheus` module that serves it; anonymous clients allowed every topic
+(`auth.anonymous` and `authz.file`), since a broker refuses every subscribe until an authorizer allows it; and the JSON
+log format. The broker reads every `HOARDMQ_` variable as an override, so the launch unsets them.
+
+**Before anything starts,** the run reads each host once and refuses, naming the value seen, when: a node's address
+is not on its host; any of its ports is in use; its run directory exists; a broker binary is already running there;
+a binary's sha256 differs from the test host's copy, or either binary was built from another commit or a modified
+tree; available memory is under the estimate; the hard open-file limit cannot hold a node that takes a lost node's
+clients; connection tracking, where loaded, holds under four times the connections ending on the host (four times
+every client on the driver's host); the clock is not NTP-synchronized; or the 1-minute load is over 4.
+
+**The phases**, in order, each in `run.json` as it ends: start (every node `/readyz`); the empty cluster's memory; the
+fill; idle (sessions and replica copies unchanged for 30 s), with resident memory a session; the queue step (sessions
+taken offline, `depth` QoS 1 messages queued to each, then resumed and counted), with resident memory a queued
+message; a checkpoint on every node after the fill, with each one's resident peak; the storm (the victim killed, the
+recovery instant by the definition above, the probe's pairs, and the connects each reconnecting client made from its
+drop to its accepted CONNACK, as a median, 90th and 99th percentile, maximum and mean; the driver's online and
+recovered counts once a second; the clients not recovered at the window's end, named; and each refused probe publish
+grouped by the node it went to, its reason and its pair); the delivery check, when set; the victim's restart and rejoin (ready, serving,
+holding replica copies unchanged for 30 s with no node short of copies), with the bytes the hosts' links carried;
+and the route census (below). A
+sampler reads each host every 500 ms (memory, sockets, connection tracking, interface counters, each node's resident
+memory and CPU); `/metrics` is scraped at the scrape interval outside the storm, each scrape's duration recorded, and in the storm
+only for the follower's lock and fetch counters (below).
+
+**The follower's lock and fetches.** Before the storm's kill, after its verdict and at the run's end, before teardown,
+every node's `hoardmq_replication_lock_hold_seconds{kind}`, `hoardmq_replication_lock_wait_seconds{kind}` and
+`hoardmq_replication_fetch_request_seconds` histograms are read and kept in `run.json` as `lock_fetch` (point, node,
+time, each histogram's bounds, cumulative counts, sum and count, or the scrape's error). The report gives the storm
+window on each node read at both of its ends: the samples of the `find` and `apply` waits, the `apply` holds and the
+fetch requests between them, and the bound of the bucket holding each one's 99th percentile, read from the
+difference. These are the in-process failover harness's lock trace and fetch timing, there read from the broker
+itself; a node restarted between two readings has no window.
+
+Every reading also keeps the node's `hoardmq_replication_fetches_total` by outcome (`fetches`; an outcome the node
+never reached has no series and is absent), its route reconciler's counters (`reconcile`, below), its sessions served
+empty, and how long the scrape took (`took_ms`): a scrape walks every session record, so at a million sessions it is
+part of the load. Between the kill and the storm's verdict the survivors are read every 10 s as well (point
+`storm-tick`), so a long hold can be placed against a session served empty or a fetch that found nothing at the same
+time. `run.json` keeps each survivor's intervals between consecutive storm readings as `storm.hold_intervals`: the
+follower's lock holds over 0.52 s by kind (the bucket bound 2^19 µs, about a quarter of a fetch's 2 s budget) with the
+highest bucket that rose, the fetches that waited that long for the lock, the sessions served empty and the fetches
+by outcome; the report lists the intervals holding any of those or a fetch outcome starting `none`. The scrapes in the
+storm are load the survivors would not otherwise carry, each one's time recorded.
+
+**The route census**, the last phase, after the rejoin: every node's `hoardmq_subscriptions_active` (summed over
+namespaces) against its `hoardmq_routes_active{scope="local"}`, read at the same scrape as the lock and fetch
+histograms (point `census` in `lock_fetch`, the figures as `routes`). The run's filters are one per client, so the two
+are equal on a node that advertises every subscription it holds; one holding more has subscribers a publish made on
+another node cannot find. Figures that differ are read again every 5 s for up to 30 s (a move's held route
+withdrawal lasts the takeover timeout, 5 s by default); a difference that remains, a node not read, or a reading
+without the counters fails the run, and `run.json` names each such node with both figures in `route_census`. Its
+control is a unit test feeding the census a node that advertises fewer routes than it holds subscriptions: the brokers
+are separate processes, and making one advertise less than it holds would need a product hook.
+
+The same readings give **the whole-session check**: every node's `hoardmq_sessions_active` (summed over namespaces)
+against its subscriptions. Every client of the run holds one filter, so the sessions exceed the subscriptions by
+exactly the sessions the run left without one, the probe's publishers and the delivery check's removed controls; any
+more is a session holding no subscription its client subscribed, which no publish was needed to see. `run.json` keeps
+it as `route_census.whole_sessions` (each node's two figures, the exempt count and why, and `hollow`); the census
+reads again while it is not 0, within the same 30 s, and a count that remains is a finding in the report, not a
+failure (the delivery check stays the instrument that names the clients). Clients that failed the fill would make
+the figure inexact, and it says so.
+
+**The route reconciler.** At the census and at the end every node's `hoardmq_route_reconcile_passes_total`,
+`_suspects`, `_corrections_total{direction, kind}`, `_refused_total{kind, reason}` and `_skipped_total{reason}` are
+kept as `reconcile` in the reading; the report gives them in a table, and a node whose reconciler corrected anything
+by the census is a finding (`route_census.reconciler_findings`): a difference the live paths left, corrected, while
+the run goes on.
+
+**The delivery check** (with `HOARDMQ_SIM_SCALE_DELIVERY_CHECK` set), after the storm and before the restart. A
+client told Session Present 1 holds every filter as far as it knows, so a session resumed without its subscriptions
+reads recovered; only a message that never arrives shows it. The driver chooses the clients (every one, or a sample
+drawn with a fixed seed), and 64 publisher connections send one QoS 1 message to each chosen client's own filter. A
+publish refused (reason code 0x80 or above) or unanswered is sent again in a later pass, 2 s apart, at most 30 passes,
+and every refusal is counted by its code. Each chosen client is then classed, once its message has arrived or 30 s
+after the last publish: delivered; never accepted, by its last code (the broker never took the message, so it says
+nothing about the session); not online; told Session Present 0 since the mark (already counted by the storm); a
+**lost session** — resumed with Session Present 1 since the mark and nothing received, its publish answered No
+Matching Subscribers or accepted and not delivered — named with the node it is connected to; or not delivered on a
+connection held through the storm, named the same way. `run.json` keeps the result as `delivery` (`lost_sessions`
+and the named `lost`, `held_not_delivered`, `never_accepted` by code, `refusals_by_code`, `controls_removed` and
+`controls_caught`), with up to 1,000 clients named a class, and the report lists every lost session.
+
+Each check carries its own negative control: up to 10 chosen clients that resumed with Session Present 1 send an
+UNSUBSCRIBE for their filter while still holding it, which is a session resumed without its subscription made on
+purpose. They are counted apart from every class, and the run fails as a harness failure when none could be made,
+when any of them is not counted lost, or when no chosen client received its message. Losses are recorded, not judged.
+
+At a million clients a sample keeps the check short. With a loss rate p a client, a sample of n holds at least one
+loss with probability 1 − (1 − p)^n: at 1 in 100,000, a sample of 300,000 sees one with probability
+1 − e^−3.0 ≈ 0.95.
+
+**The clients' retry policy,** which the attempt counts measure as much as the broker: after a drop, a failed
+connect or a refused CONNACK, a client waits a backoff, then tries the next node in its list, or the node a Server
+Reference names. The backoff starts at 50 ms and doubles to a 1 s cap, each wait drawn uniformly from half to one and
+a half times it from the client's seeded generator, and returns to 50 ms after an accepted CONNACK. Client `i` lists
+the nodes starting at node `i mod N`, so a lost node's clients all try the same next node first.
+
+**Named clients' CONNACKs.** Each client keeps its latest four CONNACKs, accepted or refused (when it read it, the
+node, the reason code, Session Present, and how long the connect took from its dial), and its latest connect that
+reached the handshake and read no CONNACK, with the class it failed with: a CONNECT the broker may have answered after
+the client stopped listening. The record is 88 bytes a client (88 MB at 1,000,000 clients) and costs a connect one
+uncontended lock and no allocation (`BenchmarkNoteConnect`). At teardown, before the driver closes, the
+run gathers every client it named: the delivery check's clients that received nothing and its negative controls, and
+every client a node's log names in a "session served empty" Warn or a route reconciler correction or refusal (at most
+2,000 lines a node); it asks the driver (and its own probe, for a probe client) for their records and keeps them in
+`run.json` as `connacks`, each entry named by node and dated against the crash, with why the client was named. The
+report lists the first 50.
+
+**Late drops.** Each client also keeps its latest four drops (when, the node, and the cause: the DISCONNECT's reason
+code, or none when the transport ended), 72 bytes a client (72 MB at 1,000,000 clients), under the lock its drop
+count already takes. The driver notes the first of its readings, after the crash, with every client online and
+recovered once one had been below; at the storm's verdict it names every client with a drop at or after that reading,
+with those drops by cause (marked when the client dropped more often than it keeps) and its CONNACK record as it
+stood then, at most 5,000 clients (`run.json` `storm.summary.late_drops`, dated by the test against the crash). The
+report's "Late drops" lists the first 50. A late drop is what moves a storm's recovery instant past the time every
+client was back.
+
+**What it never does:** signal a process other than the one it launched (the PID, start time and executable read
+again before each signal), or remove anything but its own run's directory under a node's run root, with no symlink on
+the way. After each phase the run reads every node's recorded process again, and a node that has gone (other than
+the victim between its kill and its restart) fails the run, named with the end of its log. A failed phase ends the run
+at its teardown, which stops every node, keeps each node's log in the artifact and removes the run directories;
+`run.json` names the nodes it stopped (`teardown.stopped`) apart from those it found not running
+(`teardown.not_running`).
+
+**Kept directories.** When any reading of any node (the lock and fetch points, the census) counted a session served
+empty (`hoardmq_sessions_rebuilt_empty_total` above 0), or the storm had a late drop, teardown keeps every broker's
+run directory instead of removing it: each node's configuration, journal, replica store, checkpoints and audit log are
+the evidence of what its copies held and which node took a session when. The report names the kept directories with their sizes and why (`run.json` `teardown.kept`, `teardown.kept_why`); they are
+removed by hand once that evidence has been read, and a later run on the same host needs the disk for another set.

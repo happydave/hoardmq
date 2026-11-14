@@ -4,6 +4,7 @@ import (
 	"math/rand"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/happydave/hoardmq/internal/message"
@@ -25,6 +26,10 @@ type Router struct {
 	roots    map[string]*node // by namespace
 	retained *retained
 	rng      *rand.Rand
+	// index holds the trie nodes holding a direct subscriber or a group, and
+	// walkAt the position of the walk in progress (index.go).
+	index  []*node
+	walkAt atomic.Int64
 
 	// observer is told when a namespace's direct filter gains its first
 	// local subscriber or loses its last, and when a shared group's local
@@ -89,6 +94,7 @@ func (r *Router) Add(s *session.Session, sub session.Subscription) bool {
 	root := r.root(s.Namespace(), true)
 	share, inner := topic.SplitShared(sub.Filter)
 	n := root.walk(inner, true)
+	held := n.holding()
 	var count int
 	var existed bool
 	if share == "" {
@@ -110,6 +116,9 @@ func (r *Router) Add(s *session.Session, sub session.Subscription) bool {
 		_, existed = g.members[s]
 		g.members[s] = sub
 		count = len(g.members)
+	}
+	if !held {
+		r.indexPut(s.Namespace(), inner, n)
 	}
 	r.mu.Unlock()
 	if !existed && (share != "" || count == 1) {
@@ -156,6 +165,9 @@ func (r *Router) Remove(s *session.Session, filter string) bool {
 		}
 	}
 	if removed {
+		if !n.holding() {
+			r.indexDelete(n)
+		}
 		root.prune(inner)
 	}
 	r.mu.Unlock()

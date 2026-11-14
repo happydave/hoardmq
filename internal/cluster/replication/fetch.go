@@ -11,12 +11,13 @@ import (
 // Fetch returns a replica of the session for a new owner whose previous
 // owner cannot hand the state over. It returns nil when no source answers
 // with one, and answered says what that nil is worth: true when every node
-// that was asked replied, false when a request ended without a reply or
-// nobody could be asked yet. Only an answered nil is evidence that no copy
-// exists. A source that is down is not asked and does not count against it;
-// down names it, so the caller can judge whether it may still hold a copy.
-// Under a map that no longer holds prev, down also names the other peers
-// that are down, prev aside (namedDown). A peer that is back on its control
+// that was asked replied, false when a request ended without a reply,
+// nobody could be asked yet, or the budget ended before the other peers were
+// asked for a kept copy (fetchAnswered). Only an answered nil is evidence that
+// no copy exists. A source that is down is not asked and does not count
+// against it; down names it, so the caller can judge whether it may still
+// hold a copy. down also names the other peers that are down, prev aside
+// (namedDown). A peer that is back on its control
 // connection and not yet Up cannot be asked on the data connection a fetch
 // travels on, and is not down either: as a source or a former holder it may
 // hold the copy, so it leaves the fetch unanswered.
@@ -112,7 +113,7 @@ func (r *Replicator) fetch(ctx context.Context, ns, id, prev string) (st *store.
 	}
 	peerDown := false
 	for _, p := range r.o.Transport.Peers() {
-		if !asked[p.Name] && namedDown(prev, m.Basis, p.Name, fetchReach(p)) {
+		if !asked[p.Name] && namedDown(prev, p.Name, fetchReach(p)) {
 			down = append(down, p.Name)
 			peerDown = true
 		}
@@ -125,6 +126,9 @@ func (r *Replicator) fetch(ctx context.Context, ns, id, prev string) (st *store.
 	// spend the time a kept copy needs.
 	var kept *store.SessionState
 	keptFrom, keptAsked, waitingKept := "", false, 0
+	// budgetSpent is a kept-copy pass that ended before asking the other
+	// peers: none of them has said it holds nothing.
+	budgetSpent := false
 	askKept := func() {
 		keptAsked = true
 		if !contains(sources, r.o.Node) {
@@ -134,6 +138,7 @@ func (r *Replicator) fetch(ctx context.Context, ns, id, prev string) (st *store.
 			}
 		}
 		if ctx.Err() != nil {
+			budgetSpent = true
 			return
 		}
 		for _, p := range r.o.Transport.Peers() {
@@ -213,6 +218,11 @@ func (r *Replicator) fetch(ctx context.Context, ns, id, prev string) (st *store.
 		r.count("hoardmq_replication_fetches_total", map[string]string{"outcome": "none-returning"}, 1)
 		r.log.Debug("replica not fetched: a peer that may hold it is back on its control connection and cannot be asked yet", "client", id, "returning", returning, "sources", sources)
 	}
+	if budgetSpent {
+		r.fetches.noneBudgetSpent.Add(1)
+		r.count("hoardmq_replication_fetches_total", map[string]string{"outcome": "none-budget-spent"}, 1)
+		r.log.Debug("replica not fetched: the budget ended before the kept-copy pass asked the other peers", "client", id, "sources", sources)
+	}
 	r.fetches.none.Add(1)
 	if unanswered {
 		r.fetches.noneUnanswered.Add(1)
@@ -225,16 +235,25 @@ func (r *Replicator) fetch(ctx context.Context, ns, id, prev string) (st *store.
 	}
 	r.count("hoardmq_replication_fetches_total", map[string]string{"outcome": "none"}, 1)
 	r.log.Debug("no replica on any source", "client", id, "sources", sources, "down", down, "prev", prev, "map", m.Version)
-	return nil, !unanswered, down, unconfirmed, unconfirmedFrom
+	return nil, fetchAnswered(unanswered, budgetSpent), down, unconfirmed, unconfirmedFrom
+}
+
+// fetchAnswered decides whether a fetch that found no copy has shown that none
+// exists, which lets the caller serve a fresh session: no request to a node
+// that may hold one ended unanswered, and the kept-copy pass did not end on a
+// spent budget before asking the other peers. It is pure.
+func fetchAnswered(unanswered, budgetSpent bool) bool {
+	return !unanswered && !budgetSpent
 }
 
 // namedDown reports whether a fetch names a peer it cannot reach in down,
-// beside the down sources, for the caller to judge by the log. Under a map
-// whose basis no longer holds prev, the sources are not the nodes prev
-// replicated to, and the copy it fed may be on any peer. prev is judged as
-// the previous owner, and a returning peer leaves the fetch unanswered.
-func namedDown(prev string, basis []string, peer string, reach fetchPeerReach) bool {
-	return prev != "" && !contains(basis, prev) && peer != prev && reach == reachDown
+// beside the down sources, for the caller to judge by the log. A former holder
+// may keep a copy on any member, and the kept-copy pass cannot ask one that is
+// down, so every such peer is named, the previous owner aside: the caller
+// judges that one as the owner. A returning peer leaves the fetch unanswered
+// instead.
+func namedDown(prev, peer string, reach fetchPeerReach) bool {
+	return peer != prev && reach == reachDown
 }
 
 // fetchAnswer is one node's reply to a fetch request, or ok false when the

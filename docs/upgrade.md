@@ -102,6 +102,22 @@ Each link runs at the lower framing version of its two ends
   release tag, which are all below version 5.
 - A snapshot in format 1, the inline form older builds stored, is still read
   (`TestRestartFromAFormatOneCheckpoint`).
+- **Below version 6**, a peer is sent each full route set in one frame, as
+  before, and receives delta batches cut at 32 KiB, which it reads as any
+  run of batches. A set over the link's frame limit is refused, now counted
+  in `hoardmq_route_send_failures_total{reason="too-large"}` and logged at
+  Warn, so past the limit routes do not resync with that peer until it is
+  upgraded; between upgraded nodes sets travel in parts during the roll
+  (`TestMixedVersionRouteSync`). A node on an older build sends its own set
+  in one frame too, so a node restarted beside one whose set is over the
+  limit is ready but degraded (`/servingz` 503 `routes-unknown`, refusing
+  QoS 1 and 2 publishes made on it) until that node is upgraded as well:
+  in a roll from `v0.1.0` with every node's set over the limit, each upgraded
+  node serves again once the last one is upgraded
+  (`TestRollFromPreviousRelease`). The roll waits on `/readyz`, as above, so
+  it completes. A member on an older build never acknowledges a set, so the
+  upgraded nodes keep their route tombstones until it is upgraded or
+  removed. This applies to `v0.1.0`, which is below version 6.
 
 ### By level: nothing, in a correct roll
 
@@ -109,6 +125,17 @@ Until every member runs a build that understands a new level, the cluster
 applies the old level's semantics, and no node holds
 (`TestCorrectRollNeverHolds`, `TestMixedVersionClusterAppliesIdenticallyOrRefuses`).
 A node below the cluster's level holds; see "A held node" below.
+
+**Level 2** is raised by `v0.2.0`, once its roll is done.
+At level 2 a follower refuses a session's metadata record alone that finds no
+replica copy, and the owner sends the session whole, so a takeover never
+reads a copy holding the session without its subscriptions and queue
+(clustering.md, ["Data-plane replication"](clustering.md#data-plane-replication)).
+During the roll the level stays 1 and every follower applies such a record as
+`v0.1.0` does; the release's other replication changes work between its own
+nodes from the first one upgraded, and an upgraded owner's imports reach a
+`v0.1.0` follower as snapshots, which it applies as a resync's
+(`TestMixedVersionWholeCopies`, `TestRollFromPreviousRelease`).
 
 ## How a raise happens
 
@@ -177,12 +204,19 @@ the older level again, which holds the raise back
 
 ### After the raise
 
+A release that raises the level can be rolled back in place only until its
+last node is upgraded: the raise follows that node's return.
+
 There is no rollback in place. The level never lowers
 (`TestClusterLevelOnlyRises`), and a node restarted on an older build holds
 (above). Roll forward with a fixed release.
 
 ## What cannot be rolled back
 
+- **Level 2, once raised.** After a `v0.2.0` cluster has raised its level to
+  2, no node goes back to `v0.1.0` in place: the level never lowers
+  (`TestClusterLevelOnlyRises`), and a node restarted on `v0.1.0` holds
+  ("A held node", above). Before the raise it can, as "Rolling back" says.
 - **Snapshot format 2.** A node whose disk holds a format 2 raft snapshot does
   not start on a build before format 2, which refuses it naming the format
   (`TestDescriptorRoundTrip` holds the older reader, kept unchanged). Every

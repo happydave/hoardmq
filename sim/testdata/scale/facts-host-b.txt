@@ -1,0 +1,16 @@
+hostname=host-b
+kernel=7.0.0-42-generic
+cpus=16
+mem_available_kb=94102144
+nofile_soft=1024
+nofile_hard=524288
+sysctl.net/core/somaxconn=4096
+sysctl.net/ipv4/tcp_max_syn_backlog=4096
+sysctl.net/core/netdev_max_backlog=1000
+sysctl.net/ipv4/ip_local_port_range=32768 60999
+load=0.00
+ntp=yes
+addrs=127.0.0.1 192.0.2.20 
+listen=127.0.0.54:53 127.0.0.53%lo:53 0.0.0.0:22 127.0.0.1:631 [::1]:631 [::]:22 
+sha256=/usr/local/go/bin/go 30969f97169d7f43fe6a085873d75613adc21e30818a8c61d95bd27275df4624
+rundir=absent

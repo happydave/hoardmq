@@ -24,7 +24,7 @@ func feedSession(n *tnode, id string, entries ...store.Entry) {
 }
 
 func repairs(sinks map[string]*counters, node, outcome string) float64 {
-	return sinks[node].get("hoardmq_replication_repairs_total", map[string]string{"outcome": outcome})
+	return sinks[node].get("hoardmq_replication_repairs_total", map[string]string{"cause": repairUnapplied, "outcome": outcome})
 }
 
 // TestUnappliedRecordIsRefusedAndTheKeyRepaired: a follower whose copy of a

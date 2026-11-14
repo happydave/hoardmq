@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/happydave/hoardmq/internal/topic"
 )
@@ -50,12 +51,15 @@ type Table struct {
 	// table: the gauge that reads it runs on every route update, and a walk
 	// there took a third of a 100k storm's CPU.
 	liveLocal, liveRemote int
+	// ownTombs indexes this node's own tombstones, so pruning walks them
+	// and not the whole table.
+	ownTombs map[entryKey]struct{}
 }
 
 // NewTable creates an empty table for a node.
 func NewTable(self string) *Table {
 	return &Table{self: self, entries: map[entryKey]*Entry{}, hidden: map[string]bool{}, roots: map[string]*node{},
-		moving: map[string]*node{}, movingCount: map[entryKey]int{}}
+		moving: map[string]*node{}, movingCount: map[entryKey]int{}, ownTombs: map[entryKey]struct{}{}}
 }
 
 // SetMoving records or clears a filter this node is handing over to another
@@ -190,6 +194,7 @@ func (t *Table) merge(in []Entry) []Entry {
 		if !c.Tombstone {
 			t.live(k, 1)
 		}
+		t.noteOwnTomb(k, c.Tombstone)
 		t.entries[k] = &c
 		t.reindex(k, &c)
 		changed = append(changed, c)
@@ -203,33 +208,142 @@ func (t *Table) merge(in []Entry) []Entry {
 // version, is withdrawn. That is what lets a node that has restarted retire
 // the entries its previous incarnation published — it no longer knows they
 // exist, so it can never tombstone them one by one, but it can say what it
-// holds now.
+// holds now. A stored tombstone the set does not carry, below the snapshot,
+// is removed by the same rule: the owner no longer holds it either, and a
+// pruning owner would otherwise leave its tombstones at every peer for good.
 //
-// The snapshot version is taken from the owner's own version counter when the
-// set is composed, so any entry it publishes afterwards carries a higher
-// version and survives a set that was already in flight.
-func (t *Table) MergeFull(owner string, in []Entry, snapshot uint64) (changed, withdrawn []Entry) {
+// The merge takes the table's write lock one slice of slice entries at a
+// time (all at once for slice 0), so a set of hundreds of thousands of
+// entries does not hold every match behind it; a match between slices sees
+// part of the set merged, as it sees part of a run of deltas. The absence
+// walk is one hold.
+//
+// The snapshot version is taken from the owner's own version counter as the
+// set is read (Table.ReadOwn), so an entry missing from the set has a version
+// above it and survives.
+func (t *Table) MergeFull(owner string, in []Entry, snapshot uint64, slice int) (changed, withdrawn []Entry, tombsRemoved int) {
 	present := make(map[entryKey]bool, len(in))
 	for i := range in {
 		if in[i].Owner == owner {
 			present[entryKey{owner, in[i].Namespace, in[i].Filter}] = true
 		}
 	}
+	if slice <= 0 {
+		slice = len(in)
+	}
+	for i := 0; i < len(in); i += slice {
+		t.mu.Lock()
+		changed = append(changed, t.merge(in[i:min(i+slice, len(in))])...)
+		t.mu.Unlock()
+	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	changed = t.merge(in)
 	for k, e := range t.entries {
-		if k.owner != owner || present[k] || e.Tombstone || e.Version >= snapshot {
+		if k.owner != owner || present[k] || e.Version >= snapshot {
 			continue
 		}
 		delete(t.entries, k)
+		if e.Tombstone {
+			tombsRemoved++
+			continue
+		}
 		t.live(k, -1)
 		tomb := *e
 		tomb.Tombstone = true
 		t.reindex(k, &tomb)
 		withdrawn = append(withdrawn, tomb)
 	}
-	return changed, withdrawn
+	return changed, withdrawn, tombsRemoved
+}
+
+// MergeOwn merges one of this node's own changes, assigning its version from
+// version under the table's write lock. A set read by ReadOwn under the read
+// lock therefore holds every own entry whose version is below its snapshot:
+// an entry versioned but not yet merged when the set was read could be
+// withdrawn by the set at a peer that had its delta.
+func (t *Table) MergeOwn(e Entry, version *atomic.Uint64) Entry {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	e.Version = version.Add(1)
+	t.merge([]Entry{e})
+	return e
+}
+
+// MergeOwnIf is MergeOwn decided by stands, which is given this node's
+// current entry for the filter (ok false when none) under the same hold as
+// the merge, so no own merge can come between the decision and the write. It
+// reports whether it merged.
+func (t *Table) MergeOwnIf(e Entry, version *atomic.Uint64, stands func(cur Entry, ok bool) bool) (Entry, bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	var cur Entry
+	c := t.entries[entryKey{t.self, e.Namespace, e.Filter}]
+	if c != nil {
+		cur = *c
+	}
+	if !stands(cur, c != nil) {
+		return e, false
+	}
+	e.Version = version.Add(1)
+	t.merge([]Entry{e})
+	return e, true
+}
+
+// ReadOwn returns this node's own entries for a full set, those keep accepts
+// (all with nil), sorted, and the set's snapshot version taken from version
+// under the same read lock.
+func (t *Table) ReadOwn(version *atomic.Uint64, keep func(Entry) bool) ([]Entry, uint64) {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	snapshot := version.Add(1)
+	out := make([]Entry, 0, t.liveLocal+len(t.ownTombs))
+	for k, e := range t.entries {
+		if k.owner == t.self && (keep == nil || keep(*e)) {
+			out = append(out, *e)
+		}
+	}
+	sortEntries(out)
+	return out, snapshot
+}
+
+// PruneOwnTombstones deletes this node's own tombstones whose version is
+// below below, and reports how many. The entry is deleted only while it is
+// still a tombstone at such a version: one made live again, or tombstoned
+// again since, carries a newer version and waits for a later prune.
+func (t *Table) PruneOwnTombstones(below uint64) int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	n := 0
+	for k := range t.ownTombs {
+		e := t.entries[k]
+		if e == nil || !e.Tombstone || e.Version >= below {
+			continue
+		}
+		delete(t.entries, k)
+		delete(t.ownTombs, k)
+		n++
+	}
+	return n
+}
+
+// OwnTombstones is how many tombstones this node holds of its own.
+func (t *Table) OwnTombstones() int {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return len(t.ownTombs)
+}
+
+// noteOwnTomb keeps ownTombs for an entry being stored; the caller holds the
+// lock.
+func (t *Table) noteOwnTomb(k entryKey, tomb bool) {
+	if k.owner != t.self {
+		return
+	}
+	if tomb {
+		t.ownTombs[k] = struct{}{}
+	} else {
+		delete(t.ownTombs, k)
+	}
 }
 
 // live adjusts the live count for an entry's scope; the caller holds the lock.
@@ -338,13 +452,17 @@ func (t *Table) byOwner(owner string) []Entry {
 			out = append(out, *e)
 		}
 	}
+	sortEntries(out)
+	return out
+}
+
+func sortEntries(out []Entry) {
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Namespace != out[j].Namespace {
 			return out[i].Namespace < out[j].Namespace
 		}
 		return out[i].Filter < out[j].Filter
 	})
-	return out
 }
 
 // Lookup returns an owner's entry for a filter.
@@ -356,6 +474,17 @@ func (t *Table) Lookup(owner, ns, filter string) (Entry, bool) {
 		return Entry{}, false
 	}
 	return *e, true
+}
+
+// OwnVersion is the version of this node's entry for a filter, live or a
+// tombstone; zero when it holds none.
+func (t *Table) OwnVersion(ns, filter string) uint64 {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	if e := t.entries[entryKey{t.self, ns, filter}]; e != nil {
+		return e.Version
+	}
+	return 0
 }
 
 // Group is a shared group a topic matched: its key and the member count per

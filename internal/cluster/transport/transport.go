@@ -47,7 +47,7 @@ type Options struct {
 	Reorder bool
 
 	// MaxVersion lets a node advertise a framing version other than the
-	// current one, for negotiation tests. Zero means Version5.
+	// current one, for negotiation tests. Zero means Version6.
 	MaxVersion uint8
 }
 
@@ -115,6 +115,18 @@ type PeerInfo struct {
 	// never read is in its receive queue.
 	OutQueued, UrgentQueued         int
 	DataOutQueued, DataUrgentQueued int
+	// DataVersion is the current data connection's framing version, zero
+	// with none. Version is the last adopted link's, of either role.
+	DataVersion uint8
+	// DataGeneration changes each time a link is adopted into the data
+	// slot, which a replacement does without a data event.
+	DataGeneration uint64
+	// DataAdmitted and DataTaken count the frames admitted to the current
+	// data link's ordered queue and taken from it by its writer, from the
+	// link's start; the urgent lane is not counted. A sender that reads
+	// DataAdmitted after admitting a frame knows the frame has left the
+	// queue once DataTaken reaches it on the same generation.
+	DataAdmitted, DataTaken uint64
 }
 
 // Handler receives the payload of one frame from a peer, in arrival order
@@ -138,6 +150,8 @@ var (
 	// ErrUrgentFull: the peer's urgent lane is full, which means its writer
 	// is not draining; the frame is refused rather than queued.
 	ErrUrgentFull = errors.New("urgent lane full")
+	// ErrTooLarge: the payload exceeds this node's frame limit.
+	ErrTooLarge = errors.New("payload exceeds the frame limit")
 )
 
 // Transport is this node's end of the cluster transport.
@@ -206,7 +220,7 @@ func New(o Options) (*Transport, error) {
 		o.Logger = slog.Default()
 	}
 	if o.MaxVersion == 0 {
-		o.MaxVersion = Version5
+		o.MaxVersion = Version6
 	}
 	t := &Transport{o: o, vmin: Version1, vmax: o.MaxVersion, log: o.Logger.With("component", "cluster-transport"), peers: map[string]*peer{}, isolated: map[string]bool{}, heldData: map[string]bool{}}
 	if len(o.Peers) > 0 && o.Listen == "" {
@@ -426,7 +440,7 @@ func (t *Transport) Send(ctx context.Context, peerName string, c Class, payload 
 		return fmt.Errorf("transport: %s cannot be sent by callers", c)
 	}
 	if len(payload) > t.o.MaxFrame {
-		return fmt.Errorf("transport: payload of %d bytes exceeds the frame limit of %d", len(payload), t.o.MaxFrame)
+		return fmt.Errorf("transport: payload of %d bytes exceeds the frame limit of %d: %w", len(payload), t.o.MaxFrame, ErrTooLarge)
 	}
 	t.mu.Lock()
 	p := t.peers[peerName]
@@ -832,6 +846,9 @@ func (t *Transport) adopt(p *peer, c net.Conn, n negotiated, dialedBy string, ro
 	}
 	for _, r := range slots {
 		p.links[r] = l
+		if r == RoleData {
+			p.dataGen++
+		}
 	}
 	p.version, p.stress = n.version, 0
 	p.mu.Unlock()
@@ -952,9 +969,11 @@ type peer struct {
 	version   uint8
 	// downSince is when the peer last left Up; zero while Up.
 	downSince time.Time
-	stress    uint8
-	removed   atomic.Bool
-	fault     atomic.Pointer[Fault]
+	// dataGen counts the links adopted into the data slot.
+	dataGen uint64
+	stress  uint8
+	removed atomic.Bool
+	fault   atomic.Pointer[Fault]
 }
 
 // Fault is an injected disturbance on the frames this node writes to one
@@ -1071,7 +1090,10 @@ func (p *peer) info() PeerInfo {
 		pi.DataSlowestClass = Class(l.slowestClass.Load()).String()
 		pi.DataDispatchWaitMaxMs = float64(l.waitMaxNs.Load()) / 1e6
 		pi.DataOutQueued, pi.DataUrgentQueued = len(l.out), len(l.urgent)
+		pi.DataVersion = l.version
+		pi.DataAdmitted, pi.DataTaken = l.admittedN.Load(), l.takenN.Load()
 	}
+	pi.DataGeneration = p.dataGen
 	return pi
 }
 

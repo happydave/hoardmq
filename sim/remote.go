@@ -32,6 +32,10 @@ type remoteSettings struct {
 	Nodes          []string
 	Sources        []string
 	BytesPerClient uint64
+	// TCPKeepAliveOff turns TCP keepalive off on the clients' connections.
+	TCPKeepAliveOff bool
+	// KeepAlive is the clients' MQTT keep alive, in seconds.
+	KeepAlive uint16
 }
 
 // readRemoteSettings returns nil when the remote mode is not selected.
@@ -391,7 +395,8 @@ func (p *remotePopulation) send(m driverMsg) error {
 // hello introduces the run and waits for the driver's host to be ready.
 func (p *remotePopulation) hello() (DriverInfo, error) {
 	if err := p.send(driverMsg{Type: msgHello, Clients: p.clients, Nodes: p.settings.Nodes, Sources: p.settings.Sources,
-		BytesPerClient: p.settings.BytesPerClient, WaitMs: p.opts.startWait.Milliseconds()}); err != nil {
+		BytesPerClient: p.settings.BytesPerClient, WaitMs: p.opts.startWait.Milliseconds(),
+		TCPKeepAliveOff: p.settings.TCPKeepAliveOff, KeepAlive: p.settings.KeepAlive}); err != nil {
 		return DriverInfo{}, err
 	}
 	// Before ready the driver sends nothing while it waits, so silence is
@@ -408,6 +413,43 @@ func (p *remotePopulation) hello() (DriverInfo, error) {
 		p.info = *m.Driver
 	}
 	return p.info, nil
+}
+
+// queue asks the driver to take sessions offline and queue messages to them.
+func (p *remotePopulation) queue(_ context.Context, q queueRequest) (queueResult, error) {
+	if err := p.send(driverMsg{Type: msgQueue, Queue: &q}); err != nil {
+		return queueResult{}, err
+	}
+	m, err := p.await(msgQueued, 30*time.Minute)
+	if err != nil || m.QueueResult == nil {
+		return queueResult{}, errors.Join(err, errors.New("no queue result"))
+	}
+	return *m.QueueResult, nil
+}
+
+// publish asks the driver to queue messages to the offline sessions.
+func (p *remotePopulation) publish(_ context.Context) (queueResult, error) {
+	if err := p.send(driverMsg{Type: msgPublish}); err != nil {
+		return queueResult{}, err
+	}
+	m, err := p.await(msgPublished, time.Hour)
+	if err != nil || m.QueueResult == nil {
+		return queueResult{}, errors.Join(err, errors.New("no publish result"))
+	}
+	return *m.QueueResult, nil
+}
+
+// resume asks the driver to reconnect the offline sessions and count what
+// each receives, waiting at most wait for the messages.
+func (p *remotePopulation) resume(_ context.Context, wait time.Duration) (queueResult, error) {
+	if err := p.send(driverMsg{Type: msgResume, WaitMs: wait.Milliseconds()}); err != nil {
+		return queueResult{}, err
+	}
+	m, err := p.await(msgResumed, wait+30*time.Minute)
+	if err != nil || m.QueueResult == nil {
+		return queueResult{}, errors.Join(err, errors.New("no resume result"))
+	}
+	return *m.QueueResult, nil
 }
 
 func (p *remotePopulation) fill(ctx context.Context, completed *atomic.Int64) (int, error) {
@@ -492,6 +534,31 @@ func (p *remotePopulation) finish() (popSummary, error) {
 	return summaryFromDriver(*m.Summary), nil
 }
 
+// deliver asks the driver for the delivery check and waits for its result,
+// at most the check's wait plus an hour.
+func (p *remotePopulation) deliver(_ context.Context, req deliveryRequest) (deliveryResult, error) {
+	if err := p.send(driverMsg{Type: msgDeliver, Delivery: &req}); err != nil {
+		return deliveryResult{}, err
+	}
+	m, err := p.await(msgDelivered, time.Duration(req.WaitMs)*time.Millisecond+time.Hour)
+	if err != nil || m.DeliveryResult == nil {
+		return deliveryResult{}, errors.Join(err, errors.New("no delivery result"))
+	}
+	return *m.DeliveryResult, nil
+}
+
+// connacks asks the driver for the named clients' latest CONNACKs.
+func (p *remotePopulation) connacks(ids []string) ([]clientConnacks, error) {
+	if err := p.send(driverMsg{Type: msgConnacks, ClientIDs: ids}); err != nil {
+		return nil, err
+	}
+	m, err := p.await(msgConnackRe, 2*time.Minute)
+	if err != nil {
+		return nil, err
+	}
+	return m.Connacks, nil
+}
+
 // summaryFromDriver converts the driver's wire summary into the one the
 // measurement reads. It is a separate function so a field can be tested to
 // cross the socket: a figure added to popSummary but not to this conversion
@@ -509,6 +576,9 @@ func summaryFromDriver(ds driverSummary) popSummary {
 	for _, ns := range ds.ReconnectsNs {
 		out.Reconnects = append(out.Reconnects, time.Duration(ns))
 	}
+	out.Attempts = append(out.Attempts, ds.ReconnectAttempts...)
+	out.NotRecovered = ds.NotRecovered
+	out.NotRecoveredSample = append(out.NotRecoveredSample, ds.NotRecoveredSample...)
 	return out
 }
 

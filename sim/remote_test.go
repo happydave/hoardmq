@@ -16,16 +16,16 @@ import (
 func TestReadRemoteSettings(t *testing.T) {
 	env := func(kv map[string]string) func(string) string { return func(k string) string { return kv[k] } }
 	good := map[string]string{
-		clientCommandEnv: "ssh -i /home/x/.ssh/key -o BatchMode=yes notdave@192.0.2.137",
-		nodeAddrsEnv:     "10.231.14.1:8001, 10.231.14.2:8001,10.231.14.3:8001",
-		clientSourcesEnv: "10.231.14.11,10.231.14.12",
+		clientCommandEnv: "ssh -i /home/x/.ssh/key -o BatchMode=yes runner@192.0.2.137",
+		nodeAddrsEnv:     "198.51.100.1:8001, 198.51.100.2:8001,198.51.100.3:8001",
+		clientSourcesEnv: "198.51.100.11,198.51.100.12",
 		clientBytesEnv:   "40000",
 	}
 	s, err := readRemoteSettings(env(good), 3)
 	if err != nil || s == nil {
 		t.Fatalf("good settings: %v, %v", s, err)
 	}
-	if len(s.Nodes) != 3 || len(s.Sources) != 2 || s.BytesPerClient != 40000 || s.destination() != "notdave@192.0.2.137" {
+	if len(s.Nodes) != 3 || len(s.Sources) != 2 || s.BytesPerClient != 40000 || s.destination() != "runner@192.0.2.137" {
 		t.Fatalf("parsed %+v, destination %q", s, s.destination())
 	}
 	if s, err := readRemoteSettings(env(nil), 3); s != nil || err != nil {
@@ -33,12 +33,12 @@ func TestReadRemoteSettings(t *testing.T) {
 	}
 	for name, change := range map[string]map[string]string{
 		"missing nodes":   {nodeAddrsEnv: ""},
-		"two nodes":       {nodeAddrsEnv: "10.231.14.1:8001,10.231.14.2:8001"},
-		"hostname node":   {nodeAddrsEnv: "ai2:8001,10.231.14.2:8001,10.231.14.3:8001"},
-		"no port":         {nodeAddrsEnv: "10.231.14.1,10.231.14.2:8001,10.231.14.3:8001"},
-		"duplicate node":  {nodeAddrsEnv: "10.231.14.1:8001,10.231.14.1:8001,10.231.14.3:8001"},
+		"two nodes":       {nodeAddrsEnv: "198.51.100.1:8001,198.51.100.2:8001"},
+		"hostname node":   {nodeAddrsEnv: "host-a:8001,198.51.100.2:8001,198.51.100.3:8001"},
+		"no port":         {nodeAddrsEnv: "198.51.100.1,198.51.100.2:8001,198.51.100.3:8001"},
+		"duplicate node":  {nodeAddrsEnv: "198.51.100.1:8001,198.51.100.1:8001,198.51.100.3:8001"},
 		"missing sources": {clientSourcesEnv: ""},
-		"bad source":      {clientSourcesEnv: "gtr"},
+		"bad source":      {clientSourcesEnv: "host-a"},
 		"bad bytes":       {clientBytesEnv: "lots"},
 	} {
 		kv := map[string]string{}
@@ -56,8 +56,8 @@ func TestReadRemoteSettings(t *testing.T) {
 }
 
 func TestServerStartProblems(t *testing.T) {
-	addrs := []net.IP{net.ParseIP("192.0.2.126"), net.ParseIP("10.231.14.1"), net.ParseIP("10.231.14.2"), net.ParseIP("10.231.14.3")}
-	nodes := []string{"10.231.14.1:8001", "10.231.14.2:8001", "10.231.14.3:8001"}
+	addrs := []net.IP{net.ParseIP("192.0.2.126"), net.ParseIP("198.51.100.1"), net.ParseIP("198.51.100.2"), net.ParseIP("198.51.100.3")}
+	nodes := []string{"198.51.100.1:8001", "198.51.100.2:8001", "198.51.100.3:8001"}
 	if p := serverStartProblems(100000, 76, 1048576, true, nodes, addrs); len(p) != 0 {
 		t.Fatalf("a settled host refused: %v", p)
 	}
@@ -70,7 +70,7 @@ func TestServerStartProblems(t *testing.T) {
 	if p := serverStartProblems(100000, 0, 0, false, nodes, addrs); len(p) != 0 {
 		t.Fatalf("no conntrack module is no table to fill: %v", p)
 	}
-	if p := serverStartProblems(100000, 76, 1048576, true, nodes, addrs[:3]); len(p) != 1 || !strings.Contains(p[0], "10.231.14.3") {
+	if p := serverStartProblems(100000, 76, 1048576, true, nodes, addrs[:3]); len(p) != 1 || !strings.Contains(p[0], "198.51.100.3") {
 		t.Fatalf("a missing node address: %v", p)
 	}
 }
@@ -124,7 +124,7 @@ func TestRemoteNodesDifferOnlyInAddress(t *testing.T) {
 		return docs
 	}
 	local := build(nil)
-	remote := build([]string{"10.231.14.1:8001", "10.231.14.2:8001", "10.231.14.3:8001"})
+	remote := build([]string{"198.51.100.1:8001", "198.51.100.2:8001", "198.51.100.3:8001"})
 	for i := range local {
 		if remote[i].Listeners[0].Address == local[i].Listeners[0].Address || remote[i].Cluster.Advertise != remote[i].Listeners[0].Address {
 			t.Fatalf("node %d: remote listener %q, advertise %q", i, remote[i].Listeners[0].Address, remote[i].Cluster.Advertise)

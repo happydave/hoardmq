@@ -39,6 +39,9 @@ type link struct {
 	err     error
 
 	lastSeen atomic.Int64 // unix nanoseconds
+	// admittedN and takenN count the frames admitted to out and taken from
+	// it by the writer (PeerInfo.DataAdmitted, DataTaken).
+	admittedN, takenN atomic.Uint64
 	// Handler time, measured on the drainers, which run the handlers: total,
 	// count, worst, and the class of the worst, so a storm's timeline names
 	// the handler that stalls.
@@ -115,6 +118,7 @@ func (l *link) admit(ctx context.Context, f frame) error {
 	}
 	select {
 	case l.out <- f:
+		l.admittedN.Add(1)
 		if l.t.admitted != nil {
 			l.t.admitted(l.p.name, f.payload)
 		}
@@ -420,6 +424,7 @@ func (l *link) writeLoop() {
 			}
 			continue
 		case f = <-l.out:
+			l.takenN.Add(1)
 		}
 		fault := l.p.fault.Load()
 		if l.t.reorder || (fault != nil && fault.Reorder) {
@@ -432,6 +437,7 @@ func (l *link) writeLoop() {
 			timer := time.NewTimer(reorderWait)
 			select {
 			case g := <-l.out:
+				l.takenN.Add(1)
 				timer.Stop()
 				if !write(g) {
 					return
@@ -452,6 +458,7 @@ func (l *link) writeLoop() {
 			}
 			select {
 			case g := <-l.out:
+				l.takenN.Add(1)
 				if !write(g) {
 					return
 				}

@@ -189,9 +189,9 @@ func TestMissingLicences(t *testing.T) {
 	}
 }
 
-// TestAllowedTermsAreTheOwnersFive pins the committed exceptions file: a
-// sixth word is the owner's decision, and changes this test with it.
-func TestAllowedTermsAreTheOwnersFive(t *testing.T) {
+// TestAllowedTermsAreTheOwnersFour pins the committed exceptions file: a
+// fifth word is the owner's decision, and changes this test with it.
+func TestAllowedTermsAreTheOwnersFour(t *testing.T) {
 	data, err := os.ReadFile("allowed-terms.txt")
 	if err != nil {
 		t.Fatal(err)
@@ -200,7 +200,7 @@ func TestAllowedTermsAreTheOwnersFive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]bool{"ai": true, "ai2": true, "gtr": true, "dave": true, "notdave": true}
+	want := map[string]bool{"ai": true, "ai2": true, "gtr": true, "dave": true}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("allowed terms %v, want exactly %v", sortedKeys(got), sortedKeys(want))
 	}

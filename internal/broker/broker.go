@@ -224,6 +224,7 @@ func NewWithHooks(cfg config.Document, log *slog.Logger, seams Hooks) (*Server, 
 			IgnoreForwardGaps: seams.Defects.IgnoreForwardGaps,
 			ApplyGate:         seams.ForwardApplyGate,
 			GiveTimeout:       time.Duration(cfg.Cluster.Replication.AckTimeoutMs) * time.Millisecond,
+			MaxFrame:          cfg.Cluster.MaxFrameBytes,
 		})
 		s.router.SetObserver(s.routes.Observe)
 		s.router.SetGroupDecider(s.routes.Decide)
@@ -456,10 +457,15 @@ type StormStats struct {
 	// journal sync included.
 	Imports  int64   `json:"imports"`
 	ImportMs float64 `json:"import_ms_total"`
-	// SealWaitsImport and ImportWaitsImport count Seals and imports that
-	// waited for an import of the same client to finish.
-	SealWaitsImport   int64 `json:"seal_waits_import"`
-	ImportWaitsImport int64 `json:"import_waits_import"`
+	// SealWaitsImport, ImportWaitsImport and ConnectWaitsImport count Seals,
+	// imports and CONNECTs that waited for an import of the same client to
+	// finish.
+	SealWaitsImport    int64 `json:"seal_waits_import"`
+	ImportWaitsImport  int64 `json:"import_waits_import"`
+	ConnectWaitsImport int64 `json:"connect_waits_import"`
+	// InstallsReplaced counts session installs that found another session
+	// object for the client and removed it; expected 0.
+	InstallsReplaced int64 `json:"installs_replaced"`
 	// Consensus is the core's view — role, term, leader, commit/applied —
 	// and Peers the transport's, so a storm's timeline shows whether a
 	// leader exists and whether the links are up (a storm has seen every
@@ -514,7 +520,8 @@ func (s *Server) StormStats() StormStats {
 		st.ClosedEvictImport = s.sessions.EvictsFromImport()
 		n, total := s.sessions.ImportCost()
 		st.Imports, st.ImportMs = n, float64(total)/1e6
-		st.SealWaitsImport, st.ImportWaitsImport = s.sessions.ImportWaits()
+		st.SealWaitsImport, st.ImportWaitsImport, st.ConnectWaitsImport = s.sessions.ImportWaits()
+		st.InstallsReplaced = s.sessions.InstallsReplaced()
 	}
 	if s.leases != nil {
 		timed("lease_work", func() { st.LeaseWork = s.leases.WorkStats() })
@@ -634,6 +641,9 @@ func (s *Server) openStore() error {
 	if s.routes != nil {
 		sessOpts.Forwarder = s.routes
 		sessOpts.Moving = s.routes.MovingClient
+		sessOpts.OwnRoutes = s.routes
+		node, limit := s.config().Node.Name, s.config().Cluster.MaxFrameBytes
+		sessOpts.FilterRoutable = func(ns, filter string) bool { return routing.EntryFits(ns, filter, node, limit) }
 	}
 	sessOpts.ForgetInboundQoS2 = s.hooks.Defects.ForgetInbound
 	sessOpts.PubrelUnreplicated = s.hooks.Defects.PubrelUnreplicated
@@ -646,6 +656,7 @@ func (s *Server) openStore() error {
 	if s.routes != nil {
 		s.routes.Loaded()
 	}
+	s.sessions.StartReconciler()
 	s.log.Info("state recovered", "sessions", len(state.Sessions), "retained", len(state.Retained), "modules", s.registry.Modules())
 	if err := provider.Checkpoint(s.sessions.CheckpointState); err != nil {
 		return fmt.Errorf("checkpoint: %w", err)
@@ -886,6 +897,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	if s.consensus != nil {
 		s.consensus.Stop()
 	}
+	s.sessions.StopReconciler()
 	if s.routes != nil {
 		s.routes.Stop()
 	}
@@ -1091,6 +1103,11 @@ func (s *Server) registerCollector() {
 			set("hoardmq_connections_closed_total", map[string]string{"cause": "evict"}, float64(evict-fromImport))
 			set("hoardmq_connections_closed_total", map[string]string{"cause": "evict-import"}, float64(fromImport))
 			set("hoardmq_connections_closed_total", map[string]string{"cause": "detach"}, float64(detach))
+			// Whether a CONNECT here resumed a copy this node had sealed for a
+			// takeover, or was refused while it was sealed for a newer grant.
+			refused, resumed := s.sessions.SealStats()
+			set("hoardmq_sealed_connects_total", map[string]string{"outcome": "resumed"}, float64(resumed))
+			set("hoardmq_sealed_connects_total", map[string]string{"outcome": "refused"}, float64(refused))
 		}
 		if rep := s.Replication(); rep != nil {
 			for _, st := range rep.StreamStates() {
@@ -1108,6 +1125,14 @@ func (s *Server) registerCollector() {
 			for peer, n := range rep.BacklogByPeer() {
 				set("hoardmq_replication_backlog_frames", map[string]string{"peer": peer}, float64(n))
 			}
+			holds, waits := rep.LockHistograms()
+			for kind, h := range holds {
+				setHistogram(set, "hoardmq_replication_lock_hold_seconds", map[string]string{"kind": kind}, h)
+			}
+			for kind, h := range waits {
+				setHistogram(set, "hoardmq_replication_lock_wait_seconds", map[string]string{"kind": kind}, h)
+			}
+			setHistogram(set, "hoardmq_replication_fetch_request_seconds", nil, rep.FetchRequestHistogram())
 		}
 		shortSessions, shortLed := s.shortCopies()
 		set("hoardmq_replication_sessions_short", nil, float64(shortSessions))
@@ -1143,6 +1168,35 @@ func setJournal(set func(string, map[string]string, float64), which string, js s
 	set("hoardmq_journal_repair_failures_total", l, float64(js.Sync.RepairFailures))
 	set("hoardmq_journal_sync_callers_total", l, float64(js.Sync.Callers))
 	set("hoardmq_journal_sync_wait_seconds_total", l, js.Sync.WaitSec)
+}
+
+// histogramTop is the last bucket of a replication histogram exported with a
+// bound of its own: 2^22 µs, about 4.2 s, twice the default acknowledgement
+// timeout. Longer samples are counted only under +Inf.
+const histogramTop = 22
+
+// setHistogram sets a replication histogram's series: the cumulative count at
+// each power-of-two bound of microseconds from 1 µs to 2^histogramTop µs and
+// at +Inf, the sum in seconds and the count. A sample of exactly a bound is
+// counted under the next one.
+func setHistogram(set func(string, map[string]string, float64), name string, labels map[string]string, h replication.Histogram) {
+	with := func(le string) map[string]string {
+		l := make(map[string]string, len(labels)+1)
+		for k, v := range labels {
+			l[k] = v
+		}
+		l["le"] = le
+		return l
+	}
+	var cum int64
+	for b := 0; b <= histogramTop; b++ {
+		cum += h.Buckets[b]
+		le := strconv.FormatFloat(float64(int64(1)<<b)/1e6, 'g', -1, 64)
+		set(name+"_bucket", with(le), float64(cum))
+	}
+	set(name+"_bucket", with("+Inf"), float64(h.Count))
+	set(name+"_sum", labels, float64(h.SumNs)/1e9)
+	set(name+"_count", labels, float64(h.Count))
 }
 
 // setTracing sets the OpenTelemetry exporter's series.

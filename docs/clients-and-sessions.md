@@ -10,10 +10,27 @@ Keep-alive expiry closes at one and a half times the client's value, or the
 server's `limits.maxKeepAlive` when that is lower (advertised as Server Keep
 Alive to MQTT 5.0 clients), counted from when the broker finished handling the
 client's last packet: a journal sync or a replication wait is not the client's
-silence. A client that sends a keep-alive of 0 has no read deadline unless
-`limits.maxKeepAlive` is set; TCP keep-alive (15 s idle, then 9 probes 15 s
-apart) still closes a connection whose peer has gone, after about 150 s. The
-Helm chart sets `limits.maxKeepAlive` to 3,600. `limits.receiveMaximum` bounds the client's
+silence. What finds a client that has gone depends on the keep-alive its
+CONNECT asked for:
+
+- **0:** TCP keep-alive (15 s idle, then 9 probes 15 s apart) closes the
+  connection about 150 s after its peer has gone. There is no read deadline
+  unless `limits.maxKeepAlive` is set, and where it is (the Helm chart sets
+  3,600) the connection keeps TCP keep-alive all the same.
+- **K, at most 100 s:** the read deadline, at 1.5 × K, as in `v0.1.0`.
+- **K, over 100 s:** the read deadline, at 1.5 × K; in `v0.1.0` TCP
+  keep-alive found it first, after about 150 s.
+
+Once the CONNECT is accepted, a connection whose client asked for a keep-alive
+other than 0 has its TCP keep-alive turned off, and the broker sends nothing on
+it while it is idle, so a client behind a NAT or load balancer that drops idle
+flows keeps its keep-alive below that idle timeout. Before the CONNECT,
+`limits.connectTimeout` bounds the wait.
+`hoardmq_connects_tcp_keepalive_total{listener,outcome}` counts each accepted
+CONNECT by what was done (`off`; `kept` when it asked for 0; `not-tcp`;
+`failed`), and the admin API shows a connection's `tcpKeepAlive`.
+
+`limits.receiveMaximum` bounds the client's
 unacknowledged QoS 1 and 2 publishes. Outbound, the broker has at most the
 client's Receive Maximum in flight, or `limits.maxInflightMessages` when that is
 lower (65,535 by default, the largest a Receive Maximum can be, and what a
@@ -224,3 +241,12 @@ the packet are handled as usual, a filter the session holds is replaced, and
 the client stays connected. Refusals are counted in
 `hoardmq_subscription_limit_refusals_total{namespace}`. A session that holds
 more, after the limit was lowered, keeps them.
+
+On a clustered node a SUBSCRIBE filter whose route entry could not fit in
+one cluster frame (`cluster.maxFrameBytes`) is refused the same way, 0x97 at
+5.0 and 0x80 at 3.1.1 and 3.1, and counted in
+`hoardmq_subscription_refusals_total{reason="route-entry-too-large"}`: the
+other nodes could never be told of it. At the default 16 MiB no filter the
+protocol allows is refused; a limit below about 400 KB can refuse a filter
+near the protocol's 65,535 bytes (clustering.md, ["Routing across
+nodes"](clustering.md#routing-across-nodes)).

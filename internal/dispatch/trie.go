@@ -19,6 +19,10 @@ type node struct {
 	children map[string]*node
 	subs     map[*session.Session]session.Subscription
 	groups   map[string]*group
+	// ns and filter name the node in the filter index, and pos is its
+	// position there plus one, 0 while it is not indexed (index.go).
+	ns, filter string
+	pos        int
 }
 
 func newNode() *node { return &node{children: map[string]*node{}} }

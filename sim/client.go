@@ -81,6 +81,13 @@ type Client struct {
 	// thousand clients need more than one: the ephemeral port range is per
 	// source and destination pair.
 	Source string
+	// KeepAliveOff turns TCP keepalive off on the client's connections; by
+	// default they take Go's, a probe every 15 s on an idle connection.
+	KeepAliveOff bool
+	// KeepAlive is the MQTT keep alive the client's CONNECT asks for, in
+	// seconds; when not 0 the client sends a PINGREQ that often while
+	// connected, as a client with nothing else to send must.
+	KeepAlive uint16
 	// failures, when set, counts each failed connect by class.
 	failures *failureCounts
 	nodes    []string
@@ -175,6 +182,14 @@ type Client struct {
 	sumMu     sync.Mutex
 	firstDrop time.Time
 	firstUp   time.Time
+	// attempts counts the connects from the first drop to the first accepted
+	// CONNACK after it, that one included: a failed dial, a refused CONNACK
+	// and a redirect each count one.
+	attempts int
+	// acks is the client's latest CONNACKs, and drops its latest drops, both
+	// guarded by sumMu (connacks.go, latedrops.go).
+	acks  connackLog
+	drops dropLog
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -188,6 +203,17 @@ func NewClient(id string, nodes []string, expiry uint32, seed int64) *Client {
 	c.ctx, c.cancel = context.WithCancel(context.Background())
 	premint(id)
 	return c
+}
+
+// Hold records a filter as held without subscribing to it, before Run, for a
+// client resuming a session another Client object subscribed: the filter is
+// granted by a CONNACK with Session Present, and a CONNACK without it counts
+// a lost session and resubscribes, as for a filter this client subscribed.
+func (c *Client) Hold(filter string, qos byte) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.subs = append(c.subs, packet.Subscription{Filter: filter, QoS: qos})
+	c.grantedIn = append(c.grantedIn, 0)
 }
 
 // Run connects (retrying until the context ends) and returns once the
@@ -283,12 +309,16 @@ func dropCause(code packet.ReasonCode) int {
 
 func (c *Client) record(e Event) {
 	c.sumMu.Lock()
+	if (e.Kind == "failed" || e.Kind == "connack") && !c.firstDrop.IsZero() && c.firstUp.IsZero() {
+		c.attempts++
+	}
 	switch {
 	case e.Kind == "failed":
 		c.Fails.Add(1)
 	case e.Kind == "dropped":
 		c.Drops.Add(1)
 		c.DropCauses[dropCause(e.Code)].Add(1)
+		c.noteDrop(e.Node, e.At, dropCause(e.Code))
 		if c.firstDrop.IsZero() {
 			c.firstDrop = e.At
 		}
@@ -323,6 +353,18 @@ func (c *Client) Reconnect() (time.Duration, bool) {
 	return c.firstUp.Sub(c.firstDrop), true
 }
 
+// ReconnectAttempts returns how many connects this client made from its
+// first dropped connection to the first CONNACK that accepted it afterwards,
+// that one included, and whether both happened, since the last TakeEvents.
+func (c *Client) ReconnectAttempts() (int, bool) {
+	c.sumMu.Lock()
+	defer c.sumMu.Unlock()
+	if c.firstDrop.IsZero() || c.firstUp.IsZero() {
+		return 0, false
+	}
+	return c.attempts, true
+}
+
 // TakeDeliveries returns and clears the deliveries recorded so far.
 func (c *Client) TakeDeliveries() []Delivery {
 	c.recMu.Lock()
@@ -337,7 +379,7 @@ func (c *Client) TakeDeliveries() []Delivery {
 // here.
 func (c *Client) TakeEvents() []Event {
 	c.sumMu.Lock()
-	c.firstDrop, c.firstUp = time.Time{}, time.Time{}
+	c.firstDrop, c.firstUp, c.attempts = time.Time{}, time.Time{}, 0
 	c.sumMu.Unlock()
 	c.recMu.Lock()
 	defer c.recMu.Unlock()
@@ -390,7 +432,9 @@ func (c *Client) loop(first chan error) {
 		c.mu.Lock()
 		c.current = addr
 		c.mu.Unlock()
+		began := time.Now()
 		ack, err := c.connect(addr)
+		c.noteConnect(addr, began, ack, err)
 		switch {
 		case err != nil:
 			// A connect that never reached a CONNACK — the dial failed, the
@@ -430,7 +474,9 @@ func (c *Client) loop(first chan error) {
 				c.forgetSession()
 				c.resubscribe()
 			}
+			stopPings := c.pings()
 			ref := c.read() // blocks until the connection ends
+			stopPings()
 			c.online.Store(false)
 			c.recovered.Store(false)
 			if ref != "" {
@@ -458,8 +504,17 @@ func deref(s *string) string {
 	return *s
 }
 
-func (c *Client) connect(addr string) (*packet.Connack, error) {
+// dialer is the client's dialer: its source address, and its keepalive.
+func (c *Client) dialer() net.Dialer {
 	d := sourceDialer(c.Source)
+	if c.KeepAliveOff {
+		d.KeepAlive = -1
+	}
+	return d
+}
+
+func (c *Client) connect(addr string) (*packet.Connack, error) {
+	d := c.dialer()
 	nc, err := d.Dial("tcp", addr)
 	if err != nil {
 		return nil, &connectError{stage: "dial", err: err}
@@ -469,7 +524,7 @@ func (c *Client) connect(addr string) (*packet.Connack, error) {
 	dec.Version = packet.V5
 	exp := c.expiry
 	_ = nc.SetDeadline(time.Now().Add(5 * time.Second))
-	if err := enc.Encode(nc, withCredentials(&packet.Connect{ProtocolLevel: packet.V5, ClientID: c.ID, CleanStart: false, Properties: packet.Properties{SessionExpiryInterval: &exp}})); err != nil {
+	if err := enc.Encode(nc, withCredentials(&packet.Connect{ProtocolLevel: packet.V5, ClientID: c.ID, CleanStart: false, KeepAlive: c.KeepAlive, Properties: packet.Properties{SessionExpiryInterval: &exp}})); err != nil {
 		_ = nc.Close()
 		return nil, &connectError{stage: "handshake", err: err}
 	}
@@ -501,6 +556,30 @@ func (c *Client) connect(addr string) (*packet.Connack, error) {
 	c.conn, c.enc, c.dec = nc, enc, dec
 	c.mu.Unlock()
 	return ack, nil
+}
+
+// pings sends a PINGREQ every keep alive on the current connection until the
+// returned stop is called; with a keep alive of 0 it sends none.
+func (c *Client) pings() (stop func()) {
+	if c.KeepAlive == 0 {
+		return func() {}
+	}
+	done := make(chan struct{})
+	clientLabels(func() {
+		go func() {
+			t := time.NewTicker(time.Duration(c.KeepAlive) * time.Second)
+			defer t.Stop()
+			for {
+				select {
+				case <-done:
+					return
+				case <-t.C:
+					_ = c.send(&packet.Pingreq{})
+				}
+			}
+		}()
+	})
+	return func() { close(done) }
 }
 
 // forgetSession drops the client-side session state after a CONNACK with
@@ -650,6 +729,12 @@ func (c *Client) read() string {
 			_ = c.send(&packet.Pubcomp{Ack: packet.Ack{PacketID: m.PacketID}})
 		case *packet.Suback:
 			c.settleSuback(m)
+		case *packet.Unsuback:
+			code := packet.Success
+			if len(m.ReasonCodes) > 0 {
+				code = m.ReasonCodes[0]
+			}
+			c.settle(m.PacketID, code)
 		case *packet.Disconnect:
 			ref = deref(m.Properties.ServerReference)
 			last = m.ReasonCode
@@ -871,6 +956,22 @@ func (c *Client) publish(ctx context.Context, p *packet.Publish) (packet.ReasonC
 	}
 	id := c.packetID()
 	p.PacketID = id
+	return c.awaitAck(ctx, "publish", id, p)
+}
+
+// dropSubscription sends UNSUBSCRIBE for filter on the current connection and
+// returns the UNSUBACK's reason code. The client keeps the filter as held and
+// granted, so it reads recovered while the broker's session no longer holds
+// the subscription: a session resumed without its subscriptions, made on
+// purpose.
+func (c *Client) dropSubscription(ctx context.Context, filter string) (packet.ReasonCode, error) {
+	id := c.packetID()
+	return c.awaitAck(ctx, "unsubscribe", id, &packet.Unsubscribe{PacketID: id, Filters: []string{filter}})
+}
+
+// awaitAck sends p, whose packet identifier is id, and waits for the
+// acknowledgement settled under that identifier; what names p in a refusal.
+func (c *Client) awaitAck(ctx context.Context, what string, id uint16, p packet.Packet) (packet.ReasonCode, error) {
 	ch := make(chan packet.ReasonCode, 1)
 	c.mu.Lock()
 	c.waiting[id] = ch
@@ -887,7 +988,7 @@ func (c *Client) publish(ctx context.Context, p *packet.Publish) (packet.ReasonC
 			return 0, errors.New("connection ended before the acknowledgement")
 		}
 		if code >= 0x80 {
-			return code, fmt.Errorf("publish refused: %s", code)
+			return code, fmt.Errorf("%s refused: %s", what, code)
 		}
 		return code, nil
 	case <-ctx.Done():

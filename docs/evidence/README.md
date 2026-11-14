@@ -1,9 +1,11 @@
 # Evidence for the measured claims
 
-The largest client load measured so far is 100,000 clients on one host, against an in-process cluster of three nodes,
-and 250,000 clients in the memory sweep, with the three nodes on one host and the clients on another. The checkpoint
-and credential-store measurements reach 1,000,000 sessions or credentials, in one process with no clients connected.
-Measurements of 1,000,000 or more sessions across several hosts are not yet published.
+The largest client load measured so far is 1,000,000 persistent sessions, with the three nodes on one host and every
+client on another, on the broker code released as `v0.2.0` ([million-sessions.md](million-sessions.md)). Before it:
+100,000 clients on one host, against an in-process cluster of three nodes, and 250,000 clients in the memory sweep,
+with the three nodes on one host and the clients on another. The checkpoint and credential-store measurements reach
+1,000,000 sessions or credentials, in one process with no clients connected. No measurement at 1,000,000 sessions has
+the nodes on separate hosts.
 
 Each page here summarises runs kept privately, in the project's private repository and its work records. The run files
 name the hosts and network they ran on and run to hundreds of megabytes, so they are not published; a page gives what
@@ -28,6 +30,7 @@ history's commit identifiers do not exist in this repository, so builds are not 
 | [restart-times.md](restart-times.md) | How long a node refuses publishes while it does not know an owner's routes |
 | [admin-client-list.md](admin-client-list.md) | How long a client-list page holds the lease table's read lock, from a probe of the design |
 | [wal-group.md](wal-group.md) | The group commit's default delay of 0, from two 100,000-client failovers |
+| [million-sessions.md](million-sessions.md) | 1,000,000 persistent sessions: memory a session and a queued message, a node killed and its clients' return, its restart, and the sessions checked after |
 
 ## Terms
 
@@ -50,3 +53,4 @@ Every measurement ran on one of these hosts. Each page names its host again.
 | `ai` | AMD Ryzen 9 7950X3D (16 cores, 32 threads) | 93 GiB | NVMe SSD (Samsung 990 PRO 4 TB) | Linux 6.8.0 (6.8.0-139 from 2026-09-08 to 2026-10-03, 6.8.0-146 after; not recorded before 2026-09-08) |
 | `ai2` | AMD Ryzen 9 9950X3D (16 cores, 32 threads) | 91 GiB | NVMe SSD (Samsung 9100 PRO 4 TB) | Linux 7.0.0-28 |
 | `gtr` | AMD Ryzen AI Max+ 395 (16 cores, 32 threads) | 124 GiB | NVMe SSD (Crucial P310 2 TB) | Linux 6.17.0-29 |
+| `ai3` | AMD Ryzen 7 9800X3D (8 cores, 16 threads) | 92 GiB | NVMe SSD (Samsung 990 PRO 4 TB) | Linux 7.0.0-42 |

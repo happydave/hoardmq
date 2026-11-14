@@ -1032,7 +1032,7 @@ var handedPorts = map[int]bool{}
 // reserveListenPorts keeps the given listener addresses' ports out of the
 // draw. freePort checks a port by binding 127.0.0.1, but a listener address
 // given here is on another interface — in the remote-client mode every node
-// listens on 10.231.14.x:8001 — so that bind succeeds and the port is handed
+// listens on 198.51.100.x:8001 — so that bind succeeds and the port is handed
 // out as a cluster address anyway.
 //
 // The consequence was not a clash on the wire: the cluster transport bound

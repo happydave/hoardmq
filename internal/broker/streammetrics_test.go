@@ -86,6 +86,11 @@ func TestMetricsShowABlockedStreamAndWhatClosedConnections(t *testing.T) {
 			t.Fatalf("closes by cause: %s is absent; an operator reads the four together", cause)
 		}
 	}
+	for _, outcome := range []string{"resumed", "refused"} {
+		if _, ok := metricValue(t, body, fmt.Sprintf(`hoardmq_sealed_connects_total{outcome=%q}`, outcome)); !ok {
+			t.Fatalf("sealed connects: %s is absent", outcome)
+		}
+	}
 	// Which peers n1 replicates to depends on where the shard map put these
 	// sessions; the series exist for the streams that exist, and the test
 	// takes one of them rather than assuming a name.

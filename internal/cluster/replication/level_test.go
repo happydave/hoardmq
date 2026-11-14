@@ -101,9 +101,14 @@ func TestBelowLevelSenderStampsItsBuild(t *testing.T) {
 	n1 := h.nodes["n1"]
 	id := clientIn(2, 0)
 	h.setLease("default", id, "n1", 1)
-	if err := n1.own.SessionUpsert(store.SessionMeta{Namespace: "default", ClientID: id, Epoch: 1}); err != nil {
+	// At level 2 a session's copy is made by a whole write, as a new
+	// session's first write reaches its targets.
+	meta := store.SessionMeta{Namespace: "default", ClientID: id, Epoch: 1}
+	closeWhole := n1.rep.OpenWhole("default", id, causeCreate)
+	if err := n1.own.SessionUpsert(meta); err != nil {
 		t.Fatal(err)
 	}
+	closeWhole(&store.SessionState{SessionMeta: meta, Subscriptions: []store.SubscriptionRecord{}, InboundQoS2: []uint16{}, Entries: []store.Entry{}}, true)
 	h.waitFor("n2 to hold the session", 5*time.Second, func() bool {
 		return h.nodes["n2"].rep.ReplicaState().Find("default", id) != nil
 	})

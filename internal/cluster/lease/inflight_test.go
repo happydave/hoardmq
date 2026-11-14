@@ -282,7 +282,7 @@ func TestAPullServedAfterARefusedImportNamesTheOwner(t *testing.T) {
 	done := acquireAsync(n3, "x", false)
 	ownedBy(t, n2, "x", "n3")
 	if !n2.svc.AdmitImport("default", "x", res.Epoch)() {
-		n2.svc.NoteImportRefused("default", "x", res.Epoch)
+		n2.svc.NoteImportRefused("default", "x", res.Epoch, res.PrevOwner)
 	} else {
 		t.Fatal("precondition not reached: n2 would still admit the import with n3's grant applied")
 	}
@@ -299,7 +299,8 @@ func TestAPullServedAfterARefusedImportNamesTheOwner(t *testing.T) {
 	if prev := adoptionPrev(n3, "x"); prev != "n1" {
 		t.Fatalf("n3's adoption names %q; want n1, which holds the session sealed for n2", prev)
 	}
-	if g := n2.svc.LivenessStats(); g.TakeoverAnsweredPendingTaking != 1 || g.ConnectImportRefused != 1 {
-		t.Fatalf("n2 answered from a takeover's note %d, refused imports %d; want 1, 1", g.TakeoverAnsweredPendingTaking, g.ConnectImportRefused)
+	// The refusal notes n1 again, replacing the takeover's note.
+	if g := n2.svc.LivenessStats(); g.TakeoverAnsweredPendingNoted != 1 || g.ConnectImportRefused != 1 {
+		t.Fatalf("n2 answered from a note %d, refused imports %d; want 1, 1", g.TakeoverAnsweredPendingNoted, g.ConnectImportRefused)
 	}
 }

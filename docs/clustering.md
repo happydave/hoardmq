@@ -53,7 +53,10 @@ upgraded. Version 4 added the forwarded admin calls; a node on a link below
 it answers an admin call for that peer's client with 409 naming the peer.
 Version 5 added the snapshot transfer; a peer on a link below it cannot be
 sent a snapshot by a newer leader (counted `reason="peer-version"`, retried
-after the backoff) until it is upgraded. Heartbeats every `cluster.heartbeatMs` on each connection carry a
+after the backoff) until it is upgraded. Version 6 adds no class: it says
+the route plane at that end reads a full route set sent in parts (below,
+"Routing across nodes"); a peer on a link below it is sent each set in one
+frame. Heartbeats every `cluster.heartbeatMs` on each connection carry a
 stress level; `cluster.heartbeatMisses` silent intervals on the control
 connection mark a peer down (the data connection allows ten times that,
 since a slow data reader is back-pressure, not silence), and the dialing
@@ -204,6 +207,10 @@ previous owner asked for a session by several nodes hands it to the one
 holding the highest token and to no other; a requester below the highest
 token seen is answered *superseded*, the session is not given up on its
 account, and its CONNECT is refused (`where="takeover"`, `where="acquire"`).
+An adoption's fetch answered *superseded* is not told the owner holds
+nothing: the asker's own table is behind a later grant, so the fetch counts
+as unanswered, the client is refused with `0x89 Server Busy` and the
+adoption is kept until the table shows where the lease went.
 
 A node below the cluster's feature level neither adopts a dead owner's
 leases, nor raises the level, nor keeps leadership: it serves nobody, so what
@@ -282,12 +289,18 @@ for an owner (`takeover_holder_undeclared`, `adopt_holder_undeclared`,
 `{on="holder"}` above). With no leader, as when the holder's failure leaves the
 survivors without a quorum, the client is refused until the holder returns or is
 declared, and meanwhile the forget of any other node lost waits for this node's
-adoptions to finish. A holder declared dead is not waited for. Once the shard map
-no longer holds the previous owner, as after its declaration, the owner's targets
-under that map are not the nodes it replicated to, and the copy it fed may be on
-any member; so a fetch under such a map judges every member it could not reach
-because it was down, the previous owner aside, as such a holder (counted in the
-failover artifact's `replication_fetch` as `none_peer_down`).
+adoptions to finish. A holder declared dead is not waited for. A copy may be on a
+member that is not a source: once the shard map no longer holds the previous
+owner, as after its declaration, the owner's targets under that map are not the
+nodes it replicated to, and a former holder keeps a copy wherever its hand-over
+went unacknowledged. So a fetch judges every member it could not reach because it
+was down, the previous owner aside, as such a holder (counted in the failover
+artifact's `replication_fetch` as `none_peer_down`). A fetch whose budget
+(`cluster.replication.ackTimeoutMs`) ends before it has asked the other members
+for a kept copy, as when this node's replica store is held for that long, reads
+unanswered, and the CONNECT is refused and the adoption kept
+(`hoardmq_replication_fetches_total{outcome="none-budget-spent"}`;
+`none_budget_spent` in the failover artifact).
 A holder, or another node that may keep a copy, that is back on its control
 connection while its data connection — the one a fetch travels on — is not up
 yet is not down: a restarted node in its first moments, or one back from a
@@ -372,6 +385,35 @@ takeover, the later to arrive is served and the earlier refused `0x89 Server
 Busy`. Past `cluster.leases.takeoverTimeoutMs` a waiting CONNECT is refused
 `0x89 Server Busy` (`hoardmq_lease_takeover_waits_total{outcome="served"|"refused"|"overtaken"}`,
 `hoardmq_lease_ops_total{op="acquire",outcome="takeover-in-flight"|"takeover-overtaken"}`).
+The same holds for a CONNECT that fetches its lease's adoption itself, or
+whose first acquire takes the lease from another node: it is in flight from
+before it claims the adoption until the session is installed, and the
+adoption stays unfinished until then. While it is unfinished, the node's
+served fact does not count the session, and no confirmation goes to the node
+it came from. Without that, a second CONNECT found neither the session nor an
+adoption and was served a fresh one. Its write dropped the replica copy the
+first had fetched, and if the first's import was then refused on a later
+grant, the session was lost. A result that carries a session's state without
+holding the client's other CONNECTs back is counted
+(`hoardmq_lease_ops_total{op="acquire",outcome="unsettled-state"}`) and
+logged at Error. A CONNECT whose acquire finds the lease this node's at its
+grant waits the same way whether or not its lookup found a lease: the lease can
+be created on another node and taken over here by another CONNECT between the
+lookup and the grant.
+
+**A CONNECT is never served below a grant its node has seen.** A node can
+learn of a later grant for a client (from the new owner's takeover request,
+its replication or its confirmation) before its own lease table applies it.
+While its table still shows the lease its own at the older token, a CONNECT
+there is refused Server Busy, as an import of the session would be, rather
+than served a fresh session while the new owner holds the client's real one.
+The client's retry, once the table has caught up, takes the lease over from
+the new owner. Counted
+(`hoardmq_lease_ops_total{op="acquire",outcome="below-seen-grant"}`) and
+logged at Info at most once a second. For the same reason an owner's write
+below a grant its node has seen does not drop the node's replica copy of the
+session, which may be the only copy the new owner's fetch can find
+(`hoardmq_replicas_kept_total{reason="owned-superseded-write"}`).
 
 **A lease granted after its CONNECT gave up is fetched before it is served.**
 A CONNECT that runs out of `cluster.leases.takeoverTimeoutMs` while its
@@ -382,7 +424,17 @@ leaves a note, and the client's next CONNECT here treats the lease as
 adopted: it asks the previous owner, then the replicas, before it is served,
 with the same rules as any adoption (an unanswered fetch refuses with
 `0x89 Server Busy` and is fetched again on the retry; "not found" everywhere
-serves a fresh session, counted as `adoption`). A session this node already
+serves a fresh session, counted as `adoption`). The previous owner is the
+node the grant took the lease from, recorded when the grant applies here;
+without that record, the owner the refused CONNECT saw. A CONNECT that
+found the lease this node's, with its table behind, and then found it moved
+while it fetched, proposes against the owner the table shows by then, not
+against this node. An adoption that would name this node itself as the
+previous owner accounts for no owner: a fetch that finds no copy refuses
+with `0x89 Server Busy` and keeps the adoption, which is never given up nor
+redirected to the leader, and ends when the lease moves or a copy is found
+(`hoardmq_lease_adoption_waits_total{on="unknown-owner"}`, logged at Warn
+once per adoption, `adopt_owner_unknown`). A session this node already
 holds is never fetched over. A refused first CONNECT, which found no lease,
 leaves a mark instead: if its acquire then creates the lease here and the
 client's next CONNECT here finds it still at that grant's token, the client
@@ -411,7 +463,9 @@ node's own checkpoints carry its sealed copies, so a restart finds them in its l
 until their deletes are written; a resync or a rebalance never sends them. A requester
 asking again is answered from the sealed copy. If the lease comes back to the
 previous owner, the sealed copy is what it resumes, used only when no other node
-has the session. A seal nothing confirms is never dropped because time has passed:
+has the session; `hoardmq_sealed_connects_total{outcome}` counts the CONNECTs
+that resumed a sealed copy (`resumed`) and those refused while it was sealed for
+a newer grant (`refused`). A seal nothing confirms is never dropped because time has passed:
 the new owner may be alive and still unable to fetch it, and the sealed copy can be
 the only one. Every twice `cluster.leases.ttlMs` the previous owner asks the lease
 owner's replica targets, with the replica fetch, whether one holds the session at
@@ -459,9 +513,19 @@ seals what it installed. Without that, a pass could answer "no state" while the
 adopter was still installing the session, whose write then dropped the replica
 copy the new owner's fallback needed. A refused install writes nothing, so that
 copy stays. A CONNECT whose state is refused this way is answered `0x89 Server
-Busy`. Counted in the failover artifact as `adopt_import_refused` and
+Busy`, and its node keeps what the adoption worker's refused install keeps: the
+owner the state came from, which a later owner's pull that finds nothing here
+is told of and waits on, and, for an adopted session, a hand-on that holds the
+node's served fact until the new owner's fact or cover reaches its grant. Counted in the failover artifact as `adopt_import_refused` and
 `connect_import_refused`, and, per node, `seal_waits_import` (Seals that waited
-for an install) and `import_waits_import`. A trace stays beside them:
+for an install), `import_waits_import` and `connect_waits_import`. A CONNECT
+that reaches a node's session manager while an import of its client is
+installing waits for the install and connects to what it installed, so it is
+answered Session Present 1 with the imported session (or, with Clean Start,
+discards it). An install never replaces another session object silently: one
+that finds another object for the client removes it as an eviction does and
+closes its connection with Session Taken Over, counted in `installs_replaced`
+(expected 0) and logged at Error. A trace stays beside them:
 `adopt_import_after_empty_answer` (an install that followed an empty answer for
 the same client, which should read zero) with a capped `import_race_sample`,
 `reclaimed_sample` (offline sessions a confirmation evicted), and the worker's
@@ -614,6 +678,37 @@ once, a peer that comes up receives the node's full set, and every
 Tables merge by higher version, tombstone winning a tie, so they converge
 after a partition heals with unsubscribes honoured.
 
+A full set goes **in parts** to a peer whose data connection runs framing
+version 6 or above, and in one frame to any other. A part is at most 32 KiB,
+half the smallest `cluster.maxFrameBytes` the configuration allows, so it
+fits every node's limit; an entry larger than that travels alone and reaches
+only a peer whose limit is as high, which is why `cluster.maxFrameBytes` is
+to be the same on every node. Every part carries the set's snapshot version
+and index, the last says it is last, and the receiver applies the set only
+once every part of one snapshot has arrived in order; a gap or a newer set
+discards it, and a part of an older set is dropped. The sender sends a set
+in rounds of 32 parts, and the next round to a peer waits until the data
+connection's writer has taken the last one: a set never puts more than a
+round ahead of the deltas, forwards and replication frames behind it, and
+deltas go out between rounds. A peer acknowledges each set it received in
+parts, and a node deletes its own tombstones once every consensus member has
+acknowledged a set that carried them (a member that is down, or on an older
+build, holds them until it returns, is upgraded or is removed); a set also
+removes the sender's stored tombstones it no longer carries. Delta batches
+are cut at the same 32 KiB, numbered one apart, at every framing version. A
+route send the transport refuses or that misses its one-second admission
+bound is counted (`hoardmq_route_send_failures_total{kind, reason}`) and
+logged at Warn, at most once a minute per peer, kind and reason. A node that has
+had no complete set from an up peer for three sync intervals, or whose proof
+of its deltas has been broken for two, logs a Warn naming the peer, and
+`hoardmq_route_sync_age_seconds{peer}` and `hoardmq_route_proof_whole{peer}`
+show it. A SUBSCRIBE whose filter's route entry no frame could carry (only
+possible with a frame limit below about 400 KB) is refused, and an own entry
+of that size that exists anyway (a session restored after the limit was
+lowered) is left out of route sync, counted in
+`hoardmq_route_entries_unsendable_total` and logged at Warn: the other nodes
+do not route that filter to this node.
+
 A full set is **authoritative about absence**: it carries a snapshot version
 taken when it was composed, and the receiver withdraws any entry it holds for
 that node which the set does not carry and whose version is below the
@@ -702,7 +797,13 @@ grace whatever happens to the filter's count in between — the moving
 session's own subscription being removed is a fall in the count, not the end
 of the move — and ends early only when the count rises again, the client
 coming back. A shared-subscription delivery to a member that stayed is a
-complete delivery and is not refused.
+complete delivery and is not refused. A held withdrawal is written at the
+grace's end only if nothing was announced for the filter since it was held:
+a client coming back as the grace ends keeps its route, and the withdrawal it
+superseded is counted in `hoardmq_route_withdrawals_superseded_total`. A held
+withdrawal whose timer fires as the client comes back, or leaves again, writes
+nothing and changes nothing, and is counted there too: the newer hold keeps its
+grace and its refusals.
 
 The move ends early, for the publishes that can show they reached the moved
 session, once the new owner has confirmed it holds the session durably (the
@@ -748,6 +849,51 @@ older build on either side of the pair answers and waits as before.
 An MQTT 5 acknowledgement of No Matching Subscribers means no node matched
 the publish: a forward sent to a subscriber's node counts as a match. Retained publishes are stored by the topic's
 shard leader (see "Data-plane replication"), not by the receiving node.
+
+### The route reconciler
+
+Each node compares, every 60 s, the sessions it holds, its local subscribers
+and the route entries it advertises for them, per session and filter: a held
+session's subscription missing from the local subscribers is added back; a
+local subscriber for a session the node no longer holds (or no longer holding
+that filter) is removed; a filter with subscribers whose own entry is not live,
+or a shared group whose advertised count differs from its members, is
+announced again; and an own entry with no local subscriber is withdrawn. A
+difference is corrected only when the next pass sees it again with the same
+evidence, and never while its filter is moving or its client is being
+imported, so the live paths' short-lived states are left alone; it lasts at
+most two intervals and a pass, three when a removal on the same filter comes
+between its sightings. Each correction goes through the path the live system
+uses and is decided under the lock that orders that write, so a correction
+another change overtook writes nothing. A correction is an ordinary route
+change on the wire: a node of any build merges it by version. Each pass walks
+its work in small steps spread across the interval, holding any lock only for a
+point read or a bounded copy (one session shard, at most 4,096 filters of the
+local subscribers, or the list of own entries once a pass).
+
+A correction is counted in
+`hoardmq_route_reconcile_corrections_total{direction, kind}` (`announce` or
+`withdraw`; `held-undispatched`, `dispatched-unheld`, `unadvertised`, `count`,
+`advertised-undispatched`) and logged at Warn with the namespace, the filter's
+start and length, and the client for the first two kinds, at most 100 a pass,
+the rest counted in `hoardmq_route_reconcile_warns_suppressed_total` and
+summarised in one Warn. `hoardmq_route_reconcile_suspects` is the differences
+seen once and awaiting the next pass; `hoardmq_route_reconcile_cleared_total{kind}`
+those not seen again; `hoardmq_route_reconcile_refused_total{kind, reason}`
+confirmed corrections a live change overtook (`version`, `moving`, `held`,
+`importing`, `replaced`, `removed`, `unsubscribed`, `now-held`, and `settled`
+when the write found the change already made), and `connected`: a local
+subscriber no map holds, for a filter it holds, while a client is connected to
+it. The reconciler never removes a connected client's subscription; such a
+refusal is logged at Warn with the client and the filter, as a split it cannot
+mend, within the same per-pass limit;
+`hoardmq_route_reconcile_skipped_total{reason}` filters left alone while moving
+(`held`, `moving`, `ending`) or importing, with
+`hoardmq_route_reconcile_skipped_persistently` the filters skipped at five
+consecutive passes and a Warn naming one, once an hour. Its cost:
+`hoardmq_route_reconcile_passes_total`, `hoardmq_route_reconcile_pass_seconds`,
+`hoardmq_route_reconcile_hold_seconds` (the longest single hold of the last
+pass) and the histogram `hoardmq_route_reconcile_step_seconds`.
 
 ## Data-plane replication
 
@@ -824,6 +970,25 @@ whole — once per key per acknowledgement timeout — and the barrier passes on
 the follower has acknowledged the repaired copy. The exception is the window between a gap the follower
 reported and the resync that answers it, where a record that changes nothing
 is expected and is acknowledged, the resync being what repairs the copy.
+A follower's copy of a session is whole or absent. A whole write of a
+session (an import, the rewrite after a failed append, a Clean Start, and the
+creation of a session no earlier one of the client can have copies of) is
+journaled on the owner as records, as always, and reaches each target as one
+snapshot, judged once and appended and applied under one hold of the
+follower's lock: a fetch reads the copy as it was before the snapshot or
+after it, and a refused snapshot leaves the copy as it was. From cluster
+feature level 2, a session's metadata record alone never makes a copy: from
+a frame stamped 2 or above, one that finds no copy is neither logged nor
+applied, and is refused as a record the copy cannot hold, so the owner sends
+the session whole. A session too large for one frame (`cluster.maxFrameBytes`)
+is sent as a snapshot without its queue followed by each queued message, and
+a barrier waits for the last of them; when even that does not fit, its delete
+is sent and the owner holds the key refused at that peer, failing every
+barrier naming it, until a whole write of it fits. An owner writing a session
+at a later grant than one a target refused it at for a stale epoch sends the
+session whole there. A refusal of a record sent before a later whole write of
+the same key makes a barrier wait for that write's acknowledgement, and asks
+for no repair.
 Followers persist replicas in a separate log under `node.dataDir/replica`,
 keep them materialised in memory, and acknowledge after syncing; a refusal is
 answered at once and acknowledges nothing, so the frames applied ahead of it
@@ -1000,10 +1165,22 @@ nothing on the follower, `type` the record's: `reason` `no-session` or
 refused and the owner repairs the key; `holed` is a record inside a gap
 window, between a gap the follower reported and the resync mark that
 closes it, acknowledged as the resync is what repairs it),
-`hoardmq_replication_repairs_total{outcome}` (a key the owner sent whole to
-a follower that refused a record for it: `snapshot`, `delete` when the
-owner no longer serves the session, `repeat` for a refusal inside the
-acknowledgement timeout of the last repair, which that repair answers),
+`hoardmq_replication_repairs_total{cause,outcome}` (a key the owner sent whole
+to a follower: `cause` `unapplied` for a record the follower could not apply,
+`earlier-grant` for a key it refused for a stale epoch under an earlier grant
+of the owner's; `outcome` `snapshot`, `delete` when the owner no longer serves
+the session, `repeat` for a refusal inside the acknowledgement timeout of the
+last repair, which that repair answers, `covered` for a refusal a later whole
+write of the key already answers),
+`hoardmq_replication_whole_writes_total{cause,form}` (a session sent whole:
+`cause` `import`, `rewrite`, `clean-start`, `create`, `resync`, `repair` or
+`rebalance`; `form` `snapshot`, `head-and-records` when the snapshot passes the
+frame limit, `refused-too-large` when its head does too, `unwritten` when the
+owner's own append failed; the middle two logged at Warn at most once a
+minute a peer),
+`hoardmq_session_creations_total{form}` (a persistent session created on a
+clustered node: `snapshot` when it reached its targets whole, `lone` when as
+its metadata record alone, which a target holding no copy refuses),
 `hoardmq_replicas_dropped_total{reason}` (a replica copy this node must not
 hold, dropped: `owned-upsert`, `owned-delete` and `owned-rebalance` are copies
 of a session this node owns — from the session's previous owner — dropped at
@@ -1065,15 +1242,30 @@ every source has answered that it holds none — `none`, and
 `none-kept-unconfirmed`, a fetch that found a kept copy while a source did not
 answer, and so read as unanswered: the source may hold the newer copy the owner
 fed (an adoption given up after such fetches serves that copy: "A fetch nobody
-answered" above), and `none-returning`, a fetch that found nothing while a node that may hold
+answered" above), `none-returning`, a fetch that found nothing while a node that may hold
 the copy was back on its control connection and could not be asked yet, which
-also reads as unanswered), `hoardmq_replicas_held`,
+also reads as unanswered, and `none-budget-spent`, a fetch whose budget ended
+before it asked the other members for a kept copy, which also reads as
+unanswered), `hoardmq_replicas_held`,
 `hoardmq_shardmap_version`, `hoardmq_retained_forwards_total{outcome}`,
 `hoardmq_retained_queries_total{direction,outcome}` (`outcome="skipped"` is a
 query a peer's statement made unnecessary),
 `hoardmq_retained_presence_total{direction}`,
-`hoardmq_retained_promotions_total`. The audit log records shard-map changes
-and replica fetches.
+`hoardmq_retained_promotions_total`. Three histograms time the follower's lock
+and a replica fetch, in seconds, each a cumulative `_bucket{le}` series at
+each power of two microseconds from 1 µs to 2^22 µs (about 4.2 s) and `+Inf`,
+with `_sum` and `_count`, a sample of exactly a bound counted under the next
+one: `hoardmq_replication_lock_hold_seconds{kind}`, how
+long each holder held the lock a follower appends and applies under (`apply`,
+a worker applying a peer's record or snapshot; `apply-other`, a record applied
+outside a worker, a copy dropped or a retained message moved; `snapshot-rebalance`
+and `snapshot-other`, a copy of the replica state; `checkpoint`, the replica
+store's checkpoint; `find`, a fetch or a check reading one copy);
+`hoardmq_replication_lock_wait_seconds{kind}`, how long a holder waited for the
+lock, for `apply`, `apply-other` and `find`, the holders whose waits are
+timed; and `hoardmq_replication_fetch_request_seconds`, this node's fetch
+requests to a holder, from the send to the answer, or to the end of the wait
+when none came. The audit log records shard-map changes and replica fetches.
 
 ## Upgrades and the cluster feature level
 
@@ -1129,8 +1321,8 @@ drain's receiver does, and a drain never picks it as a target. `/healthz`
 stays 200: a restart on the same build would hold again. The hold logs one
 Error with the entry, both levels and the raft log's size, then a Warn each
 minute with its growth; size the volume, and upgrade the node before it
-fills. No command removes a consensus member yet, so upgrading it is the way
-out of a hold.
+fills. Upgrading it is the way out of a hold, or removing it from the group
+with `hoardmq cluster remove`.
 
 Replication frames carry the level their sender applied (`lvl`, absent at
 level 1): the cluster's, or its build's when that is lower, because a frame is
@@ -1146,7 +1338,9 @@ whose stored snapshot is in a format it does not know, and it removes no
 file from the snapshot directory first, so the newer build starts on that
 disk again.
 
-Level 1 is everything that shipped up to the first release tag. Metrics:
+Level 1 is everything that shipped up to the first release tag. Level 2,
+raised by `v0.2.0`, is the follower's refusal of a session's metadata record
+alone that finds no replica copy (above, "Data-plane replication"). Metrics:
 `hoardmq_cluster_feature_level`, `hoardmq_cluster_feature_level_build`
 (this node's build), `hoardmq_cluster_feature_level_min_advertised` (what a
 raise waits for; 0 while a member has no record),

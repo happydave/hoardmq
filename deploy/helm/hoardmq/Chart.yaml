@@ -4,8 +4,8 @@ description: HoardMQ, a clustered MQTT broker, as a plain StatefulSet — no ope
 type: application
 # version and appVersion are both the release tag without its "v", set
 # before the tag is cut (docs/release-checklist.md).
-version: 0.1.0
-appVersion: "0.1.0"
+version: 0.2.0
+appVersion: "0.2.0"
 home: https://github.com/happydave/hoardmq
 keywords:
   - mqtt

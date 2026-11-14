@@ -64,7 +64,12 @@ type probeRecord struct {
 	Acked         int64            `json:"acked"`
 	NoSubscribers int64            `json:"no_subscribers"`
 	Refused       map[string]int64 `json:"refused"`
-	Errors        int64            `json:"errors"`
+	// RefusedBy groups every refused publish by the node its publisher was
+	// connected to, the reason code and the pair, with the first and last
+	// relative to the crash: a refusal that persists is placed by where it
+	// persists.
+	RefusedBy []probeRefusalGroup `json:"refused_by,omitempty"`
+	Errors    int64               `json:"errors"`
 	// A storm refuses: the broker is choosing to refuse rather than to
 	// acknowledge what it cannot place, which is the product's stance. The
 	// gating question is whether it is *still* refusing once the cluster has
@@ -122,7 +127,9 @@ type probe struct {
 	acked    map[string]map[uint64]bool // publisher -> acknowledged sequences
 	noSubs   int64
 	refused  map[string]int64
-	errs     int64
+	// refusedBy is every refusal by node, reason and pair.
+	refusedBy map[probeRefusalKey]*probeRefusalSpan
+	errs      int64
 	// bad is every refusal and every unacknowledged publish, with its time,
 	// so the record can be split at the recovery instant once that is known.
 	// Bounded: a hundred pairs publishing once a second for ten minutes is
@@ -173,17 +180,38 @@ type probeEvent struct {
 // subscribed would report every publish as having no subscribers. It then
 // builds the shared groups.
 func newProbe(ctx context.Context, pairs, groups int, rate time.Duration, c *Cluster) (*probe, error) {
-	addrs := c.Addresses()
+	p, err := newProbeAt(ctx, pairs, rate, c.Addresses(), func(addr string) string {
+		if n := c.NodeAt(addr); n != nil {
+			return n.Name
+		}
+		return addr
+	})
+	if err != nil {
+		return p, err
+	}
+	if groups > 0 {
+		built, err := newProbeGroups(ctx, groups, c)
+		p.groups = built
+		for _, g := range built {
+			p.groupCounts.acked[g.k] = map[uint64]bool{}
+		}
+		if err != nil {
+			return p, err
+		}
+	}
+	return p, nil
+}
+
+// newProbeAt connects the pairs to the nodes at addrs, retrying each pair on
+// the nodes in the population's order, and subscribes each subscriber to its
+// partner's topic, waiting for the SUBACK. name maps an address to the node
+// name the report uses.
+func newProbeAt(ctx context.Context, pairs int, rate time.Duration, addrs []string, name func(string) string) (*probe, error) {
 	p := &probe{pairs: pairs, rate: rate, drain: probeDrain, stop: make(chan struct{}),
 		acked: map[string]map[uint64]bool{}, refused: map[string]int64{},
 		ackedAt: map[string]map[uint64]ackMark{}, events: map[string][]Event{},
 		groupCounts: groupCounts{acked: map[int]map[uint64]bool{}, refused: map[string]int64{}},
-		nodeName: func(addr string) string {
-			if n := c.NodeAt(addr); n != nil {
-				return n.Name
-			}
-			return addr
-		}}
+		nodeName:    name}
 	for i := 0; i < pairs; i++ {
 		order := append([]string(nil), addrs[i%len(addrs):]...)
 		order = append(order, addrs[:i%len(addrs)]...)
@@ -201,16 +229,6 @@ func newProbe(ctx context.Context, pairs, groups int, rate time.Duration, c *Clu
 		p.subs, p.pubs = append(p.subs, sub), append(p.pubs, pub)
 		p.acked[pub.ID] = map[uint64]bool{}
 		p.ackedAt[pub.ID] = map[uint64]ackMark{}
-	}
-	if groups > 0 {
-		built, err := newProbeGroups(ctx, groups, c)
-		p.groups = built
-		for _, g := range built {
-			p.groupCounts.acked[g.k] = map[uint64]bool{}
-		}
-		if err != nil {
-			return p, err
-		}
 	}
 	return p, nil
 }
@@ -328,6 +346,7 @@ func (p *probe) publish(ctx context.Context, i int, pub *Client, seq uint64) {
 	switch {
 	case err != nil && code >= 0x80:
 		p.refused[code.String()]++
+		p.noteRefusal(node, code.String(), i, time.Now())
 		p.bad = append(p.bad, probeEvent{at: time.Now(), code: code.String(), subBack: back})
 	case err != nil:
 		p.errs++
@@ -450,6 +469,7 @@ func (p *probe) result(crashAt, instant time.Time) probeRecord {
 	for k, v := range p.refused {
 		rec.Refused[k] = v
 	}
+	rec.RefusedBy = refusalGroups(p.refusedBy, crashAt)
 	split := splitAtInstant(p.bad, crashAt, instant)
 	rec.LastRefusalSec, rec.RefusedAfterRecovery, rec.ErrorsAfterRecovery, rec.RefusedWithSubscriberBack =
 		split.lastRefusalSec, split.refusedAfter, split.errorsAfter, split.refusedWithBack
@@ -599,5 +619,62 @@ func sortedKeys(m map[string]int64) []string {
 		out = append(out, k)
 	}
 	sort.Strings(out)
+	return out
+}
+
+type probeRefusalKey struct {
+	node, code string
+	pair       int
+}
+
+type probeRefusalSpan struct {
+	first, last time.Time
+	n           int64
+}
+
+// probeRefusalGroup is the refused publishes of one pair on one node with
+// one reason.
+type probeRefusalGroup struct {
+	Node     string  `json:"node"`
+	Code     string  `json:"code"`
+	Pair     int     `json:"pair"`
+	Count    int64   `json:"count"`
+	FirstSec float64 `json:"first_sec"`
+	LastSec  float64 `json:"last_sec"`
+}
+
+// noteRefusal counts one refused publish; the caller holds p.mu.
+func (p *probe) noteRefusal(node, code string, pair int, at time.Time) {
+	if p.refusedBy == nil {
+		p.refusedBy = map[probeRefusalKey]*probeRefusalSpan{}
+	}
+	k := probeRefusalKey{node: node, code: code, pair: pair}
+	sp := p.refusedBy[k]
+	if sp == nil {
+		sp = &probeRefusalSpan{first: at}
+		p.refusedBy[k] = sp
+	}
+	sp.last = at
+	sp.n++
+}
+
+// refusalGroups orders the spans by node, reason and pair, dated against
+// the crash.
+func refusalGroups(spans map[probeRefusalKey]*probeRefusalSpan, crashAt time.Time) []probeRefusalGroup {
+	out := make([]probeRefusalGroup, 0, len(spans))
+	for k, sp := range spans {
+		out = append(out, probeRefusalGroup{Node: k.node, Code: k.code, Pair: k.pair, Count: sp.n,
+			FirstSec: sp.first.Sub(crashAt).Seconds(), LastSec: sp.last.Sub(crashAt).Seconds()})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		a, b := out[i], out[j]
+		if a.Node != b.Node {
+			return a.Node < b.Node
+		}
+		if a.Code != b.Code {
+			return a.Code < b.Code
+		}
+		return a.Pair < b.Pair
+	})
 	return out
 }

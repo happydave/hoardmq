@@ -54,6 +54,9 @@ type adoption struct {
 	job     adoptJob
 	running bool
 	done    chan struct{}
+	// closed closes done once: a CONNECT's claim lasts until its caller has
+	// installed the state, and abandon can end the same record meanwhile.
+	closed sync.Once
 	// begun is when the adoption was recorded, for classifying a connection
 	// its import finds already here. A newer job that replaces a queued one
 	// keeps it: the key has had an adoption recorded since then.
@@ -65,6 +68,9 @@ type adoption struct {
 	// past is set once a fetch finds it waiting on a previous owner alive by
 	// the log after SealTimeout.
 	past bool
+	// unknown is set once a fetch finds it waiting on an unknown previous
+	// owner, so that wait is logged once.
+	unknown bool
 	// late is the session's state from a takeover acknowledgement that arrived
 	// after its pull had given up. The previous owner removed the session to
 	// send it, so until someone takes it this is where the session is.
@@ -73,6 +79,9 @@ type adoption struct {
 	// state while this adoption was unfinished; the import trace reads it.
 	answeredEmpty time.Time
 }
+
+// release closes done; only the first of the record's enders closes it.
+func (ad *adoption) release() { ad.closed.Do(func() { close(ad.done) }) }
 
 type adoptionSet struct {
 	mu sync.Mutex
@@ -131,7 +140,7 @@ func (a *adoptionSet) end(k key, ad *adoption) *store.SessionState {
 	late := ad.late
 	ad.late = nil
 	a.mu.Unlock()
-	close(ad.done)
+	ad.release()
 	a.tellIdle(idle)
 	return late
 }
@@ -181,7 +190,7 @@ func (a *adoptionSet) giveBack(k key, ad *adoption, count, spend bool) (attempts
 		ad.late = nil
 	}
 	a.mu.Unlock()
-	close(ad.done)
+	ad.release()
 	return attempts, mine
 }
 
@@ -241,7 +250,7 @@ func (a *adoptionSet) takeLateFor(k key) *store.SessionState {
 	running := ad.running
 	a.mu.Unlock()
 	if !running {
-		close(ad.done)
+		ad.release()
 	}
 	a.tellIdle(idle)
 	return st
@@ -256,7 +265,7 @@ func (a *adoptionSet) abandon(k key) {
 	idle := ad != nil && a.emptiedLocked()
 	a.mu.Unlock()
 	if ad != nil {
-		close(ad.done)
+		ad.release()
 	}
 	a.tellIdle(idle)
 }
@@ -285,6 +294,16 @@ func (a *adoptionSet) markPast(ad *adoption) bool {
 	defer a.mu.Unlock()
 	was := ad.past
 	ad.past = true
+	return !was
+}
+
+// markUnknown marks an adoption as waiting on an unknown previous owner and
+// reports whether this is the first time.
+func (a *adoptionSet) markUnknown(ad *adoption) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	was := ad.unknown
+	ad.unknown = true
 	return !was
 }
 

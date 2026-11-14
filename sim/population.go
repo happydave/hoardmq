@@ -2,11 +2,15 @@ package sim
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/happydave/hoardmq/internal/packet"
 )
 
 // A failover measurement's clients, wherever they run. The test reads them
@@ -27,8 +31,19 @@ type population interface {
 	crashed() error
 	// sample reads the clients now.
 	sample() (popSample, error)
+	// queue takes sessions offline, publish queues messages to them, and
+	// resume reconnects them and counts what each received. The three come
+	// in that order between fill and mark, or not at all.
+	queue(ctx context.Context, q queueRequest) (queueResult, error)
+	publish(ctx context.Context) (queueResult, error)
+	resume(ctx context.Context, wait time.Duration) (queueResult, error)
 	// finish reads the storm's per-client outcome.
 	finish() (popSummary, error)
+	// deliver, after finish, publishes one message on each chosen client's
+	// own filter and classes every client by what it received.
+	deliver(ctx context.Context, req deliveryRequest) (deliveryResult, error)
+	// connacks, after finish, returns each named client's latest CONNACKs.
+	connacks(ids []string) ([]clientConnacks, error)
 	// close ends every client.
 	close()
 }
@@ -49,10 +64,13 @@ type popSample struct {
 	At        time.Time
 }
 
-// popSummary is the storm's per-client outcome since the mark. Reconnects is
-// sorted.
+// popSummary is the storm's per-client outcome since the mark. Reconnects and
+// Attempts are sorted.
 type popSummary struct {
-	Reconnects     []time.Duration
+	Reconnects []time.Duration
+	// Attempts holds, for each client in Reconnects, the connects it made
+	// from its drop to its first accepted CONNACK (Client.ReconnectAttempts).
+	Attempts       []int
 	DroppedClients int
 	Refusals       int64
 	Drops          int64
@@ -74,6 +92,12 @@ type popSummary struct {
 	SessionLostClients int
 	// SessionLostSample names up to sessionLostSampleCap of those clients.
 	SessionLostSample []string
+	// NotRecovered counts the clients not recovered (online with every held
+	// filter granted on the current connection) when the summary was taken,
+	// and NotRecoveredSample names up to sessionLostSampleCap of them, so a
+	// storm that never returns to its target says who is missing.
+	NotRecovered       int
+	NotRecoveredSample []string
 	// SubDowngraded counts SUBACKs that granted a lower QoS than was asked
 	// for. A grant, and a change to what the subscriber is promised.
 	SubDowngraded int64
@@ -101,6 +125,10 @@ type localPopulation struct {
 	// failures, when set, classifies every failed connect (the driver's
 	// client-host figures). The in-process measurement leaves it nil.
 	failures *failureCounts
+	// keepAliveOff turns TCP keepalive off on every client's connections.
+	keepAliveOff bool
+	// keepAlive is every client's MQTT keep alive, in seconds.
+	keepAlive uint16
 
 	mu     sync.Mutex // guards all while fill appends and close reads
 	all    []*Client
@@ -118,9 +146,17 @@ type localPopulation struct {
 	// sessionLostAt is the same baseline for session losses: a client whose
 	// session was absent during the fill must not be counted again as one the
 	// storm lost.
-	sessionLostAt       map[*Client]int64
-	sessionLostBefore   int64
+	sessionLostAt     map[*Client]int64
+	sessionLostBefore int64
+	// genAt is each client's accepted CONNACK count at the mark, by index:
+	// a client past it has reconnected since.
+	genAt               []uint64
 	subDowngradedBefore int64
+
+	// offline holds the indexes the queue step took offline, until resume
+	// replaces them; queued is that step's request.
+	offline []int
+	queued  queueRequest
 }
 
 func newLocalPopulation(clients int, addrs, sources []string, failures *failureCounts) *localPopulation {
@@ -144,6 +180,8 @@ func (p *localPopulation) fill(ctx context.Context, completed *atomic.Int64) (in
 			cl.Source = p.sources[i%len(p.sources)]
 		}
 		cl.failures = p.failures
+		cl.KeepAliveOff = p.keepAliveOff
+		cl.KeepAlive = p.keepAlive
 		p.mu.Lock()
 		p.all = append(p.all, cl)
 		p.mu.Unlock()
@@ -182,7 +220,10 @@ func (p *localPopulation) mark() error {
 	p.subRefusedAt = map[*Client]int64{}
 	p.sessionLostAt = map[*Client]int64{}
 	p.dropCausesBefore = [dropCauseCount]int64{}
-	for _, cl := range p.clientsSnapshot() {
+	all := p.clientsSnapshot()
+	p.genAt = make([]uint64, len(all))
+	for i, cl := range all {
+		p.genAt[i] = cl.gen.Load()
 		cl.TakeEvents()
 		p.refusalsBefore += cl.Refusals.Load()
 		sub := cl.SubRefusals.Load()
@@ -229,6 +270,9 @@ func (p *localPopulation) finish() (popSummary, error) {
 		if d, ok := cl.Reconnect(); ok {
 			out.Reconnects = append(out.Reconnects, d)
 		}
+		if n, ok := cl.ReconnectAttempts(); ok {
+			out.Attempts = append(out.Attempts, n)
+		}
 		out.Refusals += cl.Refusals.Load()
 		if cl.Dropped() {
 			out.DroppedClients++
@@ -252,6 +296,12 @@ func (p *localPopulation) finish() (popSummary, error) {
 			}
 		}
 		out.SubDowngraded += cl.SubDowngraded.Load()
+		if !cl.Recovered() {
+			out.NotRecovered++
+			if len(out.NotRecoveredSample) < sessionLostSampleCap {
+				out.NotRecoveredSample = append(out.NotRecoveredSample, cl.ID)
+			}
+		}
 		for i := range out.DropCauses {
 			out.DropCauses[i] += cl.DropCauses[i].Load()
 		}
@@ -266,6 +316,7 @@ func (p *localPopulation) finish() (popSummary, error) {
 	out.Drops -= p.dropsBefore
 	out.Fails -= p.failsBefore
 	sort.Slice(out.Reconnects, func(i, j int) bool { return out.Reconnects[i] < out.Reconnects[j] })
+	sort.Ints(out.Attempts)
 	return out, nil
 }
 
@@ -301,4 +352,222 @@ func dropCauseMap(causes [dropCauseCount]int64) map[string]int64 {
 		out[dropCauseNames[i]] = n
 	}
 	return out
+}
+
+// queueRequest asks for sessions taken offline and messages queued to them:
+// Sessions of the population, Depth QoS 1 messages each, of PayloadBytes.
+type queueRequest struct {
+	Sessions     int `json:"sessions"`
+	Depth        int `json:"depth"`
+	PayloadBytes int `json:"payload_bytes"`
+}
+
+// queueResult is what the queue step did, and on resume what came back. Acked
+// counts the publishes' acknowledgements by reason code; an error that reached
+// no acknowledgement is counted as "none".
+type queueResult struct {
+	Offline     int              `json:"offline"`
+	Publishers  int              `json:"publishers"`
+	Published   int64            `json:"published"`
+	Acked       map[string]int64 `json:"acked"`
+	PublishMs   int64            `json:"publish_ms"`
+	Reconnected int              `json:"reconnected,omitempty"`
+	SessionLost int              `json:"session_lost,omitempty"`
+	Received    int64            `json:"received,omitempty"`
+	// Complete counts resumed clients that received every message queued to
+	// them, each sequence number once at least.
+	Complete int   `json:"complete,omitempty"`
+	ResumeMs int64 `json:"resume_ms,omitempty"`
+}
+
+// queuePublishers bounds the connections that publish the queued messages.
+const queuePublishers = 64
+
+// queueStride picks every stride-th client, so the offline sessions spread
+// over every node the population's order rotates through.
+func queueStride(clients, sessions int) int {
+	if sessions <= 0 || sessions >= clients {
+		return 1
+	}
+	return clients / sessions
+}
+
+// queuePayload is a message of exactly n bytes when n is long enough, carrying
+// the publisher and sequence parsePayload reads.
+func queuePayload(publisher string, seq uint64, n int) []byte {
+	b := payload(publisher, seq)
+	if pad := n - len(b) - len(";pad="); pad > 0 {
+		b = append(b, ";pad="...)
+		b = append(b, strings.Repeat("x", pad)...)
+	}
+	return b
+}
+
+// queue takes the chosen sessions offline with a clean DISCONNECT, which keeps
+// each session.
+func (p *localPopulation) queue(_ context.Context, q queueRequest) (queueResult, error) {
+	all := p.clientsSnapshot()
+	if q.Sessions <= 0 || q.Depth <= 0 || q.Sessions > len(all) {
+		return queueResult{}, fmt.Errorf("queue: %d sessions of %d clients, depth %d", q.Sessions, len(all), q.Depth)
+	}
+	stride := queueStride(len(all), q.Sessions)
+	p.offline = p.offline[:0]
+	for i := 0; i < len(all) && len(p.offline) < q.Sessions; i += stride {
+		p.offline = append(p.offline, i)
+	}
+	var wg sync.WaitGroup
+	gate := make(chan struct{}, 256)
+	for _, i := range p.offline {
+		wg.Add(1)
+		gate <- struct{}{}
+		go func(cl *Client) {
+			defer wg.Done()
+			defer func() { <-gate }()
+			cl.Close()
+		}(all[i])
+	}
+	wg.Wait()
+	p.queued = q
+	return queueResult{Offline: len(p.offline), Acked: map[string]int64{}}, nil
+}
+
+// publish sends Depth QoS 1 messages to each offline session's topic.
+func (p *localPopulation) publish(ctx context.Context) (queueResult, error) {
+	all := p.clientsSnapshot()
+	q := p.queued
+	res := queueResult{Offline: len(p.offline), Acked: map[string]int64{}}
+	if len(p.offline) == 0 {
+		return res, errors.New("publish: no session was taken offline")
+	}
+	var wg sync.WaitGroup
+	n := min(queuePublishers, len(p.offline))
+	res.Publishers = n
+	pubs := make([]*Client, n)
+	for j := range pubs {
+		order := append([]string(nil), p.addrs[j%len(p.addrs):]...)
+		order = append(order, p.addrs[:j%len(p.addrs)]...)
+		pubs[j] = NewClient(fmt.Sprintf("q%03d", j), order, 0, int64(3_000_000+j))
+		if len(p.sources) > 0 {
+			pubs[j].Source = p.sources[j%len(p.sources)]
+		}
+		if err := pubs[j].Run(ctx); err != nil {
+			for _, c := range pubs[:j+1] {
+				c.Close()
+			}
+			return res, fmt.Errorf("queue: publisher %d: %w", j, err)
+		}
+	}
+	var mu sync.Mutex
+	var published int64
+	start := time.Now()
+	for j, pub := range pubs {
+		wg.Add(1)
+		go func(j int, pub *Client) {
+			defer wg.Done()
+			local := map[string]int64{}
+			var sent int64
+			var seq uint64
+			for k := j; k < len(p.offline); k += n {
+				topic := "f/" + all[p.offline[k]].ID
+				for d := 0; d < q.Depth; d++ {
+					seq++
+					code, err := pub.publish(ctx, &packet.Publish{Topic: topic, QoS: 1, Payload: queuePayload(pub.ID, seq, q.PayloadBytes)})
+					sent++
+					if err != nil {
+						local["none"]++
+						continue
+					}
+					local[ackName(code)]++
+				}
+			}
+			mu.Lock()
+			published += sent
+			for k, v := range local {
+				res.Acked[k] += v
+			}
+			mu.Unlock()
+		}(j, pub)
+	}
+	wg.Wait()
+	res.PublishMs = time.Since(start).Milliseconds()
+	res.Published = published
+	for _, c := range pubs {
+		c.Close()
+	}
+	return res, nil
+}
+
+// resume reconnects the offline sessions as new clients holding their filter,
+// and waits, bounded, until each has received every message queued to it.
+func (p *localPopulation) resume(ctx context.Context, wait time.Duration) (queueResult, error) {
+	all := p.clientsSnapshot()
+	res := queueResult{Offline: len(p.offline), Acked: map[string]int64{}}
+	if len(p.offline) == 0 {
+		return res, errors.New("resume: no session was taken offline")
+	}
+	start := time.Now()
+	fresh := make([]*Client, len(p.offline))
+	var wg sync.WaitGroup
+	var reconnected atomic.Int64
+	gate := make(chan struct{}, 256)
+	for k, i := range p.offline {
+		old := all[i]
+		cl := NewClient(old.ID, old.nodes, old.expiry, int64(4_000_000+i))
+		cl.Source, cl.failures, cl.KeepAliveOff, cl.KeepAlive = old.Source, p.failures, old.KeepAliveOff, old.KeepAlive
+		cl.Hold("f/"+old.ID, 1)
+		fresh[k] = cl
+		wg.Add(1)
+		gate <- struct{}{}
+		go func(cl *Client) {
+			defer wg.Done()
+			defer func() { <-gate }()
+			if cl.Run(ctx) == nil {
+				reconnected.Add(1)
+			}
+		}(cl)
+	}
+	wg.Wait()
+	p.mu.Lock()
+	for k, i := range p.offline {
+		p.all[i] = fresh[k]
+	}
+	p.mu.Unlock()
+	res.Reconnected = int(reconnected.Load())
+
+	seen := make([]map[uint64]bool, len(fresh))
+	for k := range seen {
+		seen[k] = map[uint64]bool{}
+	}
+	deadline := time.Now().Add(wait)
+	for {
+		complete := 0
+		for k, cl := range fresh {
+			for _, d := range cl.TakeDeliveries() {
+				res.Received++
+				seen[k][d.Seq] = true
+			}
+			if len(seen[k]) >= p.queued.Depth {
+				complete++
+			}
+		}
+		res.Complete = complete
+		if complete == len(fresh) || time.Now().After(deadline) || ctx.Err() != nil {
+			break
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	for _, cl := range fresh {
+		if cl.SessionLost.Load() > 0 {
+			res.SessionLost++
+		}
+	}
+	res.ResumeMs = time.Since(start).Milliseconds()
+	p.offline = p.offline[:0]
+	return res, nil
+}
+
+// ackName is a reason code's name without its number, "Success" for 0x00.
+func ackName(code packet.ReasonCode) string {
+	name, _, _ := strings.Cut(code.String(), " (")
+	return name
 }

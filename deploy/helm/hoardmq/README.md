@@ -183,8 +183,9 @@ Why these values:
 - **The keep-alive bound closes a client that sends nothing.** MQTT lets a client
   send a keep-alive of 0, and the broker's own default honours it with no read
   deadline; TCP keep-alive (15 s idle, then 9 probes 15 s apart) closes only a
-  connection whose peer has gone, after about 150 s. A live client that never
-  sends holds its connection and session until 5,400 s pass without a packet.
+  connection whose peer has gone, after about 150 s, and still does under the
+  chart. A live client that never sends holds its connection and session
+  until 5,400 s pass without a packet.
   An hour is a judgement, not a measurement; lower it to reclaim idle
   connections sooner, at the cost of more PINGREQs from clients that were
   idle by design.

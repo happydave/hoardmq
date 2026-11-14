@@ -14,6 +14,7 @@ type fetchCounters struct {
 
 	requests, requestsEnded atomic.Int64
 	requestNs, sendNs       atomic.Int64
+	requestHist             [histBuckets]atomic.Int64
 
 	answered                     atomic.Int64
 	queueNs, answerFindNs, reply atomic.Int64
@@ -24,6 +25,7 @@ type fetchCounters struct {
 	nonePeerDown                 atomic.Int64
 	noneReturning                atomic.Int64
 	noneKeptUnconfirmed          atomic.Int64
+	noneBudgetSpent              atomic.Int64
 
 	finds                  atomic.Int64
 	findLockNs, findHoldNs atomic.Int64
@@ -44,10 +46,13 @@ type FetchStats struct {
 	// NoneSourceDown is the part of None in which a source was down and so
 	// was not asked.
 	NoneSourceDown int64 `json:"none_source_down"`
-	// NonePeerDown is the part of None in which the map no longer held the
-	// previous owner and a peer other than a source was down, so it was named
-	// down for the caller to judge.
+	// NonePeerDown is the part of None in which a peer other than a source
+	// and the previous owner was down, so it was named down for the caller to
+	// judge.
 	NonePeerDown int64 `json:"none_peer_down"`
+	// NoneBudgetSpent is the part of None in which the budget ended before the
+	// kept-copy pass asked the other peers, so the fetch read unanswered.
+	NoneBudgetSpent int64 `json:"none_budget_spent"`
 	// NoneReturning is the part of None in which a peer that could hold the
 	// copy was back on its control connection and not Up, so it could not be
 	// asked yet, and the fetch read unanswered.
@@ -66,6 +71,9 @@ type FetchStats struct {
 	RequestsEnded int64   `json:"requests_ended"`
 	RequestMs     float64 `json:"request_ms_total"`
 	SendMs        float64 `json:"send_ms_total"`
+	// RequestP99Ns is the 99th percentile of a request's time, the upper
+	// bound of its power-of-two bucket of microseconds.
+	RequestP99Ns int64 `json:"request_p99_ns,omitempty"`
 
 	// Answered are fetch frames this node answered as a holder. QueueMs is
 	// the time they waited to be answered.
@@ -98,13 +106,19 @@ func (r *Replicator) FetchStats() FetchStats {
 		Local: c.local.Load(), Remote: c.remote.Load(), KeptCopy: c.keptCopy.Load(), None: c.none.Load(),
 		LocalFinds: c.localFinds.Load(), LocalFindMs: ms(c.localFindNs.Load()),
 		Requests: c.requests.Load(), RequestsEnded: c.requestsEnded.Load(),
-		RequestMs: ms(c.requestNs.Load()), SendMs: ms(c.sendNs.Load()),
+		RequestMs: ms(c.requestNs.Load()), SendMs: ms(c.sendNs.Load()), RequestP99Ns: p99Of(&c.requestHist),
 		Answered: c.answered.Load(), QueueMs: ms(c.queueNs.Load()),
 		FindMs: ms(c.answerFindNs.Load()), ReplyMs: ms(c.reply.Load()),
 		MaxBatch: c.maxBatch.Load(), SettlesBeside: c.settlesBeside.Load(),
-		Pooled: c.pooled.Load(), Overflowed: c.overflowed.Load(), NoneUnanswered: c.noneUnanswered.Load(), NoneSourceDown: c.noneSourceDown.Load(), NonePeerDown: c.nonePeerDown.Load(), NoneReturning: c.noneReturning.Load(), NoneKeptUnconfirmed: c.noneKeptUnconfirmed.Load(),
+		Pooled: c.pooled.Load(), Overflowed: c.overflowed.Load(), NoneUnanswered: c.noneUnanswered.Load(), NoneSourceDown: c.noneSourceDown.Load(), NonePeerDown: c.nonePeerDown.Load(), NoneReturning: c.noneReturning.Load(), NoneKeptUnconfirmed: c.noneKeptUnconfirmed.Load(), NoneBudgetSpent: c.noneBudgetSpent.Load(),
 		Finds: c.finds.Load(), FindLockMs: ms(c.findLockNs.Load()), FindHoldMs: ms(c.findHoldNs.Load()),
 	}
+}
+
+// requested records one fetch request's time.
+func (c *fetchCounters) requested(d int64) {
+	c.requestNs.Add(d)
+	c.requestHist[bucketOf(d)].Add(1)
 }
 
 func storeMax(a *atomic.Int64, v int64) {

@@ -40,6 +40,16 @@ type outbound struct {
 	// pushed: the start of a whole write. A refusal of a frame pushed before
 	// it is a refusal of the copy being replaced, and is not recorded.
 	wholeAt map[store.Scope]uint64
+	// wholeEnd is, per bare key, the sequence of the last frame of a whole
+	// write sent in more than one frame: what a barrier waiting past the
+	// write waits for. A refusal is predated only below wholeAt, the write's
+	// first frame; a refusal of one of its later frames is the write's own.
+	wholeEnd map[store.Scope]uint64
+	// held is this node's own verdict that the peer does not hold a key: a
+	// whole write that failed to append here, or one too large for a frame.
+	// It is kept apart from the peer's refusals because a resync's end does
+	// not answer it: only a whole write of the key that fits does.
+	held map[store.Scope]string // bare key → heldUnwritten or heldTooLarge
 	// clearedBy is, per bare key, the sequence of the whole write or retained
 	// record whose push cleared the key's refusal, until the peer acknowledges
 	// it. A barrier naming the key waits for it, whenever it started: until
@@ -88,6 +98,11 @@ type outbound struct {
 	// waiters are the barriers waiting on this stream, each registered once
 	// with what it waits for, so a change wakes only those it can decide.
 	waiters map[*waiter]struct{}
+	// unappliedWarn and oversizeWarn rate-limit the Warn lines a burst of
+	// unapplied refusals, or of whole writes past the frame limit, would
+	// otherwise write once each.
+	unappliedWarn warnLimiter
+	oversizeWarn  warnLimiter
 	// wakeAll and wakeKeys are what the refusals recorded since the last
 	// refusalArrived wake: every barrier, or those naming these bare keys.
 	wakeAll  bool
@@ -174,13 +189,17 @@ func (p *outbound) push(f frame) uint64 {
 			// answered by the copy that follows, and a refusal of that is
 			// recorded again when its acknowledgement comes back. A refusal
 			// of an older frame still in flight is not.
-			if _, was := p.refused[scope.Bare()]; was {
+			_, was := p.refused[scope.Bare()]
+			_, wasHeld := p.held[scope.Bare()]
+			if was || wasHeld {
 				delete(p.refused, scope.Bare())
+				delete(p.held, scope.Bare())
 				if p.clearedBy == nil {
 					p.clearedBy = make(map[store.Scope]uint64)
 				}
 				p.clearedBy[scope.Bare()] = p.sent
 			}
+			delete(p.wholeEnd, scope.Bare())
 			p.clearBlockedLocked()
 			if p.wholeAt == nil {
 				p.wholeAt = make(map[store.Scope]uint64)
@@ -277,6 +296,11 @@ func (p *outbound) acked(seq uint64) {
 			delete(p.wholeAt, k)
 		}
 	}
+	for k, at := range p.wholeEnd {
+		if at <= seq {
+			delete(p.wholeEnd, k)
+		}
+	}
 	for k, at := range p.clearedBy {
 		if at <= seq {
 			delete(p.clearedBy, k)
@@ -359,7 +383,12 @@ func (p *outbound) failedAt(seq uint64, reason string, named store.Scope) (needs
 	if seq < p.wholeAt[bare] {
 		// The frame predates the last whole write of the key: the copy it
 		// was refused for is being replaced, and the whole write's own
-		// acknowledgement says whether the replacement was refused.
+		// acknowledgement says whether the replacement was refused. A barrier
+		// that began before that write was pushed would otherwise pass on the
+		// refused batch's acknowledgement while the peer holds nothing, so it
+		// is made to wait for the write.
+		p.raiseClearedLocked(bare)
+		p.wakeKeys = append(p.wakeKeys, bare)
 		p.mu.Unlock()
 		p.trace.rejected(rejPredated, nil)
 		return false
@@ -373,7 +402,7 @@ func (p *outbound) failedAt(seq uint64, reason string, named store.Scope) (needs
 		p.trace.rejected(rejRepeat, nil)
 		return false
 	}
-	if len(p.refused) >= maxRefusedTracked {
+	if len(p.refused)+len(p.held) >= maxRefusedTracked {
 		fb := p.fallbackSampleLocked(seq, reason)
 		fb.Outcome = rejAtCap
 		p.blockWhole()
@@ -513,13 +542,18 @@ func refusalClass(reason string) string {
 func (p *outbound) refusedKeys() map[store.Scope]string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if len(p.refused) == 0 {
+	if len(p.refused) == 0 && len(p.held) == 0 {
 		return nil
 	}
-	out := make(map[store.Scope]string, len(p.refused))
+	out := make(map[store.Scope]string, len(p.refused)+len(p.held))
 	for k, v := range p.refused {
 		k.Epoch = v.epoch
 		out[k] = v.class
+	}
+	for k := range p.held {
+		if _, peer := p.refused[k]; !peer {
+			out[k] = heldClass
+		}
 	}
 	return out
 }
@@ -558,7 +592,7 @@ func (p *outbound) markBlockedLocked() {
 }
 
 func (p *outbound) clearBlockedLocked() {
-	if !p.hole && !p.streamBlocked && len(p.refused) == 0 {
+	if !p.hole && !p.streamBlocked && len(p.refused) == 0 && len(p.held) == 0 {
 		p.blockedSince = time.Time{}
 	}
 }
@@ -579,7 +613,7 @@ func (p *outbound) blocked() (reason string, since time.Time) {
 	switch {
 	case p.hole || p.streamBlocked:
 		return "holed", p.blockedSince
-	case len(p.refused) > 0:
+	case len(p.refused) > 0 || len(p.held) > 0:
 		return "refused", p.blockedSince
 	}
 	return "", time.Time{}
@@ -599,11 +633,14 @@ func (p *outbound) countFallback(kind string) {
 // common case and costs one length check, so a healthy stream pays nothing
 // for the scoping.
 func (p *outbound) refusedAmong(keys []store.Scope) (store.Scope, bool) {
-	if len(p.refused) == 0 {
+	if len(p.refused) == 0 && len(p.held) == 0 {
 		return store.Scope{}, false
 	}
 	for _, k := range keys {
 		if _, ok := p.refused[k.Bare()]; ok {
+			return k, true
+		}
+		if _, ok := p.held[k.Bare()]; ok {
 			return k, true
 		}
 	}
@@ -623,14 +660,18 @@ func (p *outbound) refusedTopic(ns, topic string) bool {
 // not since been sent whole, bare and once each, in the order named. Callers
 // hold p.mu.
 func (p *outbound) refusedAllAmong(keys []store.Scope) []store.Scope {
-	if len(p.refused) == 0 {
+	if len(p.refused) == 0 && len(p.held) == 0 {
 		return nil
 	}
 	var out []store.Scope
 	seen := map[store.Scope]bool{}
 	for _, k := range keys {
 		b := k.Bare()
-		if _, ok := p.refused[b]; ok && !seen[b] {
+		_, ok := p.refused[b]
+		if !ok {
+			_, ok = p.held[b]
+		}
+		if ok && !seen[b] {
 			seen[b] = true
 			out = append(out, b)
 		}
@@ -829,6 +870,7 @@ func (p *outbound) broken() {
 	p.queue = nil
 	p.pushed = nil // the frames went with the queue; their attribution is spent
 	p.wholeAt = nil
+	p.wholeEnd = nil
 	p.clearedBy = nil
 	p.brokenAt = p.sent
 	p.failed = p.sent
@@ -874,7 +916,7 @@ func (p *outbound) sendLoop() {
 		f := p.queue[0]
 		p.queue = p.queue[1:]
 		p.mu.Unlock()
-		body, _ := json.Marshal(f)
+		body := encodeFrame(f)
 		ctx, cancel := context.WithTimeout(p.r.ctx, p.r.o.AckTimeout)
 		err := p.r.o.Transport.Send(ctx, p.name, transport.ReplicationAppend, body)
 		cancel()
@@ -934,8 +976,9 @@ func (p *outbound) whole(gen uint64, now time.Time) bool {
 	}
 	wasBlocked := p.streamBlocked
 	p.hole = false
-	// The peer's copy has been replaced wholesale, so every refusal recorded
-	// against it is answered. This is the only thing that clears them.
+	// The peer's copy has been replaced wholesale, so every refusal it sent
+	// is answered. The owner's own verdicts are not: the resync's whole write
+	// of each such key decided it again and set it again where it still holds.
 	p.refused = nil
 	if p.r != nil {
 		p.r.count("hoardmq_replication_resyncs_total", map[string]string{"peer": p.name}, 1)
@@ -952,4 +995,179 @@ func (p *outbound) whole(gen uint64, now time.Time) bool {
 		close(w)
 	}
 	return true
+}
+
+// Why the owner holds a key refused at a peer on its own verdict.
+const (
+	heldUnwritten = "unwritten" // a whole write whose records did not all append here
+	heldTooLarge  = "too-large" // a whole write whose head alone passes the frame limit
+	heldClass     = "owner-held"
+)
+
+// raiseClearedLocked makes a barrier naming bare wait for the key's last
+// whole write, up to its last frame. Callers hold p.mu.
+func (p *outbound) raiseClearedLocked(bare store.Scope) {
+	end := p.wholeAt[bare]
+	if e := p.wholeEnd[bare]; e > end {
+		end = e
+	}
+	if end == 0 {
+		return
+	}
+	if p.clearedBy == nil {
+		p.clearedBy = make(map[store.Scope]uint64)
+	}
+	if end > p.clearedBy[bare] {
+		p.clearedBy[bare] = end
+	}
+}
+
+// extendWhole records that the whole write of bare begun at from ends at to:
+// a barrier waiting past it, whether its refusal was cleared by the write or
+// arrives predated, waits for the last frame.
+func (p *outbound) extendWhole(bare store.Scope, from, to uint64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if from == 0 || p.wholeAt[bare] != from || to <= from {
+		return
+	}
+	if p.wholeEnd == nil {
+		p.wholeEnd = make(map[store.Scope]uint64)
+	}
+	p.wholeEnd[bare] = to
+	if p.clearedBy[bare] == from {
+		p.clearedBy[bare] = to
+	}
+}
+
+// covered reports whether a whole write of bare was pushed to this peer after
+// the frame at seq: that write replaces whatever the frame was refused for,
+// and its acknowledgement is what a barrier now waits for.
+func (p *outbound) covered(bare store.Scope, seq uint64) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return coveredBy(seq, p.wholeAt[bare])
+}
+
+// coveredBy decides covered: a whole write at wholeAt, 0 when none is
+// unacknowledged, was pushed after the refused frame at seq.
+func coveredBy(seq, wholeAt uint64) bool { return wholeAt > seq }
+
+// pushSession pushes a session record from the tap. earlier reports that the
+// peer holds the key refused for a stale epoch below the record's, unless the
+// record is a delete, which replaces whatever the peer holds. The push is
+// skipped, and skipped reported, while this node holds the key refused there
+// for its size: the peer holds no copy, and a record sent there would be
+// refused and repaired once an acknowledgement timeout.
+func (p *outbound) pushSession(f frame, bare store.Scope) (seq uint64, earlier, skipped bool) {
+	p.mu.Lock()
+	if p.held[bare] == heldTooLarge {
+		p.mu.Unlock()
+		return 0, false, true
+	}
+	r, ok := p.refused[bare]
+	earlier = ok && !store.IsSessionDelete(f.Type) && repairsEarlierGrant(r.class, r.epoch, f.Epoch)
+	p.mu.Unlock()
+	return p.push(f), earlier, false
+}
+
+// repairsEarlierGrant decides whether a refusal is of this node's own earlier
+// grant: for a stale epoch, below the epoch it now writes the key at. A
+// refusal at the record's own epoch means the peer has seen a later grant,
+// and one of another class would be refused again.
+func repairsEarlierGrant(class string, refusedAt, writing uint64) bool {
+	return class == "stale-epoch" && refusedAt < writing
+}
+
+// setHeld holds bare refused at this peer on this node's own verdict, after
+// the push that would otherwise clear it. It reports true when the refused set
+// is at its cap and the stream was blocked whole instead, which only a resync
+// clears.
+func (p *outbound) setHeld(bare store.Scope, why string) (needsResync bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		return false
+	}
+	if _, ok := p.held[bare]; !ok && len(p.refused)+len(p.held) >= maxRefusedTracked {
+		p.blockWhole()
+		p.fallbackAtCap.Add(1)
+		return true
+	}
+	if p.held == nil {
+		p.held = make(map[store.Scope]string)
+	}
+	p.held[bare] = why
+	p.markBlockedLocked()
+	return false
+}
+
+// heldWhy reports this node's own verdict on bare at this peer, if any.
+func (p *outbound) heldWhy(bare store.Scope) (string, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	why, ok := p.held[bare]
+	return why, ok
+}
+
+// clearHeld ends this node's verdict on bare at this peer: of the reason
+// given, or of any when why is empty.
+func (p *outbound) clearHeld(bare store.Scope, why string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if cur, ok := p.held[bare]; ok && (why == "" || cur == why) {
+		delete(p.held, bare)
+		p.clearBlockedLocked()
+	}
+}
+
+// heldKeys lists the keys this node holds refused at this peer.
+func (p *outbound) heldKeys() []store.Scope {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]store.Scope, 0, len(p.held))
+	for k := range p.held {
+		out = append(out, k)
+	}
+	return out
+}
+
+// warnLimiter lets a Warn through at most once an interval, counting what it
+// held back meanwhile.
+type warnLimiter struct {
+	at    time.Time
+	since int64
+}
+
+// due reports whether a Warn may be written now, and how many occurrences it
+// stands for, this one included.
+func (l *warnLimiter) due(now time.Time, every time.Duration) (bool, int64) {
+	l.since++
+	if !l.at.IsZero() && now.Sub(l.at) < every {
+		return false, 0
+	}
+	n := l.since
+	l.at, l.since = now, 0
+	return true, n
+}
+
+// warnDue is due under p.mu, at once a minute.
+func (p *outbound) warnDue(l *warnLimiter, now time.Time) (bool, int64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return l.due(now, time.Minute)
+}
+
+// encodeFrame is the frame's wire form. A whole write's state is encoded once,
+// when its form is chosen, and those bytes are sent as the state member.
+func encodeFrame(f frame) []byte {
+	if f.stateJSON == nil {
+		body, _ := json.Marshal(f)
+		return body
+	}
+	body, _ := json.Marshal(struct {
+		frame
+		State json.RawMessage `json:"state,omitempty"`
+	}{f, f.stateJSON})
+	return body
 }

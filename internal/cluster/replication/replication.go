@@ -148,6 +148,10 @@ type Options struct {
 	// of a session it owns — the stale copy from the session's previous
 	// owner, sent as if it were the owner's state; Defects.
 	HandOverOwnedCopies bool
+	// DropOwnedCopyPastSeenGrant makes an owner's write drop its replica copy
+	// of the session although this node has seen a later grant for the
+	// client — the drop that leaves the later owner's fetch nothing; Defects.
+	DropOwnedCopyPastSeenGrant bool
 	// Level is the cluster's feature level as this node reads it, stamped on
 	// the frames it sends; BuildLevel is the highest this build understands,
 	// and a frame stamped above it is refused. Nil reads as level 1.
@@ -239,6 +243,29 @@ type Options struct {
 	// targets: each keeps its copy until this node confirms the session
 	// durable at its targets now. Nil confirms nothing.
 	ConfirmMoved func(ns, id string, to []string)
+	// MaxFrame is the largest payload the transport sends
+	// (cluster.maxFrameBytes); 0 is the transport's default, 16 MiB. A
+	// session's whole write picks its form by it.
+	MaxFrame int
+	// LoneMetaMakesCopy sends whole writes as records, applies a lone session
+	// record that finds no copy whatever its frame's level, and repairs no key
+	// refused under an earlier grant, as before a replica copy was whole or
+	// absent; Defects.
+	LoneMetaMakesCopy bool
+	// PreWholeCopies stands the node in for a build before whole copies: it
+	// sends whole writes and new sessions as records, applies a lone session
+	// record as before whatever the frame's level, and applies each record of
+	// a snapshot under its own hold. For the tests of a mixed cluster; never
+	// configured.
+	PreWholeCopies bool
+	// RefuseLoneMetaUnstamped refuses a lone session record that finds no
+	// copy from an unstamped frame too, so an older owner can be shown the
+	// refusal; a test seam, never configured.
+	RefuseLoneMetaUnstamped bool
+	// PerRecordSnapshotHold applies each record of a snapshot under its own
+	// hold of the follower's mutex, as before; the second arm of the hold's
+	// measurement, never configured.
+	PerRecordSnapshotHold bool
 	// WholeWriteGate, when set, runs inside each whole write of a session in a
 	// rebalance or a resync, once its state is read and before it is queued,
 	// so a test can hold one there; never configured.
@@ -324,6 +351,8 @@ type frame struct {
 
 	// queuedAt is when the frame arrived, for timing its wait. Not sent.
 	queuedAt time.Time
+	// stateJSON is State already encoded, sent in its place (encodeFrame).
+	stateJSON json.RawMessage
 }
 
 // ack is the wire form of the replication-ack class: every sequence up to
@@ -418,6 +447,10 @@ type Replicator struct {
 	// fanOutGate, set by a test before Start, runs at the start of each
 	// rebalance, before its whole writes are queued.
 	fanOutGate func()
+	// wholes is the whole writes open (wholecopy.go); redecides paces the
+	// fresh decisions of keys held refused for their size.
+	wholes    openWholes
+	redecides redecisions
 	// rmoves is this node's share of the retained moves (retainedmove.go).
 	// pushMu orders a new follower's whole push of a shard against the taps
 	// of the shard's writes: a tap holds it for reading.
@@ -661,6 +694,12 @@ func (r *Replicator) Tap(rec store.Record) func() {
 	if len(targets) == 0 {
 		return after
 	}
+	session := !store.IsRetained(rec.Type)
+	bare := store.Scope{Namespace: rec.Key.Namespace, ClientID: rec.Key.ClientID}
+	if session && r.wholeOpen(bare) {
+		// One record of a whole write: the session goes whole when it closes.
+		return after
+	}
 	f := frame{Kind: kindAppend, Type: rec.Type, Namespace: rec.Key.Namespace, ClientID: rec.Key.ClientID, Topic: rec.Key.Topic, Epoch: epoch, Payload: rec.Payload}
 	began := time.Now()
 	var seqs map[string]uint64
@@ -668,9 +707,20 @@ func (r *Replicator) Tap(rec store.Record) func() {
 		seqs = make(map[string]uint64, len(targets))
 	}
 	for _, t := range targets {
-		seq := r.outboundFor(t).push(f)
-		if seqs != nil {
-			seqs[t] = seq
+		p := r.outboundFor(t)
+		if !session {
+			seq := p.push(f)
+			if seqs != nil {
+				seqs[t] = seq
+			}
+			continue
+		}
+		_, earlier, skipped := p.pushSession(f, bare)
+		switch {
+		case skipped && store.IsShrinking(rec.Type):
+			r.shrank(bare)
+		case earlier:
+			r.repairEarlierGrant(t, p, bare)
 		}
 	}
 	if seqs != nil {
@@ -687,25 +737,64 @@ func (r *Replicator) Tap(rec store.Record) func() {
 }
 
 // dropOwnedCopyAfterWrite drops this node's replica copy of a session it has
-// just written or deleted as its owner, unless the copy is provably a later
-// owner's: the lease can move away between the write and this call, and the
-// node that took it over replicates the session back here at its own, higher
-// epoch.
+// just written or deleted as its owner, unless the copy may still be another
+// node's to read (ownedCopyAction).
 func (r *Replicator) dropOwnedCopyAfterWrite(ns, id string, wroteAt uint64, reason string) {
 	began := time.Now()
 	copyEpoch, held := r.follower.copyEpoch(ns, id)
-	switch {
-	case dropStaleOwnedCopy(held, copyEpoch, wroteAt):
+	var seen uint64
+	if r.o.Tokens != nil && !r.o.DropOwnedCopyPastSeenGrant {
+		seen = r.o.Tokens.Seen(ns, id)
+	}
+	switch ownedCopyAction(held, copyEpoch, wroteAt, seen) {
+	case ownedCopyDrop:
 		if r.follower.dropCopy(ns, id, reason) {
 			r.drops.dropped.Add(1)
 		}
-	case held:
+	case ownedCopyKeepLater:
 		r.drops.kept.Add(1)
 		r.count("hoardmq_replicas_kept_total", map[string]string{"reason": "owned-later-epoch"}, 1)
 		r.log.Debug("replica copy kept: later than this node's own write", "client", id, "copyEpoch", copyEpoch, "wroteAt", wroteAt)
+	case ownedCopyKeepSuperseded:
+		r.drops.kept.Add(1)
+		r.count("hoardmq_replicas_kept_total", map[string]string{"reason": "owned-superseded-write"}, 1)
+		r.log.Debug("replica copy kept: this node's own write is below a grant it has seen", "client", id, "copyEpoch", copyEpoch, "wroteAt", wroteAt, "seen", seen)
 	}
 	r.drops.checks.Add(1)
 	r.drops.ns.Add(int64(time.Since(began)))
+}
+
+// What an owner's write does to this node's replica copy of the session.
+type ownedCopy int
+
+const (
+	ownedCopyNone ownedCopy = iota // no copy is held
+	ownedCopyDrop
+	// ownedCopyKeepLater: the copy is a later owner's, replicated back here
+	// at its higher epoch; the lease moved between the write and the drop.
+	ownedCopyKeepLater
+	// ownedCopyKeepSuperseded: the write is below a grant this node has seen,
+	// so the lease has moved on and the write is not the session the later
+	// owner holds. The copy may be the only one that owner's fetch can find.
+	ownedCopyKeepSuperseded
+)
+
+// ownedCopyAction decides what an owner's write at wroteAt does to a copy
+// held at copyEpoch, seen being the highest grant this node has seen for the
+// client (zero when none). A write into a superseded grant is judged by the
+// rule the barrier refuses it by (keySuperseded); otherwise the copy goes
+// unless it is provably a later owner's (dropStaleOwnedCopy).
+func ownedCopyAction(held bool, copyEpoch, wroteAt, seen uint64) ownedCopy {
+	switch {
+	case !held:
+		return ownedCopyNone
+	case keySuperseded(wroteAt, seen):
+		return ownedCopyKeepSuperseded
+	case dropStaleOwnedCopy(held, copyEpoch, wroteAt):
+		return ownedCopyDrop
+	default:
+		return ownedCopyKeepLater
+	}
 }
 
 // dropStaleOwnedCopy decides whether a replica copy this node holds for a
@@ -1100,11 +1189,13 @@ func (r *Replicator) receiveAck(peer string, payload []byte) {
 			// refused record waits for the repair's acknowledgement rather
 			// than failing.
 			scope, scoped := p.scopeOf(a.Seq, a.named())
-			r.log.Warn("a follower's replica has diverged; repairing the key", "follower", peer, "seq", a.Seq, "reason", a.Reason)
+			if ok, n := p.warnDue(&p.unappliedWarn, r.o.Clock()); ok {
+				r.log.Warn("a follower's replica has diverged; repairing the key", "follower", peer, "seq", a.Seq, "reason", a.Reason, "refusals", n)
+			}
 			if p.failedAt(a.Seq, a.Reason, a.named()) || !scoped {
 				r.resync(peer)
 			} else {
-				r.repair(peer, p, scope)
+				r.repair(peer, p, scope, a.Seq, repairUnapplied)
 			}
 			p.refusalArrived()
 			return
@@ -1214,7 +1305,7 @@ func (r *Replicator) request(ctx context.Context, peer string, f frame) (frame, 
 	began := time.Now()
 	if timed {
 		r.fetches.requests.Add(1)
-		defer func() { r.fetches.requestNs.Add(since(began)) }()
+		defer func() { r.fetches.requested(since(began)) }()
 	}
 	body, _ := json.Marshal(f)
 	sending := time.Now()
@@ -1355,7 +1446,7 @@ func (r *Replicator) resyncPeer(peer string) {
 	bulk := newBulk("resync")
 	for _, k := range r.o.Sessions.Persistent() {
 		shard := r.o.Map.ShardOf(k.Namespace, k.ClientID)
-		if contains(m.Targets(shard, r.o.Node), peer) && r.wholeWrite(k, []string{peer}, bulk) {
+		if contains(m.Targets(shard, r.o.Node), peer) && r.wholeWrite(k, []string{peer}, bulk, causeResync) {
 			n++
 		}
 	}
@@ -1397,20 +1488,57 @@ func (r *Replicator) resyncRetained(peer string, m shardmap.Map) int {
 // it could not apply on a whole stream; the owner repairs the key on it.
 const unappliedReason = "unapplied"
 
+// repairEarlierGrant repairs a key this peer refused for a stale epoch under an
+// earlier grant of this node's: the record now pushed is at a later one, and
+// the peer's copy is behind what this node holds. Rate-limited as any repair;
+// the whole write takes the session's lock, so it runs off the tap's goroutine.
+func (r *Replicator) repairEarlierGrant(peer string, p *outbound, bare store.Scope) {
+	if r.o.LoneMetaMakesCopy {
+		return
+	}
+	if !p.repairDue(bare, r.o.Clock(), r.o.AckTimeout) {
+		r.count("hoardmq_replication_repairs_total", map[string]string{"cause": repairEarlierGrant, "outcome": "repeat"}, 1)
+		return
+	}
+	r.wg.Add(1)
+	go func() {
+		defer r.wg.Done()
+		select {
+		case <-r.stop:
+			return
+		default:
+		}
+		r.repairNow(peer, p, bare, repairEarlierGrant)
+	}()
+}
+
 // repair sends a peer the session whole, from what this node serves, after
 // the peer refused a record for it as unappliable; a session this node no
 // longer serves is deleted there instead. One repair per key per
 // acknowledgement timeout: a refusal inside that interval is counted, not
 // answered, since the repair already on the stream answers it.
-func (r *Replicator) repair(peer string, p *outbound, scope store.Scope) {
+func (r *Replicator) repair(peer string, p *outbound, scope store.Scope, refused uint64, cause string) {
 	bare := scope.Bare()
-	if !p.repairDue(bare, r.o.Clock(), r.o.AckTimeout) {
-		r.count("hoardmq_replication_repairs_total", map[string]string{"outcome": "repeat"}, 1)
+	if refused != 0 && p.covered(bare, refused) {
+		// A whole write of the key went to the peer after the refused
+		// record; a barrier over that record waits for it (failedAt).
+		r.count("hoardmq_replication_repairs_total", map[string]string{"cause": cause, "outcome": "covered"}, 1)
 		return
 	}
-	if r.wholeWrite(store.Scope{Namespace: scope.Namespace, ClientID: scope.ClientID}, []string{peer}, nil) {
-		r.count("hoardmq_replication_repairs_total", map[string]string{"outcome": "snapshot"}, 1)
+	if !p.repairDue(bare, r.o.Clock(), r.o.AckTimeout) {
+		r.count("hoardmq_replication_repairs_total", map[string]string{"cause": cause, "outcome": "repeat"}, 1)
+		return
+	}
+	r.repairNow(peer, p, scope, cause)
+}
+
+// repairNow sends the key whole to the peer, or its delete when this node no
+// longer serves it.
+func (r *Replicator) repairNow(peer string, p *outbound, scope store.Scope, cause string) {
+	if r.wholeWrite(store.Scope{Namespace: scope.Namespace, ClientID: scope.ClientID}, []string{peer}, nil, causeRepair) {
+		r.count("hoardmq_replication_repairs_total", map[string]string{"cause": cause, "outcome": "snapshot"}, 1)
 		r.audit("replication.repair", scope.Namespace+"/"+scope.ClientID, "snapshot", map[string]string{"to": peer})
+		r.log.Debug("key repaired at a follower", "follower", peer, "client", scope.ClientID, "cause", cause, "outcome", "snapshot")
 		return
 	}
 	var epoch uint64
@@ -1419,8 +1547,9 @@ func (r *Replicator) repair(peer string, p *outbound, scope store.Scope) {
 	}
 	del := store.DeleteRecord(scope.Namespace, scope.ClientID)
 	p.push(frame{Kind: kindAppend, Type: del.Type, Namespace: scope.Namespace, ClientID: scope.ClientID, Epoch: epoch, Payload: del.Payload})
-	r.count("hoardmq_replication_repairs_total", map[string]string{"outcome": "delete"}, 1)
+	r.count("hoardmq_replication_repairs_total", map[string]string{"cause": cause, "outcome": "delete"}, 1)
 	r.audit("replication.repair", scope.Namespace+"/"+scope.ClientID, "delete", map[string]string{"to": peer})
+	r.log.Debug("key repaired at a follower", "follower", peer, "client", scope.ClientID, "cause", cause, "outcome", "delete")
 }
 
 // sendHandOver pushes a copy this node holds for another owner, at the
@@ -1450,7 +1579,7 @@ func (r *Replicator) sendSnapshot(peer string, ss *store.SessionState) {
 // do: the table's token can be a later owner's, or lag this node's own grant.
 // Only a session with no epoch takes the table's token, looked up first,
 // outside the session's lock. It reports whether the session is served.
-func (r *Replicator) wholeWrite(k store.Scope, peers []string, bulk *bulk) bool {
+func (r *Replicator) wholeWrite(k store.Scope, peers []string, bulk *bulk, cause string) bool {
 	if len(peers) == 0 {
 		return false
 	}
@@ -1466,14 +1595,7 @@ func (r *Replicator) wholeWrite(k store.Scope, peers []string, bulk *bulk) bool 
 		if epoch == 0 {
 			epoch = token
 		}
-		for _, p := range peers {
-			ob := r.outboundFor(p)
-			if bulk != nil {
-				bulk.note(ob)
-			}
-			ob.push(frame{Kind: kindSnapshot, Namespace: ss.Namespace, ClientID: ss.ClientID, Epoch: epoch, State: ss})
-			r.count("hoardmq_replication_records_total", map[string]string{"direction": "out"}, 1)
-		}
+		r.pushWhole(ss, epoch, peers, cause, bulk)
 	})
 }
 

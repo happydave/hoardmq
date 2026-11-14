@@ -34,10 +34,14 @@ func heldNowhere(answered, unaccounted bool) bool {
 // ownerWait is what a fetch that brought no state back waits on in its
 // previous owner: an owner it could not ask, one it asked that did not
 // answer, or neither. While the log says that owner is alive it may hold the
-// session, sealed for as long as nothing shows the session held elsewhere.
+// session, sealed for as long as nothing shows the session held elsewhere. A
+// previous owner named as this node accounts for no owner: the node the lease
+// came from is not known, so the fetch waits on an unknown owner.
 func ownerWait(prev, self string, asked, answered, live bool) undeclaredWait {
 	switch {
-	case prev == "" || prev == self || !live:
+	case prev != "" && prev == self:
+		return waitOwnerUnknown
+	case prev == "" || !live:
 		return waitNone
 	case !asked:
 		return waitOwner
@@ -105,9 +109,20 @@ func giveUpServes(wait undeclaredWait, kept bool) giveUpServe {
 // waitPastBound reports whether an adoption waiting on a node alive by the
 // log has waited longer than bound. A node is declared once the leader has
 // gone a ttl without hearing it, so one still alive that long after is one
-// the leader hears: a client refused for the wait is sent there.
+// the leader hears: a client refused for the wait is sent there. A wait on an
+// unknown owner names no node the leader could hear, and a takeover there
+// would pull this node, which holds nothing, so it is never past the bound.
 func waitPastBound(wait undeclaredWait, age, bound time.Duration) bool {
-	return wait != waitNone && age > bound
+	return wait != waitNone && wait != waitOwnerUnknown && age > bound
+}
+
+// pullAnswered decides whether a takeover pull is an answer from the previous
+// owner about the session. One answered "superseded" is not: that owner has
+// seen a grant above the asker's, so its holding nothing for the asker's grant
+// says nothing about where the session is. It is pure; an answer counted here
+// can let the client be served a fresh session.
+func pullAnswered(answered, superseded bool) bool {
+	return answered && !superseded
 }
 
 // undeclaredHolder is the first of the down holders a fetch named that the

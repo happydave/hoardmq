@@ -113,34 +113,36 @@ func framingVersion(h Hooks, node string) uint8 {
 // with a known fault in it, so a property can be shown to catch it. Each
 // names the mechanism it disables.
 type Defects struct {
-	SkipEpochCheck           bool // followers apply stale-epoch replication records
-	SendBeforeSave           bool // the raft shell sends before its entries are durable
-	NoBarrier                bool // QoS 1 and 2 acknowledged after the local sync only
-	MinorityServes           bool // a fenced node keeps granting leases
-	ReorderForwards          bool // the transport swaps adjacent frames
-	IgnoreChecksum           bool // a log record with a bad checksum is read as sound
-	ForgetInbound            bool // a repeated QoS 2 PUBLISH is routed twice
-	PubrelUnreplicated       bool // the PUBREL goes out before the replicas hold the PUBREC state
-	AdmitDuringAdoption      bool // a CONNECT is admitted while its lease's adoption is unfinished
-	AdmitUnansweredFetch     bool // a session fetch that went unanswered is taken as "held nowhere"
-	DiscardLateState         bool // an answer carrying a session that arrives after its pull gave up is dropped
-	SyncBeforeLoad           bool // a starting node sends its route set before its store is loaded
-	ForwardsBeforeServing    bool // a restarted node takes forwarded deliveries before its replication is attached and its core has recovered
-	RemoveOnHandOver         bool // a takeover pass removes the session and journals its delete at once instead of sealing it
-	IgnoreReplicationGaps    bool // a follower applies frames past a gap in the owner's sequence without reporting it
-	DeleteWithoutHandoverAck bool // a node deletes a replica it hands over without the new holder's acknowledgement
-	IgnoreForwardGaps        bool // a receiver applies forwarded frames past a gap in the sender's sequence without reporting it
-	AcknowledgeUnapplied     bool // a follower acknowledges a replicated record it could not apply instead of refusing it
-	HandOverOwnedCopies      bool // an owner keeps, and hands over as its own, a stale replica copy of a session it owns
-	KeepUnfedCopies          bool // a node keeps, and accepts, a replica copy of a session it is not a target for
-	DropMovedRetained        bool // a node that stops holding a retained shard drops its copies before the new holders hold them
-	KeepRetainedNotHandedOn  bool // a kept retained shard whose releaser is gone is not handed to the shard's leader
-	IgnoreOwedHandOver       bool // a release drops a node's retained copies while it still owes the sender a hand-over of them
-	NoHandOverRetry          bool // a follower's unacknowledged retained hand-over for a dead leader is not made again
-	NoEarlyReleaseDrop       bool // a release kept for an owed hand-over is never acted on
-	NoHandOverAtLeaderChange bool // a shard's copies go to a new leader only when it held nothing of the shard
-	ImportPastLaterGrant     bool // a fetched session is installed although a later grant for its client has been seen
-	DrainSkipsConfirmations  bool // a drain completes when its hand-off commits, without waiting for its sessions to be confirmed held by their receiver
+	SkipEpochCheck             bool // followers apply stale-epoch replication records
+	SendBeforeSave             bool // the raft shell sends before its entries are durable
+	NoBarrier                  bool // QoS 1 and 2 acknowledged after the local sync only
+	MinorityServes             bool // a fenced node keeps granting leases
+	ReorderForwards            bool // the transport swaps adjacent frames
+	IgnoreChecksum             bool // a log record with a bad checksum is read as sound
+	ForgetInbound              bool // a repeated QoS 2 PUBLISH is routed twice
+	PubrelUnreplicated         bool // the PUBREL goes out before the replicas hold the PUBREC state
+	AdmitDuringAdoption        bool // a CONNECT is admitted while its lease's adoption is unfinished
+	AdmitUnansweredFetch       bool // a session fetch that went unanswered is taken as "held nowhere"
+	DiscardLateState           bool // an answer carrying a session that arrives after its pull gave up is dropped
+	SyncBeforeLoad             bool // a starting node sends its route set before its store is loaded
+	ForwardsBeforeServing      bool // a restarted node takes forwarded deliveries before its replication is attached and its core has recovered
+	RemoveOnHandOver           bool // a takeover pass removes the session and journals its delete at once instead of sealing it
+	IgnoreReplicationGaps      bool // a follower applies frames past a gap in the owner's sequence without reporting it
+	DeleteWithoutHandoverAck   bool // a node deletes a replica it hands over without the new holder's acknowledgement
+	IgnoreForwardGaps          bool // a receiver applies forwarded frames past a gap in the sender's sequence without reporting it
+	AcknowledgeUnapplied       bool // a follower acknowledges a replicated record it could not apply instead of refusing it
+	HandOverOwnedCopies        bool // an owner keeps, and hands over as its own, a stale replica copy of a session it owns
+	LoneMetaMakesCopy          bool // whole writes reach replicas as records, a lone session record that finds no copy makes one at any level, and no key refused under an earlier grant is repaired
+	KeepUnfedCopies            bool // a node keeps, and accepts, a replica copy of a session it is not a target for
+	DropMovedRetained          bool // a node that stops holding a retained shard drops its copies before the new holders hold them
+	KeepRetainedNotHandedOn    bool // a kept retained shard whose releaser is gone is not handed to the shard's leader
+	IgnoreOwedHandOver         bool // a release drops a node's retained copies while it still owes the sender a hand-over of them
+	NoHandOverRetry            bool // a follower's unacknowledged retained hand-over for a dead leader is not made again
+	NoEarlyReleaseDrop         bool // a release kept for an owed hand-over is never acted on
+	NoHandOverAtLeaderChange   bool // a shard's copies go to a new leader only when it held nothing of the shard
+	ImportPastLaterGrant       bool // a fetched session is installed although a later grant for its client has been seen
+	DropOwnedCopyPastSeenGrant bool // an owner's write drops its replica copy of the session although a later grant for the client has been seen
+	DrainSkipsConfirmations    bool // a drain completes when its hand-off commits, without waiting for its sessions to be confirmed held by their receiver
 }
 
 // Crash stops the node the way a power loss would: listeners and client

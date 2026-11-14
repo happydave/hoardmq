@@ -115,6 +115,10 @@ type Session struct {
 	rewriteArmed bool
 	forwardErr   bool // a forward to a subscriber's node failed since the last acknowledgement
 
+	// removed is set when the session leaves the manager (removeLocked):
+	// the object is in no map from then on, and nothing may route to it.
+	removed bool
+
 	subs        map[string]Subscription
 	inboundQoS2 map[uint16]*inboundAttempt
 	// acksHeld holds an error PUBREC or a PUBCOMP not sent because the

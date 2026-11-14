@@ -182,12 +182,70 @@ func TestDriverProtocolEndToEnd(t *testing.T) {
 			if s.Recovered != clients || s.Online != clients {
 				t.Fatalf("recovered %d, online %d, want %d of each", s.Recovered, s.Online, clients)
 			}
+			// One client is taken over after every client was back, by a
+			// CONNECT of its identifier that the test makes and closes; the
+			// driver must name it, and only it, as a late drop. The second
+			// case takes over none, and must name none.
+			displaced := "f000007"
+			if !tc.dropBulk {
+				dctx, dcancel := context.WithTimeout(ctx, 30*time.Second)
+				other := NewClient(displaced, []string{c.Running()[0].TCP}, 3600, 99)
+				if err := other.Run(dctx); err != nil {
+					dcancel()
+					t.Fatalf("the displacing CONNECT: %v", err)
+				}
+				other.Close()
+				dcancel()
+				// The displaced client was told at the other's CONNACK; give it
+				// time to reconnect, then wait for every client back.
+				time.Sleep(time.Second)
+				back := time.Now().Add(30 * time.Second)
+				for {
+					if s, err = d.pop.sample(); err != nil {
+						t.Fatal(err)
+					}
+					if s.Recovered == clients && s.Online == clients {
+						break
+					}
+					if time.Now().After(back) {
+						t.Fatalf("the displaced client did not come back: %d online, %d recovered", s.Online, s.Recovered)
+					}
+					time.Sleep(50 * time.Millisecond)
+				}
+			}
 			summary, err := d.pop.finish()
 			if err != nil {
 				t.Fatal(err)
 			}
+			late := d.pop.summary.LateDrops
+			if late == nil || late.SinceMs == 0 {
+				t.Fatalf("late drops %+v: the driver read no instant with every client back", late)
+			}
+			var named []string
+			for _, lc := range late.Named {
+				named = append(named, lc.ID)
+			}
+			if tc.dropBulk {
+				if late.Clients != 0 || len(named) != 0 {
+					t.Fatalf("no client taken over after recovery, yet %d late drops named %v", late.Clients, named)
+				}
+			} else {
+				if late.Clients != 1 || len(named) != 1 || named[0] != displaced {
+					t.Fatalf("late drops named %v (%d clients), want %s alone", named, late.Clients, displaced)
+				}
+				lc := late.Named[0]
+				if len(lc.Drops) != 1 || lc.Drops[0].Cause != "session-taken-over" || late.ByCause["session-taken-over"] != 1 {
+					t.Fatalf("%s's late drops %+v (by cause %v), want one session taken over", displaced, lc.Drops, late.ByCause)
+				}
+				if !lc.Connacks.Found || lc.Connacks.Seen < 2 || !lc.Connacks.Last[len(lc.Connacks.Last)-1].SessionPresent {
+					t.Fatalf("%s's CONNACK record %+v, want its reconnect after the takeover, with Session Present", displaced, lc.Connacks)
+				}
+			}
 			if summary.DroppedClients < affected || len(summary.Reconnects) != summary.DroppedClients {
 				t.Fatalf("summary: %d dropped, %d reconnect times, %d on the crashed node", summary.DroppedClients, len(summary.Reconnects), affected)
+			}
+			if len(summary.Attempts) != len(summary.Reconnects) || len(summary.Attempts) == 0 || summary.Attempts[0] < 1 {
+				t.Fatalf("attempts: %d counts for %d reconnects, the least %v", len(summary.Attempts), len(summary.Reconnects), summary.Attempts[:min(1, len(summary.Attempts))])
 			}
 			for i := 1; i < len(summary.Reconnects); i++ {
 				if summary.Reconnects[i] < summary.Reconnects[i-1] {

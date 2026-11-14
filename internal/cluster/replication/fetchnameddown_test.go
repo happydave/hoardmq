@@ -9,27 +9,24 @@ import (
 	"github.com/happydave/hoardmq/internal/cluster/shardmap"
 )
 
-// TestPeerNamedDown: a fetch names a peer it cannot reach as down only under
-// a map whose basis no longer holds the previous owner, and never the owner
-// itself or a peer back on its control connection.
+// TestPeerNamedDown: a fetch names every peer it cannot reach because it is
+// down, under any map, and never the owner itself or a peer back on its
+// control connection or up.
 func TestPeerNamedDown(t *testing.T) {
-	without, with := []string{"n2", "n3", "n4"}, []string{"n1", "n2", "n3", "n4"}
 	for _, c := range []struct {
 		name  string
 		prev  string
-		basis []string
 		peer  string
 		reach fetchPeerReach
 		want  bool
 	}{
-		{"owner out of the basis, peer down", "n1", without, "n3", reachDown, true},
-		{"owner in the basis, peer down", "n1", with, "n3", reachDown, false},
-		{"the owner itself, down", "n1", without, "n1", reachDown, false},
-		{"owner out of the basis, peer returning", "n1", without, "n3", reachReturning, false},
-		{"owner out of the basis, peer up", "n1", without, "n3", reachAsk, false},
-		{"no previous owner", "", without, "n3", reachDown, false},
+		{"peer down", "n1", "n3", reachDown, true},
+		{"the owner itself, down", "n1", "n1", reachDown, false},
+		{"peer returning", "n1", "n3", reachReturning, false},
+		{"peer up", "n1", "n3", reachAsk, false},
+		{"no previous owner, peer down", "", "n3", reachDown, true},
 	} {
-		if got := namedDown(c.prev, c.basis, c.peer, c.reach); got != c.want {
+		if got := namedDown(c.prev, c.peer, c.reach); got != c.want {
 			t.Errorf("%s: namedDown = %v, want %v", c.name, got, c.want)
 		}
 	}
@@ -85,18 +82,18 @@ func TestFetchNamesADownPeerUnderAMapWithoutThePreviousOwner(t *testing.T) {
 	}
 }
 
-// TestFetchNamesNoOtherPeerUnderAMapHoldingThePreviousOwner: the same nodes,
-// but the map still holds n1, so X's sources are n1's targets and a down peer
-// that is not one of them is not named.
-func TestFetchNamesNoOtherPeerUnderAMapHoldingThePreviousOwner(t *testing.T) {
+// TestFetchNamesADownPeerUnderAMapHoldingThePreviousOwner: the same nodes,
+// but the map still holds n1, so X's sources are n1's targets. n3 is not one
+// of them, and it holds X's copy: the fetch cannot ask it, so it names it.
+func TestFetchNamesADownPeerUnderAMapHoldingThePreviousOwner(t *testing.T) {
 	h, id := downPeerFixture(t, []string{"n1", "n2", "n3", "n4"})
 	n2 := h.nodes["n2"].rep
 	ss, answered, down := n2.Fetch(context.Background(), "default", id, "n1")
-	if ss != nil || !answered || len(down) != 0 {
-		t.Fatalf("the fetch returned a copy %v, answered %v, down %v; want none, answered and nobody down", ss != nil, answered, down)
+	if ss != nil || !answered || !slices.Equal(down, []string{"n3"}) {
+		t.Fatalf("the fetch returned a copy %v, answered %v, down %v; want none, answered and n3 named down", ss != nil, answered, down)
 	}
-	if st := n2.FetchStats(); st.NonePeerDown != 0 {
-		t.Fatalf("NonePeerDown %d, want 0", st.NonePeerDown)
+	if st := n2.FetchStats(); st.NonePeerDown != 1 {
+		t.Fatalf("NonePeerDown %d, want 1", st.NonePeerDown)
 	}
 }
 

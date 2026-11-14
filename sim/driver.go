@@ -24,6 +24,12 @@ import (
 //	driver → test   ready (the driver's build and host) or refused (reasons)
 //	test → driver   fill
 //	driver → test   progress every 15 s, then filled (failed, per-node counts)
+//	test → driver   queue (optional: sessions to take offline, messages each)
+//	driver → test   queued (how many went offline)
+//	test → driver   publish (only after queue)
+//	driver → test   published (what was published and acknowledged)
+//	test → driver   resume (only after publish)
+//	driver → test   resumed (reconnected, sessions lost, messages received)
 //	test → driver   mark
 //	driver → test   marked; the test crashes a node only after this
 //	test → driver   crashed, once the node is down
@@ -32,6 +38,11 @@ import (
 //	driver → test   host figures every second, from ready to closed
 //	test → driver   finish
 //	driver → test   summary (every per-client reconnect time and the counters)
+//	test → driver   deliver (optional: one message on each chosen client's
+//	                filter, with negative controls)
+//	driver → test   delivered (every chosen client's class)
+//	test → driver   connacks (optional, any number: client identifiers)
+//	driver → test   connack_records (each named client's latest CONNACKs)
 //	test → driver   close
 //	driver → test   closed, and the driver exits
 //
@@ -44,22 +55,32 @@ import (
 const reliableReading = time.Second
 
 const (
-	msgHello    = "hello"
-	msgReady    = "ready"
-	msgRefused  = "refused"
-	msgFill     = "fill"
-	msgProgress = "progress"
-	msgFilled   = "filled"
-	msgMark     = "mark"
-	msgMarked   = "marked"
-	msgCrashed  = "crashed"
-	msgSample   = "sample"
-	msgCross    = "cross"
-	msgHost     = "host"
-	msgFinish   = "finish"
-	msgSummary  = "summary"
-	msgClose    = "close"
-	msgClosed   = "closed"
+	msgHello     = "hello"
+	msgReady     = "ready"
+	msgRefused   = "refused"
+	msgFill      = "fill"
+	msgProgress  = "progress"
+	msgFilled    = "filled"
+	msgMark      = "mark"
+	msgMarked    = "marked"
+	msgCrashed   = "crashed"
+	msgSample    = "sample"
+	msgCross     = "cross"
+	msgHost      = "host"
+	msgFinish    = "finish"
+	msgSummary   = "summary"
+	msgClose     = "close"
+	msgClosed    = "closed"
+	msgQueue     = "queue"
+	msgQueued    = "queued"
+	msgPublish   = "publish"
+	msgPublished = "published"
+	msgResume    = "resume"
+	msgResumed   = "resumed"
+	msgDeliver   = "deliver"
+	msgDelivered = "delivered"
+	msgConnacks  = "connacks"
+	msgConnackRe = "connack_records"
 )
 
 // The driver's phases, as its host figures label them. The client-limited
@@ -90,6 +111,11 @@ type driverMsg struct {
 	Sources        []string `json:"sources,omitempty"`
 	BytesPerClient uint64   `json:"bytes_per_client,omitempty"`
 	WaitMs         int64    `json:"wait_ms,omitempty"`
+	// TCPKeepAliveOff, in the hello, turns TCP keepalive off on the
+	// clients' connections.
+	TCPKeepAliveOff bool `json:"tcp_keepalive_off,omitempty"`
+	// KeepAlive, in the hello, is the clients' MQTT keep alive in seconds.
+	KeepAlive uint16 `json:"keep_alive,omitempty"`
 
 	Driver  *DriverInfo `json:"driver,omitempty"`
 	Reasons []string    `json:"reasons,omitempty"`
@@ -108,27 +134,45 @@ type driverMsg struct {
 
 	Host    *ClientHostSample `json:"host,omitempty"`
 	Summary *driverSummary    `json:"summary,omitempty"`
+
+	Queue       *queueRequest `json:"queue,omitempty"`
+	QueueResult *queueResult  `json:"queue_result,omitempty"`
+
+	Delivery       *deliveryRequest `json:"delivery,omitempty"`
+	DeliveryResult *deliveryResult  `json:"delivery_result,omitempty"`
+
+	ClientIDs []string         `json:"client_ids,omitempty"`
+	Connacks  []clientConnacks `json:"connacks,omitempty"`
 }
 
 // DriverInfo is the driver's own provenance: its build and its host.
 type DriverInfo struct {
-	Revision      string  `json:"revision"`
-	Modified      *bool   `json:"modified"`
-	GoVersion     string  `json:"go_version"`
-	Hostname      string  `json:"hostname"`
-	NumCPU        int     `json:"num_cpu"`
-	MemTotalBytes uint64  `json:"mem_total_bytes"`
-	Kernel        string  `json:"kernel"`
-	PortLo        int     `json:"ephemeral_lo"`
-	PortHi        int     `json:"ephemeral_hi"`
-	OpenFiles     uint64  `json:"open_files"`
-	Dial          string  `json:"dial"`
-	WaitedSec     float64 `json:"waited_for_start_sec"`
+	Revision      string `json:"revision"`
+	Modified      *bool  `json:"modified"`
+	GoVersion     string `json:"go_version"`
+	Hostname      string `json:"hostname"`
+	NumCPU        int    `json:"num_cpu"`
+	MemTotalBytes uint64 `json:"mem_total_bytes"`
+	Kernel        string `json:"kernel"`
+	PortLo        int    `json:"ephemeral_lo"`
+	PortHi        int    `json:"ephemeral_hi"`
+	OpenFiles     uint64 `json:"open_files"`
+	Dial          string `json:"dial"`
+	// TCPKeepAlive is the clients' TCP keepalive as the driver applies it:
+	// "default" (Go's) or "off".
+	TCPKeepAlive string `json:"tcp_keepalive"`
+	// KeepAlive is the clients' MQTT keep alive as the driver applies it,
+	// in seconds.
+	KeepAlive int     `json:"keep_alive_sec"`
+	WaitedSec float64 `json:"waited_for_start_sec"`
 }
 
 // driverSummary is the storm's per-client outcome as the driver saw it.
 type driverSummary struct {
 	ReconnectsNs       []int64  `json:"reconnects_ns"`
+	ReconnectAttempts  []int    `json:"reconnect_attempts"`
+	NotRecovered       int      `json:"not_recovered"`
+	NotRecoveredSample []string `json:"not_recovered_sample"`
 	DroppedClients     int      `json:"dropped_clients"`
 	Refusals           int64    `json:"refusals"`
 	Drops              int64    `json:"drops"`
@@ -141,6 +185,8 @@ type driverSummary struct {
 	DropCauses         []int64  `json:"drop_causes"`
 	BulkDropped        int64    `json:"bulk_dropped"`
 	MissingSources     []string `json:"missing_sources"`
+	// LateDrops names the clients that dropped after every client was back.
+	LateDrops *lateDrops `json:"late_drops,omitempty"`
 }
 
 type driverOptions struct {
@@ -375,6 +421,8 @@ func runDriver(in io.Reader, out, errOut io.Writer, o driverOptions) int {
 		return end(driverRefused)
 	}
 	info := readDriverInfo(dial)
+	info.TCPKeepAlive = keepAliveName(hello.TCPKeepAliveOff)
+	info.KeepAlive = int(hello.KeepAlive)
 	info.WaitedSec = time.Since(waitStart).Seconds()
 	w.send(driverMsg{Type: msgReady, Driver: &info})
 
@@ -397,6 +445,8 @@ func runDriver(in io.Reader, out, errOut io.Writer, o driverOptions) int {
 	}
 	phase.Store(phaseFill)
 	pop = newLocalPopulation(hello.Clients, hello.Nodes, hello.Sources, failures)
+	pop.keepAliveOff = hello.TCPKeepAliveOff
+	pop.keepAlive = hello.KeepAlive
 	fillCtx, cancelFill := context.WithTimeout(context.Background(), 45*time.Minute)
 	defer cancelFill()
 	var completed atomic.Int64
@@ -423,7 +473,7 @@ func runDriver(in io.Reader, out, errOut io.Writer, o driverOptions) int {
 	phase.Store(phaseFilled)
 	w.send(driverMsg{Type: msgFilled, Failed: failed, FillMs: time.Since(fillStart).Milliseconds(), PerNode: perNode, Completed: completed.Load()})
 
-	if _, code, ok := expect(msgMark); !ok {
+	if code, ok := queueSteps(next, w, pop, inputDone, errOut); !ok {
 		return end(code)
 	}
 	_ = pop.mark()
@@ -440,14 +490,20 @@ func runDriver(in io.Reader, out, errOut io.Writer, o driverOptions) int {
 	// cannot change the interval; a dropped crossing could.
 	atTarget := first.Recovered >= target && first.Online >= target
 	lastReliable := time.Now()
+	// back is read once stopSample has returned; crashed is set once the
+	// test has said the crash happened.
+	var back backWatch
+	var crashed atomic.Bool
 	stopSample = ticking(o.sampleEvery, func() {
 		s, _ := pop.sample()
 		m := driverMsg{Type: msgSample, Online: s.Online, Recovered: s.Recovered, Refusals: s.Refusals, Fails: s.Fails}
 		w.offer(m)
 		cross := false
-		if now := s.Recovered >= target && s.Online >= target; now != atTarget {
+		now := s.Recovered >= target && s.Online >= target
+		if now != atTarget {
 			atTarget, cross = now, true
 		}
+		back.observe(now, crashed.Load(), s.At)
 		// A reading goes reliably when it crosses the target, and otherwise
 		// once a second. The test's watch only advances its hold when a
 		// reading's arrival time advances, so a run whose bulk was all
@@ -467,18 +523,20 @@ func runDriver(in io.Reader, out, errOut io.Writer, o driverOptions) int {
 	if _, code, ok := expect(msgCrashed); !ok {
 		return end(code)
 	}
+	crashed.Store(true)
 	if _, code, ok := expect(msgFinish); !ok {
 		return end(code)
 	}
 	stopSample()
 	phase.Store(phaseFinished)
 	sum, _ := pop.finish()
-	ds := driverSummary{ReconnectsNs: make([]int64, 0, len(sum.Reconnects)), DroppedClients: sum.DroppedClients,
+	ds := driverSummary{ReconnectsNs: make([]int64, 0, len(sum.Reconnects)), ReconnectAttempts: sum.Attempts, NotRecovered: sum.NotRecovered, NotRecoveredSample: sum.NotRecoveredSample, DroppedClients: sum.DroppedClients,
 		Refusals: sum.Refusals, Drops: sum.Drops, Fails: sum.Fails, SubRefusals: sum.SubRefusals,
 		SubRefusedClients: sum.SubRefusedClients, SessionLost: sum.SessionLost,
 		SessionLostClients: sum.SessionLostClients, SubDowngraded: sum.SubDowngraded,
 		DropCauses:  sum.DropCauses[:],
-		BulkDropped: w.dropped.Load(), MissingSources: make([]string, 0)}
+		BulkDropped: w.dropped.Load(), MissingSources: make([]string, 0),
+		LateDrops: lateDropsOf(pop.clientsSnapshot(), back.at)}
 	for _, d := range sum.Reconnects {
 		ds.ReconnectsNs = append(ds.ReconnectsNs, int64(d))
 	}
@@ -490,7 +548,7 @@ func runDriver(in io.Reader, out, errOut io.Writer, o driverOptions) int {
 	}
 	w.send(driverMsg{Type: msgSummary, Summary: &ds})
 
-	if _, code, ok := expect(msgClose); !ok {
+	if code, ok := deliverStep(next, w, pop, inputDone, errOut); !ok {
 		return end(code)
 	}
 	phase.Store(phaseClosing)
@@ -557,4 +615,117 @@ func readDriverInfo(dial string) DriverInfo {
 	info.PortLo, info.PortHi, _ = readEphemeralRange()
 	info.OpenFiles = readClientStartFacts().OpenFiles
 	return info
+}
+
+// queueSteps reads the messages between filled and mark: mark alone, or one
+// queue and its resume before it. It returns once mark has arrived, or with
+// the exit code when the exchange broke.
+func queueSteps(next func() (driverMsg, bool), w *driverWriter, pop *localPopulation, inputDone <-chan struct{}, errOut io.Writer) (int, bool) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		select {
+		case <-inputDone:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	queued := false
+	for {
+		m, ok := next()
+		if !ok {
+			_, _ = fmt.Fprintf(errOut, "driver: control channel closed while waiting for %s\n", msgMark)
+			return driverInputGone, false
+		}
+		switch {
+		case m.Type == msgMark:
+			return 0, true
+		case m.Type == msgQueue && !queued && m.Queue != nil:
+			queued = true
+			steps := []struct {
+				answer string
+				run    func() (queueResult, error)
+			}{
+				{msgQueued, func() (queueResult, error) { return pop.queue(ctx, *m.Queue) }},
+				{msgPublished, func() (queueResult, error) { return pop.publish(ctx) }},
+				{msgResumed, nil},
+			}
+			for i, st := range steps {
+				run := st.run
+				if i > 0 {
+					want := []string{"", msgPublish, msgResume}[i]
+					r, ok := next()
+					if !ok {
+						return driverInputGone, false
+					}
+					if r.Type != want {
+						w.send(driverMsg{Type: msgRefused, Reasons: []string{fmt.Sprintf("unexpected message %q while waiting for %q", r.Type, want)}})
+						return driverProtocol, false
+					}
+					if run == nil {
+						wait := time.Duration(r.WaitMs) * time.Millisecond
+						run = func() (queueResult, error) { return pop.resume(ctx, wait) }
+					}
+				}
+				res, err := run()
+				if err != nil {
+					w.send(driverMsg{Type: msgRefused, Reasons: []string{err.Error()}})
+					return driverProtocol, false
+				}
+				w.send(driverMsg{Type: st.answer, QueueResult: &res})
+			}
+		default:
+			w.send(driverMsg{Type: msgRefused, Reasons: []string{fmt.Sprintf("unexpected message %q while waiting for %q", m.Type, msgMark)}})
+			return driverProtocol, false
+		}
+	}
+}
+
+// deliverStep reads the messages between summary and close: at most one
+// deliver, and any number of connacks, before close. It returns once close
+// has arrived, or with the exit code when the exchange broke.
+func deliverStep(next func() (driverMsg, bool), w *driverWriter, pop *localPopulation, inputDone <-chan struct{}, errOut io.Writer) (int, bool) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		select {
+		case <-inputDone:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	delivered := false
+	for {
+		m, ok := next()
+		if !ok {
+			_, _ = fmt.Fprintf(errOut, "driver: control channel closed while waiting for %s\n", msgClose)
+			return driverInputGone, false
+		}
+		switch {
+		case m.Type == msgClose:
+			return 0, true
+		case m.Type == msgDeliver && !delivered && m.Delivery != nil:
+			delivered = true
+			res, err := pop.deliver(ctx, *m.Delivery)
+			if err != nil {
+				w.send(driverMsg{Type: msgRefused, Reasons: []string{err.Error()}})
+				return driverProtocol, false
+			}
+			w.send(driverMsg{Type: msgDelivered, DeliveryResult: &res})
+		case m.Type == msgConnacks:
+			res, _ := pop.connacks(m.ClientIDs)
+			w.send(driverMsg{Type: msgConnackRe, Connacks: res})
+		default:
+			w.send(driverMsg{Type: msgRefused, Reasons: []string{fmt.Sprintf("unexpected message %q while waiting for %q", m.Type, msgClose)}})
+			return driverProtocol, false
+		}
+	}
+}
+
+// keepAliveName names the clients' TCP keepalive as a run records it.
+func keepAliveName(off bool) string {
+	if off {
+		return "off"
+	}
+	return "default"
 }

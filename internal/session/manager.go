@@ -58,6 +58,11 @@ type Options struct {
 	// Tracer records spans for the publishes this node takes in; nil is
 	// tracing off.
 	Tracer *otel.Tracer
+	// FilterRoutable, when set, reports whether a filter's route entry can
+	// reach the cluster's other nodes; SUBSCRIBE refuses one that cannot, as
+	// the subscription limit does, rather than hold a subscription the other
+	// nodes would never route to.
+	FilterRoutable func(ns, filter string) bool
 	// Ended is told when a session's state is gone for good (expired, or
 	// replaced by a Clean Start), with the epoch it carried; nil means none.
 	// Evictions for a takeover do not count: the state moved.
@@ -73,6 +78,10 @@ type Options struct {
 	// known; id names the client, so the plane can apply the new owner's
 	// confirmation to them. nil means a single node.
 	Moving func(ns, id string, filters []string)
+	// OwnRoutes, when set, is this node's routing plane as the route
+	// reconciler reads and corrects it. nil means a single node: the
+	// reconciler compares the sessions with the router only.
+	OwnRoutes OwnRoutes
 	// ForgetInboundQoS2 is the simulation harness's injected defect: a
 	// repeated QoS 2 PUBLISH is routed again instead of being recognised.
 	// Never set from configuration.
@@ -163,10 +172,14 @@ type Manager struct {
 	// imports and importNs are Import's count and total time (ImportCost).
 	imports  atomic.Int64
 	importNs atomic.Int64
-	// Seals and imports that waited for an import of the same client to
-	// finish (ImportWaits).
-	sealWaits   atomic.Int64
-	importWaits atomic.Int64
+	// Seals, imports and CONNECTs that waited for an import of the same
+	// client to finish (ImportWaits).
+	sealWaits    atomic.Int64
+	importWaits  atomic.Int64
+	connectWaits atomic.Int64
+	// installsReplaced counts installs that found another object for the key
+	// and removed it (InstallsReplaced).
+	installsReplaced atomic.Int64
 	// duplicates counts routed deliveries skipped because the session was
 	// installed holding the message (DuplicatesSkipped).
 	duplicates atomic.Int64
@@ -211,9 +224,34 @@ type Manager struct {
 	// importPause, set only by tests, runs inside an admitted import before
 	// it changes anything.
 	importPause func()
+	// subscribePause, set only by tests, runs in Subscribe after the session
+	// is found and before its mutex is taken.
+	subscribePause func()
+	// resumePause, set only by tests, runs in a CONNECT that resumed a sealed
+	// copy, after the shard lock is released and before the session's mutex
+	// is taken for its routes.
+	resumePause func()
 	// checkpointPause, set only by tests, runs in CheckpointState after the
 	// sessions are listed and before any is read.
 	checkpointPause func()
+	// traceSession, set only by tests, is told of a session object's install
+	// in the map (with the object the key held before), its removal, and an
+	// import's start, eviction and end. ev names the step; the caller holds
+	// the shard's lock for an install or a removal.
+	traceSession func(ev, id string, s, before *Session)
+
+	// reconciler is the route reconciler (reconcile.go), made once;
+	// reconciling is set once its loop runs.
+	reconcileOnce sync.Once
+	reconciler    *reconciler
+	reconciling   bool
+	// reconcileBefore and reconcileAfter, set only by tests, run around each
+	// correction: before its locks are taken, and after they are released
+	// with whether it wrote. reconcileBetween runs in a router correction
+	// between its read of the shard and its decision.
+	reconcileBefore  func(kind, ns, filter string, s *Session)
+	reconcileBetween func(kind, ns, filter string, s *Session)
+	reconcileAfter   func(kind, ns, filter string, s *Session, wrote bool)
 }
 
 // shard is one slice of the session map with its own mutex.
@@ -382,6 +420,7 @@ func (m *Manager) Close() {
 	if m.sweepTimer != nil {
 		m.sweepTimer.Stop()
 	}
+	m.stopReconcilerLocked()
 }
 
 type replicationBox struct{ r Replication }
@@ -665,22 +704,41 @@ func (m *Manager) Connect(c Connection, pkt *packet.Connect, leaseEpoch uint64) 
 // been written to the replicas (lease.AcquireResult.MayHaveCopies). A
 // Clean Start with no session held here journals the session's delete at
 // leaseEpoch before the new session's first record, persistent or not, so
-// no replica keeps the previous session under the new one.
+// no replica keeps the previous session under the new one. A session created
+// without Clean Start reaches the replicas as its meta record alone, which
+// merges into a copy an earlier owner fed; Connect's goes whole.
 func (m *Manager) ConnectReplacing(c Connection, pkt *packet.Connect, leaseEpoch uint64) conn.ConnectResult {
 	return m.connect(c, pkt, leaseEpoch, true)
 }
 
-func (m *Manager) connect(c Connection, pkt *packet.Connect, leaseEpoch uint64, replacing bool) conn.ConnectResult {
+// ConnectAcquired is Connect after a lease acquire: ConnectReplacing when the
+// acquire said an earlier session of the client may have copies.
+func (m *Manager) ConnectAcquired(c Connection, pkt *packet.Connect, leaseEpoch uint64, mayHaveCopies bool) conn.ConnectResult {
+	return m.connect(c, pkt, leaseEpoch, mayHaveCopies)
+}
+
+func (m *Manager) connect(c Connection, pkt *packet.Connect, leaseEpoch uint64, mayHaveCopies bool) conn.ConnectResult {
 	k := key{m.opts.Namespace, c.ClientID()}
 	// The gate before the shard lock, never under it:
 	// this path journals, and the single map lock used to bound how many
 	// connects reached the store at once as a side effect. Sharding removes
 	// that side effect, so the bound is taken explicitly here.
-	release := m.admit()
-	defer release()
 	sh := m.shardFor(k)
 	principal := c.Identity().Username
+	release := m.admit()
 	sh.mu.Lock()
+	for wait := sh.importing[k]; wait != nil; wait = sh.importing[k] {
+		// An import is installing the client's session: connect to what it
+		// installs. The wait holds neither the shard lock nor an admission
+		// slot.
+		sh.mu.Unlock()
+		release()
+		m.connectWaits.Add(1)
+		<-wait
+		release = m.admit()
+		sh.mu.Lock()
+	}
+	defer release()
 	s, existed := sh.sessions[k]
 	var resumed *Session
 	if c := sh.sealed[k]; !existed && c != nil {
@@ -701,6 +759,9 @@ func (m *Manager) connect(c Connection, pkt *packet.Connect, leaseEpoch uint64, 
 				m.journalSealedDelete(c)
 				break
 			}
+			if m.traceSession != nil {
+				m.traceSession("connect-resume-install", k.id, rs, sh.sessions[k])
+			}
 			sh.sessions[k] = rs
 			rs.mu.Lock()
 			rs.countQueue()
@@ -719,12 +780,22 @@ func (m *Manager) connect(c Connection, pkt *packet.Connect, leaseEpoch uint64, 
 	if existed && pkt.CleanStart {
 		discarded = s
 	}
+	interval, capped := m.expiryFor(pkt)
+	// A Clean Start, and a session no earlier one of the client can have
+	// copies of, reach the replicas whole: the Clean Start's delete and the new
+	// session's meta as one write, so no replica is left holding either alone.
+	var closeWhole func(*store.SessionState, bool)
+	w := m.writer()
+	whole := (pkt.CleanStart || (!heldHere && !mayHaveCopies)) && interval != 0
 	if existed {
 		s.mu.Lock()
 		if principalRefused(m.opts.BindPrincipal, s.identity.Username, principal) {
 			s.mu.Unlock()
 			sh.mu.Unlock()
 			return m.refusePrincipal()
+		}
+		if whole && pkt.CleanStart {
+			closeWhole = m.openWhole(k, wholeCleanStart)
 		}
 		if s.conn != nil {
 			old = s.conn
@@ -733,19 +804,32 @@ func (m *Manager) connect(c Connection, pkt *packet.Connect, leaseEpoch uint64, 
 			s.epoch++
 		}
 		if pkt.CleanStart {
-			redistribute = m.discardLocked(sh, s)
+			redistribute = m.discardWith(sh, s, w)
 			epoch := s.epoch
 			s.mu.Unlock()
 			s = newSession(k, m.log)
 			s.mgr = m
 			s.epoch = epoch + 1
+			if m.traceSession != nil {
+				m.traceSession("connect-clean-install", k.id, s, sh.sessions[k])
+			}
 			sh.sessions[k] = s
 			s.mu.Lock()
 			existed = false
 		}
 	} else {
+		if whole {
+			cause := wholeCreate
+			if pkt.CleanStart {
+				cause = wholeCleanStart
+			}
+			closeWhole = m.openWhole(k, cause)
+		}
 		s = newSession(k, m.log)
 		s.mgr = m
+		if m.traceSession != nil {
+			m.traceSession("connect-new-install", k.id, s, sh.sessions[k])
+		}
 		sh.sessions[k] = s
 		s.mu.Lock()
 	}
@@ -757,7 +841,6 @@ func (m *Manager) connect(c Connection, pkt *packet.Connect, leaseEpoch uint64, 
 	s.identity = *c.Identity()
 	s.queueLimit = m.queueLimitOf(s)
 	sh.byConn[c] = s
-	interval, capped := m.expiryFor(pkt)
 	s.expiryInterval = interval
 	s.expiresAt = time.Time{}
 	if !existed {
@@ -780,8 +863,8 @@ func (m *Manager) connect(c Connection, pkt *packet.Connect, leaseEpoch uint64, 
 	if leaseEpoch != 0 {
 		s.epoch = leaseEpoch
 	}
-	if replacing && pkt.CleanStart && !heldHere {
-		m.writer().deleteCopies(s)
+	if mayHaveCopies && pkt.CleanStart && !heldHere {
+		w.deleteCopies(s)
 	}
 	// The journal write stays inside the locks, and inside the admission gate
 	// taken at the top of this function. Taking it out of the manager's lock
@@ -792,7 +875,13 @@ func (m *Manager) connect(c Connection, pkt *packet.Connect, leaseEpoch uint64, 
 	// 4m25s to not completing in 45 minutes at 100,000 clients. Sharding the
 	// map removes that side effect, so `StoreAdmission` is now the bound, set
 	// deliberately rather than inherited from an unrelated mutex.
-	m.writer().upsert(s)
+	w.upsert(s)
+	if closeWhole != nil {
+		closeWhole(s.snapshot(), w == nil || !w.anyFailed)
+	}
+	if !existed && s.persistent {
+		m.countCreation(closeWhole != nil)
+	}
 	s.mu.Unlock()
 	sh.mu.Unlock()
 	release()
@@ -808,16 +897,21 @@ func (m *Manager) connect(c Connection, pkt *packet.Connect, leaseEpoch uint64, 
 		old.Close(packet.SessionTakenOver)
 	}
 	if resumed != nil {
-		// Routed once the rebuilt session is whole and installed, as Load does.
+		// Routed once the rebuilt session is whole and installed, as Load does,
+		// under its own mutex: a removal since the shard lock was released has
+		// marked it removed, and one after the adds removes what they added.
+		// The connection is not compared: a second CONNECT may have displaced
+		// it, and the session is still held.
+		if m.resumePause != nil {
+			m.resumePause()
+		}
 		resumed.mu.Lock()
-		subs := make([]Subscription, 0, len(resumed.subs))
-		for _, sb := range resumed.subs {
-			subs = append(subs, sb)
+		if mayRoute(resumed.removed, nil, nil) {
+			for _, sb := range resumed.subs {
+				m.router.Add(resumed, sb)
+			}
 		}
 		resumed.mu.Unlock()
-		for _, sb := range subs {
-			m.router.Add(resumed, sb)
-		}
 	}
 	m.redistribute(discarded, redistribute)
 	m.ended(discarded)
@@ -861,13 +955,22 @@ func (m *Manager) publisher(s *Session) message.Publisher {
 // a caller with the wrong shard should be a compile error, not a silent
 // cross-shard write.
 func (m *Manager) discardLocked(sh *shard, s *Session) []redistributable {
-	m.writer().delete(s)
+	return m.discardWith(sh, s, m.writer())
+}
+
+// discardWith is discardLocked writing its delete through w.
+func (m *Manager) discardWith(sh *shard, s *Session, w *journalWriter) []redistributable {
+	w.delete(s)
 	return m.removeLocked(sh, s)
 }
 
 // removeLocked is discardLocked without the journal's delete: the session
 // leaves memory and its records stay. The caller holds the same locks.
 func (m *Manager) removeLocked(sh *shard, s *Session) []redistributable {
+	if m.traceSession != nil {
+		m.traceSession("remove", s.key.id, s, sh.sessions[s.key])
+	}
+	s.removed = true
 	s.stopTimers()
 	filters := make([]string, 0, len(s.subs))
 	for f := range s.subs {
@@ -887,8 +990,30 @@ func (m *Manager) removeLocked(sh *shard, s *Session) []redistributable {
 		s.conn = nil
 		s.online.Store(false)
 	}
-	delete(sh.sessions, s.key)
+	if heldAs(sh.sessions[s.key], s) {
+		delete(sh.sessions, s.key)
+	}
 	return shared
+}
+
+// heldAs decides whether the map's object for a key, current, is s: only then
+// may a removal of s delete the key's entry, or a session found by its
+// connection be treated as the client's. It is pure.
+func heldAs(current, s *Session) bool { return current == s }
+
+// replacesAnother decides whether installing s finds another object under the
+// key, which the install must remove first. It is pure.
+func replacesAnother(current, s *Session) bool { return current != nil && current != s }
+
+// mayRoute decides whether a subscription may be added to the router for a
+// session: never once the session has been removed, and, for a request made on
+// a connection (asking non-nil), only while the session is that connection's.
+// It is pure; the caller holds the session's mutex and adds in the same hold.
+func mayRoute(removed bool, current, asking Connection) bool {
+	if removed {
+		return false
+	}
+	return asking == nil || current == asking
 }
 
 // redistribute re-offers QoS 1 messages a departed member held to its

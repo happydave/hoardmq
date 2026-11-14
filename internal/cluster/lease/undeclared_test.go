@@ -53,7 +53,12 @@ func TestOwnerWait(t *testing.T) {
 		{"asked, silent, declared dead", "n9", true, false, false, waitNone},
 		{"not asked, declared dead", "n9", false, true, false, waitNone},
 		{"no previous owner", "", false, true, true, waitNone},
-		{"this node", "n1", false, false, true, waitNone},
+		// This node named as its own previous owner accounts for nobody, asked
+		// or not, alive or not.
+		{"this node, alive", "n1", false, false, true, waitOwnerUnknown},
+		{"this node, declared", "n1", false, false, false, waitOwnerUnknown},
+		{"this node, answered", "n1", true, true, true, waitOwnerUnknown},
+		{"this node, answered, declared", "n1", true, true, false, waitOwnerUnknown},
 	} {
 		if got := ownerWait(c.prev, "n1", c.asked, c.answered, c.live); got != c.want {
 			t.Errorf("%s: ownerWait = %v, want %v", c.name, got, c.want)
@@ -71,6 +76,7 @@ func TestAdoptionGivesUp(t *testing.T) {
 		{"an unreachable owner, long past the retries", 40, waitOwner, false},
 		{"a silent owner, long past the retries", 40, waitOwnerSilent, false},
 		{"a down holder, long past the retries", 40, waitHolder, false},
+		{"an unknown owner, long past the retries", 40, waitOwnerUnknown, false},
 		{"a peer unanswered, at the retries", 6, waitNone, false},
 		{"a peer unanswered, retries spent", 7, waitNone, true},
 	} {
@@ -135,6 +141,7 @@ func TestWaitPastBound(t *testing.T) {
 		{"a down holder, past", waitHolder, bound + time.Millisecond, true},
 		{"a down holder, at the bound", waitHolder, bound, false},
 		{"nothing alive, past", waitNone, time.Hour, false},
+		{"an unknown owner, long past", waitOwnerUnknown, time.Hour, false},
 	} {
 		if got := waitPastBound(c.wait, c.age, bound); got != c.want {
 			t.Errorf("%s: waitPastBound = %v, want %v", c.name, got, c.want)
@@ -433,6 +440,22 @@ func TestRefusalPastTheBoundNamesTheLeader(t *testing.T) {
 		}
 		if st := n.svc.LivenessStats(); st.AdoptWaitsPastBound != 1 || (cs.want == packet.UseAnotherServer) != (st.AdoptRedirected == 1) {
 			t.Fatalf("%s: waits past the bound %d, redirected %d", cs.node, st.AdoptWaitsPastBound, st.AdoptRedirected)
+		}
+	}
+}
+
+func TestPullAnswered(t *testing.T) {
+	for _, c := range []struct {
+		name                 string
+		answered, superseded bool
+		want                 bool
+	}{
+		{"answered", true, false, true},
+		{"answered superseded", true, true, false},
+		{"unanswered", false, false, false},
+	} {
+		if got := pullAnswered(c.answered, c.superseded); got != c.want {
+			t.Errorf("%s: pullAnswered = %v, want %v", c.name, got, c.want)
 		}
 	}
 }

@@ -68,10 +68,10 @@ const adopterAttempts = 3
 // and the scenario plans for the node leading at its start. When the lead has
 // moved in between, another node adopts x and the scenario cannot happen, so
 // it starts again on a new trio.
-func importAfterEmptyAnswer(t *testing.T, defect bool) importRaceOutcome {
+func importAfterEmptyAnswer(t *testing.T, defects Defects) importRaceOutcome {
 	t.Helper()
 	for attempt := 1; ; attempt++ {
-		o, adoptedBy := importAfterEmptyAnswerOnce(t, defect)
+		o, adoptedBy := importAfterEmptyAnswerOnce(t, defects)
 		if adoptedBy == "" {
 			return o
 		}
@@ -85,7 +85,7 @@ func importAfterEmptyAnswer(t *testing.T, defect bool) importRaceOutcome {
 // importAfterEmptyAnswerOnce runs the scenario on one trio. When a node other
 // than the planned adopter adopted x, it stops the trio and returns that
 // node's name with the planned roles; otherwise the outcome and "".
-func importAfterEmptyAnswerOnce(t *testing.T, defect bool) (importRaceOutcome, string) {
+func importAfterEmptyAnswerOnce(t *testing.T, defects Defects) (importRaceOutcome, string) {
 	t.Helper()
 	g := &importGate{entered: make(chan struct{}), release: make(chan struct{})}
 	release := sync.OnceFunc(func() { close(g.release) })
@@ -93,7 +93,7 @@ func importAfterEmptyAnswerOnce(t *testing.T, defect bool) (importRaceOutcome, s
 	nodes := startTrio(t, func(name string, d *config.Document) {
 		d.Cluster.Shards = 8
 		d.Cluster.Replicas = 2
-		fixtureHooks = Hooks{ImportGate: g.hook(name), Defects: Defects{ImportPastLaterGrant: defect}}
+		fixtureHooks = Hooks{ImportGate: g.hook(name), Defects: defects}
 	})
 	fixtureHooks = Hooks{}
 	// Registered after the nodes' shutdowns, so it runs before them: a worker
@@ -240,7 +240,7 @@ func waitUntil(t *testing.T, what string, within time.Duration, cond func() bool
 // carried a later grant, so the adopter's replica copy stays for the third
 // node's fallback: the client is served its session and its queued messages.
 func TestImportAfterAnEmptyAnswerKeepsTheSession(t *testing.T) {
-	o := importAfterEmptyAnswer(t, false)
+	o := importAfterEmptyAnswer(t, Defects{})
 	if o.ack.ReasonCode != packet.Success || !o.ack.SessionPresent {
 		t.Fatalf("CONNACK on %s: %s, Session Present %v; want the session served", o.second, o.ack.ReasonCode, o.ack.SessionPresent)
 	}
@@ -262,16 +262,31 @@ func TestImportAfterAnEmptyAnswerKeepsTheSession(t *testing.T) {
 }
 
 // TestImportPastALaterGrantLosesTheSession is the permanent control: with the
-// install admitted whatever grant was seen, the adopter installs the session
-// after answering "no state", its write drops its replica copy, and the third
-// node serves the client an empty session.
+// install admitted whatever grant was seen, and the owner's write dropping its
+// replica copy whatever grant was seen, the adopter installs the session after
+// answering "no state", its write drops its replica copy, and the third node
+// serves the client an empty session.
 func TestImportPastALaterGrantLosesTheSession(t *testing.T) {
-	o := importAfterEmptyAnswer(t, true)
+	o := importAfterEmptyAnswer(t, Defects{ImportPastLaterGrant: true, DropOwnedCopyPastSeenGrant: true})
 	if o.ack.ReasonCode != packet.Success {
 		t.Fatalf("CONNACK on %s: %s", o.second, o.ack.ReasonCode)
 	}
 	if o.ack.SessionPresent {
 		t.Fatal("served its session with the install admitted past a later grant: the scenario no longer reaches the loss it is the control for")
+	}
+	if st := o.nodes[o.adopter].srv.Leases().LivenessStats(); st.AfterEmptyAnswer != 1 {
+		t.Fatalf("%s's imports after an empty answer: %d, want 1", o.adopter, st.AfterEmptyAnswer)
+	}
+}
+
+// TestImportPastALaterGrantKeepsTheReplicaCopy: the install admitted past a
+// later grant, as in the control above, but the adopter's write is below a
+// grant it has seen, so its replica copy stays and the third node's fallback
+// serves the client its session.
+func TestImportPastALaterGrantKeepsTheReplicaCopy(t *testing.T) {
+	o := importAfterEmptyAnswer(t, Defects{ImportPastLaterGrant: true})
+	if o.ack.ReasonCode != packet.Success || !o.ack.SessionPresent {
+		t.Fatalf("CONNACK on %s: %s, Session Present %v; want the session served from the adopter's kept copy", o.second, o.ack.ReasonCode, o.ack.SessionPresent)
 	}
 	if st := o.nodes[o.adopter].srv.Leases().LivenessStats(); st.AfterEmptyAnswer != 1 {
 		t.Fatalf("%s's imports after an empty answer: %d, want 1", o.adopter, st.AfterEmptyAnswer)

@@ -358,7 +358,7 @@
         "auth": { "$ref": "#/$defs/clusterAuth" },
         "heartbeatMs": { "description": "Interval between peer heartbeats.", "type": "integer", "minimum": 100 },
         "heartbeatMisses": { "description": "Consecutive missed intervals before a peer is down.", "type": "integer", "minimum": 1, "maximum": 100 },
-        "maxFrameBytes": { "description": "Largest frame accepted on the transport.", "type": "integer", "minimum": 65536 },
+        "maxFrameBytes": { "description": "Largest frame accepted on the transport. Set it the same on every node.", "type": "integer", "minimum": 65536 },
         "raft": { "$ref": "#/$defs/raft" },
         "discovery": { "$ref": "#/$defs/discovery" },
         "leases": { "$ref": "#/$defs/leases" },

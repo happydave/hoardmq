@@ -102,7 +102,7 @@ func TestSealWaitsForAnImportInFlight(t *testing.T) {
 	sealed := make(chan SealResult, 1)
 	go func() { sealed <- m.Seal(ns, "d", packet.SessionTakenOver, 21) }()
 	waitTrue(t, "the seal to wait on the import, or to return", func() bool {
-		seals, _ := m.ImportWaits()
+		seals, _, _ := m.ImportWaits()
 		return seals >= 1 || len(sealed) == 1
 	})
 	release()
@@ -131,7 +131,7 @@ func TestImportWaitsForAnImportInFlight(t *testing.T) {
 	second := make(chan bool, 1)
 	go func() { second <- m.ImportIf(stateOf(m, "d", 21, "second"), nil) }()
 	waitTrue(t, "the second import to wait on the first, or to return", func() bool {
-		_, imports := m.ImportWaits()
+		_, imports, _ := m.ImportWaits()
 		return imports >= 1 || len(second) == 1
 	})
 	release()
@@ -181,7 +181,7 @@ func TestSealWaitsForAnImportThatBeginsBetweenItsLooks(t *testing.T) {
 	sealed := make(chan SealResult, 1)
 	go func() { sealed <- m.Seal(ns, "c", packet.SessionTakenOver, 12) }()
 	waitTrue(t, "the seal to wait on the import, or to return", func() bool {
-		seals, _ := m.ImportWaits()
+		seals, _, _ := m.ImportWaits()
 		return seals >= 1 || len(sealed) == 1
 	})
 	release()

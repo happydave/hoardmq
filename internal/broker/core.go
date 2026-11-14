@@ -92,19 +92,14 @@ func (k core) Connect(c *conn.Conn, p *packet.Connect) conn.ConnectResult {
 		// after a pass here may have answered its new owner that it holds
 		// nothing.
 		if !k.m.ImportIf(res.State, k.leases.AdmitImport(ns, c.ClientID(), res.Epoch)) {
-			k.leases.NoteImportRefused(ns, c.ClientID(), res.Epoch)
+			k.leases.NoteImportRefused(ns, c.ClientID(), res.Epoch, res.PrevOwner)
 			return conn.ConnectResult{Reason: packet.ServerBusy}
 		}
 	}
 	// The epoch goes in through Connect rather than through SetEpoch after it:
 	// Connect journals the session, and that record carries the epoch it was
 	// written under for the replication tap to stamp.
-	var out conn.ConnectResult
-	if p.CleanStart && res.MayHaveCopies {
-		out = k.m.ConnectReplacing(c, p, res.Epoch)
-	} else {
-		out = k.m.Connect(c, p, res.Epoch)
-	}
+	out := k.m.ConnectAcquired(c, p, res.Epoch, res.MayHaveCopies)
 	if res.Empty.Reason != "" && !out.SessionPresent && !p.CleanStart && out.Reason == packet.Success {
 		k.leases.NoteServedEmpty(ns, c.ClientID(), res.Empty)
 	}

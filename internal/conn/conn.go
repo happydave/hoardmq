@@ -209,6 +209,7 @@ type Conn struct {
 	identity              auth.Identity
 	keepAlive             uint16
 	requestedKeepAlive    uint16
+	tcpKeepAlive          atomic.Bool // set after the session holds the connection, where the admin API reads it
 	cleanStart            bool
 	connectPkt            *packet.Connect
 	established           bool
@@ -331,6 +332,10 @@ func (c *Conn) KeepAlive() uint16 { return c.keepAlive }
 
 // RequestedKeepAlive is the keep alive the client's CONNECT asked for.
 func (c *Conn) RequestedKeepAlive() uint16 { return c.requestedKeepAlive }
+
+// TCPKeepAlive reports whether the connection's TCP keepalive was left on
+// when its CONNECT was accepted.
+func (c *Conn) TCPKeepAlive() bool { return c.tcpKeepAlive.Load() }
 
 // CleanStart is the CONNECT's Clean Start (Clean Session before MQTT 5.0).
 func (c *Conn) CleanStart() bool { return c.cleanStart }
@@ -584,6 +589,7 @@ func (c *Conn) handshake() bool {
 	if held != nil {
 		c.scheduleRecheck(held.Expires)
 	}
+	c.applyTCPKeepAlive()
 	c.armKeepAlive()
 	c.core.Connected(c)
 	if c.opts.Hooks != nil {
@@ -1146,6 +1152,20 @@ func (c *Conn) writeDirect(p packet.Packet) bool {
 		return false
 	}
 	return true
+}
+
+// applyTCPKeepAlive turns TCP keepalive off once the CONNECT is accepted,
+// where listener.SetTCPKeepAlive decides so from the keep alive the client
+// asked for, and counts the outcome.
+func (c *Conn) applyTCPKeepAlive() {
+	outcome, err := listener.SetTCPKeepAlive(c.net, c.requestedKeepAlive)
+	c.tcpKeepAlive.Store(outcome == listener.TCPKeepAliveKept || outcome == listener.TCPKeepAliveFailed)
+	if err != nil {
+		c.log.Debug("tcp keepalive not turned off", "err", err)
+	}
+	if c.opts.Metrics != nil {
+		c.opts.Metrics.Add("hoardmq_connects_tcp_keepalive_total", map[string]string{"listener": c.listener, "outcome": outcome}, 1)
+	}
 }
 
 func (c *Conn) armKeepAlive() {

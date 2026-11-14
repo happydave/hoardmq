@@ -38,6 +38,12 @@ func (d dataPlane) Durable(ctx context.Context, keys []store.Scope) error {
 
 func (d dataPlane) StoreRetained(msg *message.Message) bool { return d.repl.StoreRetained(msg) }
 
+func (d dataPlane) OpenWhole(ns, id, cause string) func(*store.SessionState, bool) {
+	return d.repl.OpenWhole(ns, id, cause)
+}
+
+func (d dataPlane) SessionLeft(ns, id string) { d.repl.SessionLeft(ns, id) }
+
 // StoreRetainedFrom names the write's source, so a forward no barrier waits
 // on is held for a misrouted refusal.
 func (d dataPlane) StoreRetainedFrom(msg *message.Message, source string) bool {

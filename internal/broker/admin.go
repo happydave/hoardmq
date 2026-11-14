@@ -202,7 +202,8 @@ func (b adminBackend) Client(id string) (admin.ClientDetail, error) {
 		if cc, ok := c.(*conn.Conn); ok {
 			out.Connection = &admin.Connection{Listener: cc.Listener(), RemoteAddress: cc.RemoteAddr().String(),
 				Username: cc.Identity().Username, ProtocolVersion: int(cc.Version()), ConnectedSeconds: cc.Age().Seconds(),
-				KeepAlive: int(cc.KeepAlive()), RequestedKeepAlive: int(cc.RequestedKeepAlive()), CleanStart: cc.CleanStart()}
+				KeepAlive: int(cc.KeepAlive()), RequestedKeepAlive: int(cc.RequestedKeepAlive()), TCPKeepAlive: cc.TCPKeepAlive(),
+				CleanStart: cc.CleanStart()}
 		}
 	}
 	if l, ok := b.lease(id); ok {

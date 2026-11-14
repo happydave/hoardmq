@@ -56,7 +56,9 @@ Only `version` and `node.dataDir` are required; the values shown for
 `cluster.replicas`, `cluster.shards`, the heartbeat and frame limits,
 `cluster.raft`, `cluster.leases`, `cluster.routing`, `cluster.replication`, `cluster.drain` and `cluster.readiness` (`cluster.listen`, `cluster.auth`,
 `cluster.peers` and `cluster.advertise` are empty by default, which is a
-one-member cluster). The `mqtt` object is
+one-member cluster). Set `cluster.maxFrameBytes` the same on every node: a
+node closes a connection on a frame over its own limit, and a frame up to the
+sender's limit can be sent to it. The `mqtt` object is
 the operator's switch for the MQTT 5.0 capabilities a server may decline;
 HoardMQ declines none unless told to. Unknown members are rejected
 everywhere except inside `modules.*`, whose contents belong to the named

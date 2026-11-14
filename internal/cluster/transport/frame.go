@@ -130,7 +130,8 @@ func (c Class) urgent() bool { return c == LeaseAlive || c == Heartbeat }
 // highest version both support. Version2 adds the LeaseAlive class;
 // Version3 adds the second connection per peer pair (ConnectionRole) and
 // the ConsensusSnapshot class; Version4 adds AdminRequest and AdminAnswer;
-// Version5 adds SnapshotData and SnapshotReply.
+// Version5 adds SnapshotData and SnapshotReply. Version6 adds no class: it
+// says the route plane at this end reads a full route set sent in parts.
 // The frame encoding is unchanged throughout.
 const (
 	Version1 uint8 = 1
@@ -138,6 +139,7 @@ const (
 	Version3 uint8 = 3
 	Version4 uint8 = 4
 	Version5 uint8 = 5
+	Version6 uint8 = 6
 )
 
 // headerSize is the fixed part of every frame: a 4-byte big-endian length of

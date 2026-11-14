@@ -7,6 +7,7 @@ import (
 
 	"github.com/happydave/hoardmq/internal/message"
 	"github.com/happydave/hoardmq/internal/store"
+	"github.com/happydave/hoardmq/internal/topic"
 )
 
 // Subscription is one filter a session holds, with its options.
@@ -92,6 +93,30 @@ type Router interface {
 	// leads (leads gives the epoch) each becomes a fresh-stamped tombstone,
 	// returned for the caller to journal; elsewhere it is removed here alone.
 	SweepLeading(now time.Time, leads func(ns, topic string) (uint64, bool)) []RetainedEntry
+}
+
+// RoutedFilter is one filter a router holds subscribers for, as a walk step
+// copied it: the filter as a client wrote it ($share/<name>/<inner> for a
+// group) and its subscriber objects (a group's members).
+type RoutedFilter struct {
+	Namespace string
+	Filter    string
+	Group     bool
+	Subs      []*Session
+}
+
+// RouterIndex is what the reconciler reads of a router, each under the
+// router's read lock: whether it holds a session object for a filter, a
+// filter's subscriber count, and a walk of every filter it holds, a step at a
+// time, each step's copy bounded and the lock released between steps. A
+// router without it leaves the reconciler off.
+type RouterIndex interface {
+	Holds(s *Session, filter string) bool
+	SubscriberCount(ns, filter string) int
+	// WalkStep copies from cursor (0 to start) and returns the copies, the
+	// cursor to resume from, whether the walk is done, and how long it held
+	// the lock.
+	WalkStep(cursor int) (filters []RoutedFilter, next int, done bool, hold time.Duration)
 }
 
 type routeKey struct{ ns, filter string }
@@ -278,6 +303,38 @@ func (r *exactRouter) RemoveAll(s *Session, filters []string) {
 	for _, f := range filters {
 		r.Remove(s, f)
 	}
+}
+
+// Holds implements RouterIndex.
+func (r *exactRouter) Holds(s *Session, filter string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	_, ok := r.routes[routeKey{s.key.ns, filter}][s]
+	return ok
+}
+
+// SubscriberCount implements RouterIndex.
+func (r *exactRouter) SubscriberCount(ns, filter string) int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return len(r.routes[routeKey{ns, filter}])
+}
+
+// WalkStep implements RouterIndex in one step: this router serves tests.
+func (r *exactRouter) WalkStep(int) ([]RoutedFilter, int, bool, time.Duration) {
+	r.mu.RLock()
+	began := time.Now()
+	out := make([]RoutedFilter, 0, len(r.routes))
+	for k, m := range r.routes {
+		f := RoutedFilter{Namespace: k.ns, Filter: k.filter, Group: topic.IsShared(k.filter), Subs: make([]*Session, 0, len(m))}
+		for s := range m {
+			f.Subs = append(f.Subs, s)
+		}
+		out = append(out, f)
+	}
+	hold := time.Since(began)
+	r.mu.RUnlock()
+	return out, 1, true, hold
 }
 
 func (r *exactRouter) Match(msg *message.Message, publisher *Session) []Match {

@@ -9,7 +9,10 @@ import "fmt"
 // Level 1 is everything that shipped before the gate existed: the inventory
 // in the project's upgrade-gate design amendment. Raise this constant in the
 // same change that keys a new semantic to the new level, never on its own.
-const BuildLevel uint64 = 1
+//
+// Level 2: a follower refuses a lone session record that finds no replica copy
+// when its frame is stamped 2 or above, so a copy is made only from a snapshot.
+const BuildLevel uint64 = 2
 
 // BuildLevel is what this node advertises: the build's constant, unless a
 // test pins it to stand a node in for another build.

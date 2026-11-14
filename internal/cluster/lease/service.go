@@ -537,6 +537,13 @@ type Service struct {
 	takeoverWaitsServed    atomic.Int64
 	takeoverWaitsRefused   atomic.Int64
 	takeoverWaitsOvertaken atomic.Int64
+	unsettledStates        atomic.Int64
+	// CONNECTs refused because this node had seen a later grant for the
+	// client than the one they would be served at, and when the last of them
+	// was logged with how many had been counted then.
+	belowSeenGrant       atomic.Int64
+	belowSeenLoggedAt    atomic.Int64
+	belowSeenLoggedCount atomic.Int64
 	// arrivals numbers the CONNECTs as they enter AcquireFrom, for the order
 	// between two that wait on one takeover (connecting.go).
 	arrivals atomic.Uint64
@@ -574,6 +581,7 @@ type Service struct {
 	takeoverOwnerUndeclared       atomic.Int64
 	takeoverOwnerUndeclaredServed atomic.Int64
 	adoptOwnerUndeclared          atomic.Int64
+	adoptOwnerUnknown             atomic.Int64
 	adoptOwnerSilent              atomic.Int64
 	adoptWaitsPastBound           atomic.Int64
 	adoptRedirected               atomic.Int64
@@ -867,7 +875,9 @@ type LivenessStats struct {
 	// on a down replica holder alive by the log, outlasted SealTimeout, once
 	// each, and AdoptWaitingNow those unfinished;
 	// AdoptRedirected the CONNECTs refused for one of them with a redirect to
-	// the leader.
+	// the leader. AdoptOwnerUnknown counts adoption fetches refused because
+	// the adoption named this node itself as the previous owner; that wait is
+	// neither given up nor redirected.
 	TakeoverOwnerUndeclared       int64 `json:"takeover_owner_undeclared"`
 	TakeoverOwnerUndeclaredServed int64 `json:"takeover_owner_undeclared_served"`
 	AdoptOwnerUndeclared          int64 `json:"adopt_owner_undeclared"`
@@ -875,6 +885,7 @@ type LivenessStats struct {
 	AdoptWaitsPastBound           int64 `json:"adopt_waits_past_bound"`
 	AdoptWaitingNow               int   `json:"adopt_waiting_now"`
 	AdoptRedirected               int64 `json:"adopt_redirected"`
+	AdoptOwnerUnknown             int64 `json:"adopt_owner_unknown"`
 	// TakeoverAnsweredPending counts takeover answers this node sent with no
 	// state, naming the owner it was still waiting on (Noted: taken from a
 	// note, left by an adoption that ended because the lease moved or by a
@@ -910,6 +921,10 @@ type LivenessStats struct {
 	TakeoverWaitsOvertaken int64 `json:"takeover_waits_overtaken"`
 	ConnectsInFlight       int   `json:"connects_in_flight"`
 	TakeoverWaiting        int   `json:"takeover_waiting"`
+	// UnsettledStates counts acquires that returned a session's state with no
+	// settle to hold the client's other CONNECTs here back; always 0 unless a
+	// path escapes the hold.
+	UnsettledStates int64 `json:"unsettled_states"`
 	// AcquiresAbandoned counts acquires whose CONNECT gave up while they could
 	// still be granted; GrantsUnfetchedAdopted the ones a later CONNECT here
 	// found granted with no session, and adopted and fetched before it was
@@ -1009,6 +1024,9 @@ type LivenessStats struct {
 	// its fetch or import), and a CONNECT's (answered Server Busy).
 	AdoptImportRefused   int64 `json:"adopt_import_refused"`
 	ConnectImportRefused int64 `json:"connect_import_refused"`
+	// CONNECTs refused Server Busy because their lease table here still
+	// showed a grant below one this node had seen for the client.
+	BelowSeenGrantRefused int64 `json:"below_seen_grant_refused"`
 	// The race the adoption regime turns on: when the bulk
 	// reassignment landed here, and when the first client took its own lease
 	// from another owner. Unix ms; 0 means it did not happen.
@@ -1130,6 +1148,7 @@ func (s *Service) LivenessStats() LivenessStats {
 		AdoptWaitsPastBound:           s.adoptWaitsPastBound.Load(),
 		AdoptWaitingNow:               s.adopting.pastBound(),
 		AdoptRedirected:               s.adoptRedirected.Load(),
+		AdoptOwnerUnknown:             s.adoptOwnerUnknown.Load(),
 
 		TakeoverAnsweredPending:       s.answeredPending.Load(),
 		TakeoverAnsweredPendingNoted:  s.answeredPendingNoted.Load(),
@@ -1146,21 +1165,23 @@ func (s *Service) LivenessStats() LivenessStats {
 		TakeoverWaitsServed:    s.takeoverWaitsServed.Load(),
 		TakeoverWaitsRefused:   s.takeoverWaitsRefused.Load(),
 		TakeoverWaitsOvertaken: s.takeoverWaitsOvertaken.Load(),
+		UnsettledStates:        s.unsettledStates.Load(),
 		ConnectsInFlight:       s.connecting.total(),
 		TakeoverWaiting:        s.connecting.waitingTotal(),
 
-		ImportConnBefore:     s.importConnBefore.Load(),
-		ImportConnAfter:      s.importConnAfter.Load(),
-		ImportConnRecovered:  s.importConnRecovered.Load(),
-		AdoptImportRefused:   s.adoptImportRefused.Load(),
-		ConnectImportRefused: s.connectImportRefused.Load(),
-		EvictBoundHit:        s.evictBoundHit.Load(),
-		FirstAdoptMs:         s.firstAdoptMs.Load(),
-		LastAdoptMs:          s.lastAdoptMs.Load(),
-		AdoptionsIdleNs:      s.adopting.idleAt(),
-		FirstClientTakeMs:    s.firstClientTakeMs.Load(),
-		FirstTakeFrom:        s.takeFromSnapshot(),
-		RenewTimeouts:        s.renewTimeouts.Load(), RenewNoLeader: s.renewNoLeader.Load(), RenewLaneFull: s.renewLaneFull.Load(), RenewOther: s.renewOther.Load(),
+		ImportConnBefore:      s.importConnBefore.Load(),
+		ImportConnAfter:       s.importConnAfter.Load(),
+		ImportConnRecovered:   s.importConnRecovered.Load(),
+		AdoptImportRefused:    s.adoptImportRefused.Load(),
+		ConnectImportRefused:  s.connectImportRefused.Load(),
+		BelowSeenGrantRefused: s.belowSeenGrant.Load(),
+		EvictBoundHit:         s.evictBoundHit.Load(),
+		FirstAdoptMs:          s.firstAdoptMs.Load(),
+		LastAdoptMs:           s.lastAdoptMs.Load(),
+		AdoptionsIdleNs:       s.adopting.idleAt(),
+		FirstClientTakeMs:     s.firstClientTakeMs.Load(),
+		FirstTakeFrom:         s.takeFromSnapshot(),
+		RenewTimeouts:         s.renewTimeouts.Load(), RenewNoLeader: s.renewNoLeader.Load(), RenewLaneFull: s.renewLaneFull.Load(), RenewOther: s.renewOther.Load(),
 		RenewUnreachable: s.renewUnreachable.Load(), LeaderlessMaxMs: float64(s.leaderlessWorst()) / float64(time.Millisecond),
 		FencesDeferred: s.fencesDeferred.Load(), FenceEvidence: s.FenceEvidence(), ImportTraceStats: s.importTraceStats()}
 	st.ClaimsFrom, st.MovedFrom, st.ClaimedAtReassign, st.ReassignAtMs = s.race.snapshot()
@@ -1458,6 +1479,61 @@ func (s *Service) Acquire(ctx context.Context, ns, id string, will *store.WillRe
 // AcquireFrom is Acquire with the requesting connection described, for the
 // previous owner's takeover attribution.
 func (s *Service) AcquireFrom(ctx context.Context, ns, id string, will *store.WillRecord, expiryInterval uint32, cleanStart bool, from Requester) (AcquireResult, error) {
+	res, err := s.acquireFrom(ctx, ns, id, will, expiryInterval, cleanStart, from)
+	if err == nil && !stateSettled(res.State != nil, res.settle != nil) {
+		// Served anyway: refusing would drop the only copy in hand.
+		s.unsettledStates.Add(1)
+		s.count("hoardmq_lease_ops_total", map[string]string{"op": "acquire", "outcome": "unsettled-state"}, 1)
+		s.log.Error("a fetched session leaves the lease service without holding the client's other CONNECTs here back", "client", id, "token", res.Epoch)
+	}
+	return res, err
+}
+
+// grantLeftItHere decides whether an acquire's grant left the lease this
+// node's, with no other node to take it from: then the CONNECT waits for its
+// client's in-flight takeovers here before it is answered. It is pure.
+func grantLeftItHere(prevOwner, self string) bool { return prevOwner == "" || prevOwner == self }
+
+// stateSettled decides whether an acquire's result keeps its client
+// accounted for: a state must come with the settle that holds the client's
+// other CONNECTs here back until it is installed, or one of them is served a
+// fresh session whose write drops the replica copy the state came from.
+func stateSettled(hasState, hasSettle bool) bool { return !hasState || hasSettle }
+
+// servedBelowSeen decides whether a CONNECT would be served at token while
+// this node has seen a later grant for the client that its lease table has
+// not applied: the session is the later owner's, not this node's to serve.
+// It is the import's rule, so a node never refuses a session's install and
+// then serves a fresh one in its place.
+func servedBelowSeen(seen, token uint64) bool { return !importAdmitted(seen, token) }
+
+// refuseBelowSeen counts a CONNECT refused by servedBelowSeen and answers it
+// Server Busy; the client's retry finds the later owner once the table has
+// applied its grant. It logs at most once a second.
+func (s *Service) refuseBelowSeen(id string, token, seen uint64) error {
+	n := s.belowSeenGrant.Add(1)
+	s.count("hoardmq_lease_ops_total", map[string]string{"op": "acquire", "outcome": "below-seen-grant"}, 1)
+	now, last := time.Now().UnixNano(), s.belowSeenLoggedAt.Load()
+	if now-last >= int64(time.Second) && s.belowSeenLoggedAt.CompareAndSwap(last, now) {
+		since := n - s.belowSeenLoggedCount.Swap(n)
+		s.log.Info("CONNECT refused: this node has seen a later grant for the client than its lease table shows", "client", id, "token", token, "seen", seen, "refusedSinceLastLine", since)
+	}
+	return &Refusal{Reason: packet.ServerBusy}
+}
+
+// fetchedSettle is the settle of a CONNECT counted in flight before it
+// claimed its adoption: finish, awaitAdoption's, ends the adoption, then the
+// count ends. Called with no state in hand, it ends both at once.
+func (s *Service) fetchedSettle(k key, finish func()) func() {
+	return sync.OnceFunc(func() {
+		if finish != nil {
+			finish()
+		}
+		s.connecting.end(k)
+	})
+}
+
+func (s *Service) acquireFrom(ctx context.Context, ns, id string, will *store.WillRecord, expiryInterval uint32, cleanStart bool, from Requester) (AcquireResult, error) {
 	// Taken first, so that no path this CONNECT is slow on can make it look
 	// newer than one that arrived after it.
 	arrival := s.arrivals.Add(1)
@@ -1501,6 +1577,11 @@ func (s *Service) AcquireFrom(ctx context.Context, ns, id string, will *store.Wi
 	// The command that put the lease where the lookup found it is at or below
 	// this index; its hooks, which record an adoption, may not have run yet.
 	looked := s.table.AppliedIndex()
+	// copiesSeen keeps what the first lookup said of copies when the
+	// proposal is judged by a later one: a lease found here with a session
+	// expiry may have written the session to the replicas, even if it is gone
+	// by the time the acquire is proposed.
+	copiesSeen := false
 	if existed {
 		if l.Owner == s.o.Node {
 			if err := s.awaitHooked(ctx, looked); err != nil {
@@ -1510,17 +1591,25 @@ func (s *Service) AcquireFrom(ctx context.Context, ns, id string, will *store.Wi
 			if err := s.awaitTakeovers(ctx, key{ns, id}, arrival); err != nil {
 				return AcquireResult{}, err
 			}
-			st, ev, err := s.awaitAdoption(ctx, key{ns, id}, cleanStart)
+			s.connecting.begin(key{ns, id})
+			st, ev, finish, err := s.awaitAdoption(ctx, key{ns, id}, cleanStart)
 			var mark firstAcquire
 			if err == nil {
 				mark, _ = s.firsts.take(key{ns, id})
 				first := takenFrom(mark.abandoned, mark.created, mark.taken, l.Epoch, mark.from, "", s.o.Node)
-				st, ev, err = s.fetchAbandoned(ctx, key{ns, id}, l.Epoch, cleanStart, st, ev, first)
+				st, ev, finish, err = s.fetchAbandoned(ctx, key{ns, id}, l.Epoch, cleanStart, st, ev, finish, first)
 			}
+			settle := s.fetchedSettle(key{ns, id}, finish)
 			if err != nil {
+				settle()
 				return AcquireResult{}, err
 			}
-			if cur, ok := s.table.Lookup(ns, id); ok && cur.Owner == s.o.Node {
+			cur, ok := s.table.Lookup(ns, id)
+			if ok && cur.Owner == s.o.Node {
+				if seen := s.tokens.Seen(ns, id); servedBelowSeen(seen, cur.Epoch) {
+					settle()
+					return AcquireResult{}, s.refuseBelowSeen(id, cur.Epoch, seen)
+				}
 				// Renew locally; the table catches up in the background.
 				renew := op
 				renew.Epoch = cur.Epoch
@@ -1538,11 +1627,23 @@ func (s *Service) AcquireFrom(ctx context.Context, ns, id string, will *store.Wi
 					ev.Reason = emptyReason(ev.Reason, true, l.ExpiryInterval)
 					out.Empty = ev
 				}
+				if st != nil {
+					out.settle = settle
+				} else {
+					settle()
+				}
 				return out, nil
 			}
+			settle()
 			// The lease left this node while the adoption was awaited: acquire
-			// it as from any other owner.
+			// it as from any other owner, the one the table shows now. The
+			// first lookup named this node, which is no owner to note, wait on
+			// or judge.
+			copiesSeen = mayHaveCopies(true, l.Owner, l.ExpiryInterval, "", s.o.Node)
+			l, existed = cur, ok
 		}
+	}
+	if existed {
 		// Another node holds the lease, as far as this one knows. Whether
 		// that owner is alive is judged where the acquire applies, from the
 		// log, against whichever node owns the lease then; this node says
@@ -1565,16 +1666,16 @@ func (s *Service) AcquireFrom(ctx context.Context, ns, id string, will *store.Wi
 		s.firsts.begin(key{ns, id}, s.steady())
 	}
 	// In flight here until the answer shows no takeover, or the caller settles
-	// the takeover; every error return ends it.
-	inFlight := existed
-	if inFlight {
-		s.connecting.begin(key{ns, id})
-		defer func() {
-			if inFlight {
-				s.connecting.end(key{ns, id})
-			}
-		}()
-	}
+	// the takeover; every error return ends it. A first acquire is counted
+	// too: its grant can take the lease from a node the client reached
+	// meanwhile, and the state it pulls is then in its hands alone.
+	inFlight := true
+	s.connecting.begin(key{ns, id})
+	defer func() {
+		if inFlight {
+			s.connecting.end(key{ns, id})
+		}
+	}()
 	if g := s.o.AcquireGate; g != nil {
 		g(ns, id, false)
 	}
@@ -1609,8 +1710,8 @@ func (s *Service) AcquireFrom(ctx context.Context, ns, id string, will *store.Wi
 	// This node is told its token here, and may act on it, before its own
 	// table has applied the grant.
 	s.tokens.Note(ns, id, res.Epoch)
-	out := AcquireResult{Epoch: res.Epoch, PrevOwner: res.PrevOwner, MayHaveCopies: mayHaveCopies(existed, l.Owner, l.ExpiryInterval, res.PrevOwner, s.o.Node)}
-	if res.PrevOwner == "" || res.PrevOwner == s.o.Node {
+	out := AcquireResult{Epoch: res.Epoch, PrevOwner: res.PrevOwner, MayHaveCopies: copiesSeen || mayHaveCopies(existed, l.Owner, l.ExpiryInterval, res.PrevOwner, s.o.Node)}
+	if grantLeftItHere(res.PrevOwner, s.o.Node) {
 		// The lease was already this node's when the acquire applied. It may
 		// have become so while the acquire was proposed: a reassignment that
 		// applied first adopted it, and queued an adoption this CONNECT has
@@ -1618,22 +1719,25 @@ func (s *Service) AcquireFrom(ctx context.Context, ns, id string, will *store.Wi
 		// leader's answer can arrive before this node has applied that
 		// reassignment, so the adoption is looked for only once this node's
 		// hooks have reached the acquire's own command.
+		// Ended before the wait, so that two such CONNECTs never wait on each
+		// other.
+		inFlight = false
+		s.connecting.end(key{ns, id})
 		if existed {
-			// Ended before the wait, so that two such CONNECTs never wait on
-			// each other.
-			inFlight = false
-			s.connecting.end(key{ns, id})
 			if err := s.awaitHooked(ctx, res.Index); err != nil {
 				return AcquireResult{}, err
 			}
-			// The grant that made the lease this node's may be another
-			// CONNECT's takeover, still pulling or importing the session.
-			if err := s.awaitTakeovers(ctx, key{ns, id}, arrival); err != nil {
-				return AcquireResult{}, err
-			}
+		}
+		// The grant that made the lease this node's may be another CONNECT's
+		// takeover, still pulling or importing the session, whether or not
+		// this CONNECT's lookup found a lease: the lease can be created
+		// elsewhere and taken over here between the lookup and the grant.
+		if err := s.awaitTakeovers(ctx, key{ns, id}, arrival); err != nil {
+			return AcquireResult{}, err
 		}
 		before := s.adopting.lateFor(key{ns, id})
-		st, ev, err := s.awaitAdoption(ctx, key{ns, id}, cleanStart)
+		s.connecting.begin(key{ns, id})
+		st, ev, finish, err := s.awaitAdoption(ctx, key{ns, id}, cleanStart)
 		if err == nil {
 			seen := ""
 			if existed {
@@ -1641,10 +1745,21 @@ func (s *Service) AcquireFrom(ctx context.Context, ns, id string, will *store.Wi
 			}
 			mark, _ := s.firsts.take(key{ns, id})
 			first := takenFrom(mark.abandoned, mark.created, mark.taken, res.Epoch, mark.from, seen, s.o.Node)
-			st, ev, err = s.fetchAbandoned(ctx, key{ns, id}, res.Epoch, cleanStart, st, ev, first)
+			st, ev, finish, err = s.fetchAbandoned(ctx, key{ns, id}, res.Epoch, cleanStart, st, ev, finish, first)
 		}
+		settle := s.fetchedSettle(key{ns, id}, finish)
 		if err != nil {
+			settle()
 			return AcquireResult{}, err
+		}
+		if seen := s.tokens.Seen(ns, id); servedBelowSeen(seen, res.Epoch) {
+			settle()
+			return AcquireResult{}, s.refuseBelowSeen(id, res.Epoch, seen)
+		}
+		if st != nil {
+			out.settle = settle
+		} else {
+			settle()
 		}
 		if before {
 			s.adoptLate.Add(1)
@@ -1658,7 +1773,7 @@ func (s *Service) AcquireFrom(ctx context.Context, ns, id string, will *store.Wi
 			out.Empty = ev
 		}
 	}
-	if res.PrevOwner != "" && res.PrevOwner != s.o.Node {
+	if !grantLeftItHere(res.PrevOwner, s.o.Node) {
 		if g := s.o.AcquireGate; g != nil {
 			g(ns, id, true)
 		}
@@ -1799,6 +1914,13 @@ func (s *Service) AcquireFrom(ctx context.Context, ns, id string, will *store.Wi
 				s.log.Debug("takeover found no state anywhere", "client", id, "from", res.PrevOwner, "ownerAlive", alive, "token", res.Epoch)
 			}
 			if out.State == nil && !held {
+				// A later grant seen here, from a pull this node answered while
+				// it fetched or any other source, means the lease has moved on: a
+				// fresh session at this grant would stand where the later owner
+				// serves the session.
+				if seen := s.tokens.Seen(ns, id); servedBelowSeen(seen, res.Epoch) {
+					return AcquireResult{}, s.refuseBelowSeen(id, res.Epoch, seen)
+				}
 				out.Empty = EmptyEvidence{Reason: emptyReason(EmptyTakeover, existed, l.ExpiryInterval), Owner: res.PrevOwner, Token: res.Epoch}
 			}
 		}
@@ -3339,6 +3461,7 @@ func (s *Service) changed(before, after *Lease, at time.Time) {
 			s.firsts.created(k, after.Epoch)
 		}
 		if before != nil && before.Owner != me {
+			s.noteGrant(k, after.Epoch, before.Owner)
 			// A client acquired its own lease here, taking it from another
 			// owner. Recorded per previous owner as well as in aggregate: only
 			// the entry for the *crashed* node is the one the bulk
@@ -3481,11 +3604,32 @@ func (s *Service) AdmitImport(ns, id string, token uint64) func() bool {
 
 // NoteImportRefused counts a CONNECT whose install of a takeover's state was
 // refused because a later grant for the client had been seen; the CONNECT is
-// refused with Server Busy.
-func (s *Service) NoteImportRefused(ns, id string, token uint64) {
+// refused with Server Busy. Called before the CONNECT's settle, it leaves what
+// the worker's refusal leaves: the owner the state came from, for the new
+// owner's pull to be told of, and a hand-on of an adoption the CONNECT holds.
+// prev is the CONNECT's previous owner, empty when there was none.
+func (s *Service) NoteImportRefused(ns, id string, token uint64, prev string) {
+	k := key{ns, id}
 	s.connectImportRefused.Add(1)
 	s.count("hoardmq_lease_ops_total", map[string]string{"op": "acquire", "outcome": "import-refused"}, 1)
-	s.log.Debug("takeover state not imported: a later grant was seen", "client", id, "token", token, "seen", s.tokens.Seen(ns, id))
+	adoptionPrev, adopting := s.adopting.prevFor(k)
+	owner, handOn := refusedImportRecords(adopting, adoptionPrev, prev)
+	s.noteWaitedOn(k, owner)
+	if handOn {
+		s.handOn(k)
+	}
+	s.log.Debug("takeover state not imported: a later grant was seen", "client", id, "token", token, "seen", s.tokens.Seen(ns, id), "waitedOn", owner, "handedOn", handOn)
+}
+
+// refusedImportRecords decides what a refused CONNECT import leaves: the owner
+// to name to a later pull (an open adoption's previous owner, else the
+// CONNECT's own), and whether the adoption is handed on (only when one is
+// open). It is pure.
+func refusedImportRecords(adopting bool, adoptionPrev, connectPrev string) (owner string, handOn bool) {
+	if adopting {
+		return adoptionPrev, true
+	}
+	return connectPrev, false
 }
 
 type connFound int
@@ -3515,10 +3659,11 @@ func importFinds(recovered bool, connAge, adoptionAge time.Duration) connFound {
 type undeclaredWait int
 
 const (
-	waitNone        undeclaredWait = iota
-	waitOwner                      // the previous owner, or the owner a node asked named, not asked
-	waitOwnerSilent                // the previous owner, asked, did not answer
-	waitHolder                     // a replica holder that was down
+	waitNone         undeclaredWait = iota
+	waitOwner                       // the previous owner, or the owner a node asked named, not asked
+	waitOwnerSilent                 // the previous owner, asked, did not answer
+	waitHolder                      // a replica holder that was down
+	waitOwnerUnknown                // the previous owner is not known: the job names this node itself
 )
 
 // waitOn is an unanswered fetch's wait and the node it waits on.
@@ -3566,7 +3711,9 @@ func (s *Service) fetchAdopted(ctx context.Context, k key, ad *adoption, inline 
 	asked := st == nil && job.prev != "" && job.prev != s.o.Node && s.canAsk(job.prev)
 	if asked {
 		began := time.Now()
-		st, answered, _, pending = s.pull(ctx, job.prev, k.ns, k.id, job.epoch, Requester{})
+		var superseded bool
+		st, answered, superseded, pending = s.pull(ctx, job.prev, k.ns, k.id, job.epoch, Requester{})
+		answered = pullAnswered(answered, superseded)
 		if inline {
 			s.adoptInlinePulls.Add(1)
 			s.adoptInlinePullNs.Add(int64(time.Since(began)))
@@ -3630,6 +3777,13 @@ func (s *Service) fetchAdopted(ctx context.Context, k key, ad *adoption, inline 
 		holder := s.undeclaredHolder(down)
 		got, kind := noStateVerdict(owner, pendingUnaccounted, holder != "", answered)
 		switch {
+		case kind == waitOwnerUnknown:
+			s.adoptOwnerUnknown.Add(1)
+			s.count("hoardmq_lease_adoption_waits_total", map[string]string{"on": "unknown-owner"}, 1)
+			if s.adopting.markUnknown(ad) {
+				s.log.Warn("adopted lease found nowhere, and the node it came from is not known; the client is refused until the lease moves or a copy is found", "client", k.id, "token", job.epoch)
+			}
+			return nil, got, waitOn{kind: kind}, keptCopy{}
 		case kind == waitOwner && owner == waitOwner:
 			s.adoptOwnerUndeclared.Add(1)
 			s.log.Debug("adopted lease found nowhere, but its previous owner could not be asked and is not declared dead", "client", k.id, "from", job.prev, "token", job.epoch)
@@ -3730,21 +3884,28 @@ func (s *Service) awaitHooked(ctx context.Context, index uint64) error {
 // admitted (see adoption.go): it returns the adopted state when this CONNECT
 // fetched it, nil when there was nothing to wait for, and a refusal the
 // client can retry when the wait outlasts the handshake.
-func (s *Service) awaitAdoption(ctx context.Context, k key, cleanStart bool) (*store.SessionState, EmptyEvidence, error) {
+//
+// A fetched state is returned with finish, and the adoption stays unfinished
+// until the caller runs it, once the state is installed or given up. Until
+// then the session is in this CONNECT's hands alone: no store here holds it,
+// so another CONNECT of the client must wait on the adoption rather than find
+// nothing, the served fact must not count it as served, and no giver may be
+// told it is held.
+func (s *Service) awaitAdoption(ctx context.Context, k key, cleanStart bool) (_ *store.SessionState, _ EmptyEvidence, finish func(), _ error) {
 	if s.o.AdmitDuringAdoption {
-		return nil, EmptyEvidence{}, nil
+		return nil, EmptyEvidence{}, nil, nil
 	}
 	for {
 		ad, st := s.adopting.claim(k)
 		switch decideAdoption(st, cleanStart) {
 		case adoptProceed:
-			return nil, EmptyEvidence{}, nil
+			return nil, EmptyEvidence{}, nil, nil
 		case adoptDiscard:
 			// A clean start discards the session; a sealed copy here goes with
 			// the new session's CONNECT.
 			s.adopting.end(k, ad)
 			s.adoptDiscarded.Add(1)
-			return nil, EmptyEvidence{}, nil
+			return nil, EmptyEvidence{}, nil, nil
 		case adoptFetch:
 			began := time.Now()
 			state, got, wait, _ := s.fetchAdopted(ctx, k, ad, true)
@@ -3773,24 +3934,28 @@ func (s *Service) awaitAdoption(ctx context.Context, k key, cleanStart bool) (*s
 							s.adoptRedirected.Add(1)
 							s.count("hoardmq_lease_ops_total", map[string]string{"op": "acquire", "outcome": "adoption-redirect"}, 1)
 							s.count("hoardmq_connect_refusals_total", map[string]string{"reason": "redirect"}, 1)
-							return nil, EmptyEvidence{}, r
+							return nil, EmptyEvidence{}, nil, r
 						}
 					}
-					return nil, EmptyEvidence{}, &Refusal{Reason: packet.ServerBusy}
+					return nil, EmptyEvidence{}, nil, &Refusal{Reason: packet.ServerBusy}
 				}
 			}
-			s.endAdoption(k, ad)
 			s.adoptedInline.Add(1)
 			s.adoptInlineNs.Add(int64(time.Since(began)))
 			if state != nil {
 				s.noteImport(k, ad, "inline", s.tokens.Seen(k.ns, k.id), checked, time.Now(), time.Now())
-				s.confirmLater(k, ad.job.epoch, ad.job.prev)
+				finish = sync.OnceFunc(func() {
+					s.endAdoption(k, ad)
+					s.confirmLater(k, ad.job.epoch, ad.job.prev)
+				})
+				return state, EmptyEvidence{}, finish, nil
 			}
+			s.endAdoption(k, ad)
 			var ev EmptyEvidence
-			if state == nil && (got == fetchEmpty || got == fetchUnanswered) {
+			if got == fetchEmpty || got == fetchUnanswered {
 				ev = EmptyEvidence{Reason: EmptyAdoption, Owner: ad.job.prev, Token: ad.job.epoch}
 			}
-			return state, ev, nil
+			return nil, ev, nil, nil
 		case adoptWait:
 			began := time.Now()
 			select {
@@ -3800,9 +3965,9 @@ func (s *Service) awaitAdoption(ctx context.Context, k key, cleanStart bool) (*s
 			case <-ctx.Done():
 				s.adoptRefused.Add(1)
 				s.count("hoardmq_lease_ops_total", map[string]string{"op": "acquire", "outcome": "adopting"}, 1)
-				return nil, EmptyEvidence{}, &Refusal{Reason: packet.ServerBusy}
+				return nil, EmptyEvidence{}, nil, &Refusal{Reason: packet.ServerBusy}
 			case <-s.ctx.Done():
-				return nil, EmptyEvidence{}, &Refusal{Reason: packet.ServerUnavailable}
+				return nil, EmptyEvidence{}, nil, &Refusal{Reason: packet.ServerUnavailable}
 			}
 		}
 	}

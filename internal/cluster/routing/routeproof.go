@@ -1,5 +1,7 @@
 package routing
 
+import "time"
+
 // A node may forget a lost owner's routes only while it holds the routes that
 // replace them: those of every member that owns leases, as of the moment that
 // member said, in the lease log, that its adoptions were finished. The log and
@@ -66,13 +68,43 @@ func (p *Plane) noteRoutes(peer string, isFull bool, number uint64) {
 	} else {
 		broke = r.delta(number)
 	}
+	if broke {
+		p.brokeAt[peer] = time.Now()
+	}
 	waited := p.awaitRoutes[peer]
 	wake := waited != 0 && r.holds(waited)
 	p.mu.Unlock()
 	if broke {
-		p.count("hoardmq_route_update_gaps_total", nil, 1)
+		p.count("hoardmq_route_update_gaps_total", map[string]string{"peer": peer}, 1)
 		p.log.Debug("a gap in a peer's route updates; its routes are proved again by its next full set", "peer", peer, "batch", number)
 	}
+	if wake {
+		p.WakeServed()
+	}
+}
+
+// noteFull records a complete set from a peer: its proof is whole up to
+// last, covering cover, when whole; last is the cover for a set in one frame
+// and the end of the chain of deltas received while a set in parts was in
+// flight, which the set's cover alone would move the proof back below.
+func (p *Plane) noteFull(peer string, cover, last uint64, whole bool) {
+	p.mu.Lock()
+	r := p.proofs[peer]
+	if r == nil {
+		r = &routeProof{}
+		p.proofs[peer] = r
+	}
+	r.full(cover)
+	if r.whole {
+		if whole {
+			r.last = max(last, cover)
+		} else {
+			r.whole = false
+		}
+	}
+	waited := p.awaitRoutes[peer]
+	wake := waited != 0 && r.holds(waited)
+	p.mu.Unlock()
 	if wake {
 		p.WakeServed()
 	}
@@ -86,12 +118,18 @@ func (p *Plane) routesHeld(peer string, mark uint64) bool {
 	return p.proofs[peer].holds(mark)
 }
 
-// routeMarkLocked is this node's mark. Callers hold p.mu.
+// routeMarkLocked is this node's mark: it numbers the batches the waiting
+// changes are cut into, which the flusher then sends under those numbers
+// (pending.go). Callers hold p.mu.
 func (p *Plane) routeMarkLocked() uint64 {
-	if len(p.pending) > 0 {
-		return p.batches + 1
+	if p.legacy() {
+		if len(p.pending) > 0 {
+			return p.batches + 1
+		}
+		return p.batches
 	}
-	return p.batches
+	p.numberGroupsLocked()
+	return p.assigned
 }
 
 // RouteMark is how far this node's route updates have gone: every change

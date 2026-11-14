@@ -133,6 +133,10 @@ func IsRetained(typ byte) bool { return extstore.IsRetained(typ) }
 // IsSessionDelete reports whether the record deletes a session.
 func IsSessionDelete(typ byte) bool { return extstore.IsSessionDelete(typ) }
 
+// IsShrinking reports whether a session record only takes from a session: an
+// unsubscribe, or an inbound identifier's removal.
+func IsShrinking(typ byte) bool { return typ == recUnsubscribe || typ == recInboundRemove }
+
 // IsSessionUpsert reports whether a record writes a session's metadata.
 func IsSessionUpsert(typ byte) bool { return extstore.IsSessionUpsert(typ) }
 

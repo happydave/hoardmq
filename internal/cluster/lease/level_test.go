@@ -138,6 +138,10 @@ func TestRaiseTo(t *testing.T) {
 // level, and the raise follows its upgrade.
 func TestLeaderRaisesTheLevelOnceEveryMemberUnderstandsIt(t *testing.T) {
 	names := []string{"n1", "n2", "n3"}
+	// The cluster forms on a build that understands level 1, whatever this
+	// build's constant.
+	fixtureOptions = func(o *Options) { o.BuildLevel = 1 }
+	t.Cleanup(func() { fixtureOptions = nil })
 	c := newCluster(t, names, 400*time.Millisecond, nil)
 	lead := c.settled()
 	c.nodes["n1"].svc.levelPin.Store(2)
@@ -235,6 +239,10 @@ func TestMixedVersionClusterAppliesIdenticallyOrRefuses(t *testing.T) {
 	}}
 	fixtureProbe = j.probe
 	t.Cleanup(func() { fixtureProbe = nil })
+	// The cluster forms on a build that understands level 1, whatever this
+	// build's constant; each node then stands for its build below.
+	fixtureOptions = func(o *Options) { o.BuildLevel = 1 }
+	t.Cleanup(func() { fixtureOptions = nil })
 	names := []string{"n1", "n2", "n3"}
 	c := newCluster(t, names, 400*time.Millisecond, nil)
 	c.settled()

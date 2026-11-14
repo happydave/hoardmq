@@ -10,13 +10,13 @@ import (
 //
 // freePort checks a port by binding 127.0.0.1, but a listener address given
 // through Options.ListenAddrs is on another interface — in the remote-client
-// mode every node listens on 10.231.14.x:8001 — so that bind succeeds and the
+// mode every node listens on 198.51.100.x:8001 — so that bind succeeds and the
 // port can be handed out as a node's cluster address anyway. Nothing clashes
 // on the wire; what breaks is the evidence sampler, which filters `ss` by the
 // cluster's ports and then matches every client connection to every node.
 func TestListenPortsAreNotDrawnAsClusterPorts(t *testing.T) {
 	const port = 8001
-	addrs := []string{"10.231.14.1:8001", "10.231.14.2:8001", "10.231.14.3:8001"}
+	addrs := []string{"198.51.100.1:8001", "198.51.100.2:8001", "198.51.100.3:8001"}
 
 	// Presence first: without the reservation the port is drawable, so the
 	// assertion below is about the reservation and not about 8001 being

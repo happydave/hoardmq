@@ -18,7 +18,7 @@ func inBounds() boundsInput {
 		Hold:       &holdRecord{Seconds: 60},
 		ClientMode: "in-process", StormTarget: "n2", LeaderAfter: "n2",
 	}
-	in.Provenance.Host = "ai2"
+	in.Provenance.Host = boundsHost
 	takeover := 5000
 	in.Provenance.Effective = &boundsEffective{TimingSet: "product", TakeoverTimeoutMs: &takeover}
 	return in
@@ -105,7 +105,7 @@ func TestBoundsTimeJudgedOnlyInConfiguration(t *testing.T) {
 		named string
 	}{
 		{"clients", func(in *boundsInput) { in.Clients = 10_000 }, "10000 clients, not 100000"},
-		{"host", func(in *boundsInput) { in.Provenance.Host = "ai" }, `host "ai", not ai2`},
+		{"host", func(in *boundsInput) { in.Provenance.Host = "host-a" }, `host "host-a", not ` + boundsHost},
 		{"timings", func(in *boundsInput) { in.Provenance.Effective.TimingSet = "harness (stress)" }, `timings "harness (stress)", not product`},
 		{"no timings", func(in *boundsInput) { in.Provenance.Effective = nil }, `timings "", not product`},
 		{"remote clients", func(in *boundsInput) { in.ClientMode = "remote" }, `clients "remote", not in-process`},
@@ -317,7 +317,7 @@ func TestBoundsInputDecodesFromTheArtifact(t *testing.T) {
 		SubDowngraded: want.SubDowngraded, SessionLost: want.SessionLost, SessionLostClients: want.SessionLostClients,
 		Probe: want.Probe, Hold: want.Hold, ClientMode: want.ClientMode, StormTarget: want.StormTarget,
 		LeaderAfter: want.LeaderAfter,
-		Provenance:  Provenance{Host: "ai2", Effective: &Effective{TimingSet: "product", TakeoverTimeoutMs: 5000}},
+		Provenance:  Provenance{Host: boundsHost, Effective: &Effective{TimingSet: "product", TakeoverTimeoutMs: 5000}},
 	}
 	raw, err := json.Marshal(art)
 	if err != nil {
@@ -451,7 +451,7 @@ func TestAProductRecordWithoutItsTimeoutsIsNoted(t *testing.T) {
 	var old boundsInput
 	raw := []byte(`{"clients":100000,"recovery_sec":33.6,"probe":{"attempts":9300,"acked":5900},"hold":{"seconds":60},
 		"client_mode":"in-process","storm_target":"n2","leader_after":"n2",
-		"provenance":{"host":"ai2","effective":{"timing_set":"product","heartbeat_ms":1000}}}`)
+		"provenance":{"host":"` + boundsHost + `","effective":{"timing_set":"product","heartbeat_ms":1000}}}`)
 	if err := json.Unmarshal(raw, &old); err != nil {
 		t.Fatal(err)
 	}
